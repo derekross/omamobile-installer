@@ -1,0 +1,19 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Refuse identifiers of a real phone or person in tracked files: MAC and
+# Bluetooth addresses, IMEIs, and a builder's home directory. The published
+# release key under fixtures/published/ is the one file that names a person,
+# and it is public by design.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+fail=0
+check() {   # check NAME REGEX
+  local hits
+  hits=$(git ls-files -z -- . ':!Cargo.lock' ':!fixtures/' ':!tools/check-identifiers' |
+         xargs -0 grep -nIE -- "$2" 2>/dev/null || true)
+  if [[ -n $hits ]]; then printf 'not ok - %s:\n%s\n' "$1" "$hits"; fail=1; else printf 'ok - no %s\n' "$1"; fi
+}
+check "MAC or Bluetooth addresses" '\b[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}\b'
+check "IMEIs" '\b[0-9]{15}\b'
+check "home directories" '/home/[a-z][a-z0-9_-]+/'
+exit "$fail"

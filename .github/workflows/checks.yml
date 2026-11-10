@@ -1,0 +1,35 @@
+# The gate for every push and pull request: no identifiers, formatted, the
+# core's tests against the fake phone, and the web build still compiles.
+# Nothing here touches a USB device: the tests use a fake transport.
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Identifiers, format, tests, web build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: No identifiers
+        run: tools/check-identifiers
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lints (errors fail; warnings are listed)
+        run: cargo clippy --locked
+      - name: Tests (the core, against the fake phone)
+        run: cargo test --locked
+      - name: The web build compiles
+        run: cargo check --locked -p omamobile-installer-web --target wasm32-unknown-unknown
