@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: MIT
+//! Spike: the shared core of the Omarchy Mobile installer.
+//!
+//! One crate, built natively (the CLI, a desktop app) and to WebAssembly (the
+//! web flasher). It holds every rule that decides what may be written to a
+//! phone, so no front end can widen them:
+//!
+//! - [`manifest`], [`device_conf`]: `manifest.json` and `device.conf` as data,
+//!   checked against the same rules as `tools/install-phone`;
+//! - [`signature`], [`bundle`]: the release key's signature on `SHA256SUMS`,
+//!   then every checksum, giving a [`bundle::VerifiedRelease`];
+//! - [`fastboot`]: the protocol over a [`fastboot::Transport`], reachable only
+//!   through [`fastboot::Session`], which can write nothing but the verified
+//!   release's `<image>_b` partitions and `userdata`;
+//! - [`sparse`], [`zstd_push`], [`install`]: the root image, decompressed and
+//!   cut into Android sparse images no larger than the phone's
+//!   `max-download-size`, without holding the image in memory.
+//!
+//! Nothing here does I/O on its own: bytes come in from the caller, and the
+//! only way out is the transport trait.
+
+pub mod bundle;
+pub mod device_conf;
+pub mod error;
+pub mod fastboot;
+pub mod hash;
+pub mod install;
+pub mod manifest;
+pub mod signature;
+pub mod sparse;
+pub mod zstd_push;
+
+pub use error::Error;
+pub type Result<T> = core::result::Result<T, Error>;

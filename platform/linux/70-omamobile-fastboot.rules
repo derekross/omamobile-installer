@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Lets the person at the computer open a Google phone in fastboot mode (the
+# installer app, or a Chromium-based browser for the web flasher) without root.
+#
+# systemd 262's own 70-uaccess.rules already does this for every device with a
+# fastboot interface (ID_DEBUG_APPLIANCE=android, then TAG+="uaccess"), so on a
+# current Arch or Omarchy this file changes nothing. It is for distributions
+# whose systemd doesn't carry that rule yet. Untested in this spike.
+#
+# Matches the interface, not a product ID: vendor class 0xff, subclass 0x42,
+# protocol 0x03 is fastboot (AOSP system/core/fastboot/fastboot.cpp). Sorted
+# after 50-udev-default.rules (which sets ID_USB_INTERFACES) and before
+# 73-seat-late.rules (which turns the uaccess tag into an ACL).
+ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="18d1", ENV{ID_USB_INTERFACES}=="*:ff4203:*", TAG+="uaccess"

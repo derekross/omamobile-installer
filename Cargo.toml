@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["core", "usb", "cli", "web"]
+# web builds only for wasm32-unknown-unknown (web/build.sh)
+default-members = ["core", "usb", "cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

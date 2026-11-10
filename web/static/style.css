@@ -1,0 +1,11 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.5; }
+main { max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+h1 small { font-weight: normal; opacity: 0.6; }
+section { border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent); padding-top: 0.5rem; }
+.pending { opacity: 0.6; }
+.ok::before { content: "ok  "; font-weight: bold; }
+.bad { color: #c22; }
+.bad::before { content: "refused  "; font-weight: bold; }
+ul { padding-left: 1.2rem; font-family: ui-monospace, monospace; font-size: 0.9rem; }
+pre { white-space: pre-wrap; }
+button { font: inherit; padding: 0.4rem 0.8rem; }

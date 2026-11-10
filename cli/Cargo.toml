@@ -1,0 +1,16 @@
+[package]
+name = "omamobile-installer-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "omamobile-install"
+path = "src/main.rs"
+
+[dependencies]
+omamobile-installer-core = { path = "../core" }
+omamobile-installer-usb = { path = "../usb" }
+nusb = "0.2"
+pollster = "1"

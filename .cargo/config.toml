@@ -1,0 +1,4 @@
+# WebUSB in web-sys is behind this cfg (web-sys "unstable APIs"); nusb's
+# WebUSB backend needs it too. It only affects the wasm target.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

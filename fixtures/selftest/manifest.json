@@ -1,0 +1,120 @@
+{
+  "device": {
+    "codename": "cheetah",
+    "name": "Pixel 7 Pro"
+  },
+  "files": [
+    {
+      "path": "MANIFEST",
+      "sha256": "2ba82bffb88f75298d92ce6a72bc86c80ce536b0f3423a167437cb2df7b37806",
+      "size": 194
+    },
+    {
+      "path": "device.conf",
+      "sha256": "6b01fb29b00e4fae0b2d5f473f75334aed31b27a01d5cce8afa9b639020cedf7",
+      "size": 277
+    },
+    {
+      "path": "images/boot.img",
+      "sha256": "de7f913bd32e101b8c79cedcb009427d58dd3801c31a4cc324bbf15c20bd0191",
+      "size": 16384
+    },
+    {
+      "path": "images/init_boot.img",
+      "sha256": "25daeef7cbe87de76f45f7d160723ca73407c1375473bbffb78fc8b438cc4881",
+      "size": 8192
+    },
+    {
+      "path": "images/vendor_boot.img",
+      "sha256": "2fa14f4e4819e5eeefa2f614ba5cfb5a2d84414177a3dfa175fa732d79ad60e2",
+      "size": 4096
+    },
+    {
+      "path": "images/vendor_kernel_boot.img",
+      "sha256": "989008d015571680dd228a3e2b11a19a2995bb98dd8a160edb90d9ee293a321b",
+      "size": 12288
+    },
+    {
+      "path": "images/dtbo.img",
+      "sha256": "06f3da0c0747db3d737fe6f2ed329ccc0c4da090e4619948cb022e1cca00bf15",
+      "size": 4096
+    },
+    {
+      "path": "omamobile.gpg",
+      "sha256": "f8a75813ac9ec0139230c0af69002933080dd1bcad4c84f029d9b5419d08123c",
+      "size": 215
+    }
+  ],
+  "format": 1,
+  "install": {
+    "after": [
+      "set-active b",
+      "reboot"
+    ],
+    "never": [
+      "slot A (any *_a partition)"
+    ],
+    "product": "cheetah",
+    "require_matching_bootloader_slots": true,
+    "require_unlocked_bootloader": true,
+    "storage_guard_allowlist": [
+      "boot_b",
+      "init_boot_b",
+      "vendor_boot_b",
+      "vendor_kernel_boot_b",
+      "dtbo_b",
+      "userdata"
+    ],
+    "tool": "fastboot",
+    "writes": [
+      {
+        "partition": "boot_b",
+        "partition_size": 16384,
+        "size": 16384,
+        "source": "images/boot.img"
+      },
+      {
+        "partition": "init_boot_b",
+        "partition_size": 8192,
+        "size": 8192,
+        "source": "images/init_boot.img"
+      },
+      {
+        "partition": "vendor_boot_b",
+        "partition_size": null,
+        "size": 4096,
+        "source": "images/vendor_boot.img"
+      },
+      {
+        "partition": "vendor_kernel_boot_b",
+        "partition_size": null,
+        "size": 12288,
+        "source": "images/vendor_kernel_boot.img"
+      },
+      {
+        "partition": "dtbo_b",
+        "partition_size": null,
+        "size": 4096,
+        "source": "images/dtbo.img"
+      },
+      {
+        "erases_userdata": true,
+        "partition": "userdata",
+        "source": "root_image"
+      }
+    ]
+  },
+  "kernel": {
+    "commit": "000000000000",
+    "release": "7.3.0-test"
+  },
+  "label": "test",
+  "name": "Omarchy Mobile",
+  "root_image": {
+    "compression": "zstd",
+    "name": "omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst",
+    "sha256": "20a4e3f73bf7dd0fb5f0235c22367c03e48a68e3d3d2b48c7be7c7946b79f82a",
+    "size": 1597234
+  },
+  "version": "2026.01.02"
+}

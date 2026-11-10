@@ -1,0 +1,28 @@
+[package]
+name = "omamobile-installer-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["openpgp"]
+openpgp = ["omamobile-installer-core/openpgp"]
+# Builds the fake phone from core/tests/support into the module so a headless
+# browser can run an install against it. Never in a release build.
+selftest = []
+# Without this, every session on a real phone is a dry run (see src/lib.rs).
+enable-writes = []
+
+[dependencies]
+omamobile-installer-core = { path = "../core", default-features = false }
+omamobile-installer-usb = { path = "../usb" }
+nusb = "0.2"
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Navigator", "Window", "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions"] }

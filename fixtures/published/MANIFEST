@@ -1,0 +1,23 @@
+# Omarchy Mobile 2026.11.08 (developer preview) for Pixel 7 Pro (cheetah)
+version: 2026.11.08
+label: developer preview
+device: cheetah
+kernel release: 7.3.0-rc6-omamobile-g1a9d1d4e9289
+kernel commit (linux-omarchy-mobile): 1a9d1d4e9289
+omarchy-mobile commit: 71b47a6a4a19
+root image: omamobile-rootfs-cheetah-2026.11.08-aarch64.img.zst (3a5546e7b805e034370f162a4e3f5bafc1c13cfe52315eb73fc81c70678eb145)
+omamobile channel: stable
+
+# toolchain
+clang: Android (15071444, +pgo, +bolt, +lto, +mlgo, based on r596125) clang version 22.0.2 (https://android.googlesource.com/toolchain/llvm-project de03d430485c884861198b25459851f429cbdbad)
+clang source: pinned (tools/toolchain.lock), clang-r596125
+mkbootimg.py: sha256 37d84b3d162e0bc62e36c1f4e1c63c85ea0caa9f29be023eb2f8efe006ad948c
+mkdtboimg.py: sha256 81656c0e344ad2c9e7bdc6775015b38dec2bc2965d482e903fdb4dbd293110a6
+avbtool.py: avbtool 1.4.0, sha256 1aa6f2b462aa67aa3fdf488bee83ab517de8ad9d8228c7b45c35267ab2cf6781
+
+# boot images
+4c3a233110f7028bd611d553136ad642a6421b1071a6bda65a34fffc2b6d263d  boot.img
+c9a0f1ec969b2e840176647ef641df2f5bcefbbcf8a87b75bef587a953bb88b3  dtbo.img
+b63d038b19b6df7c5683b0b76d1341b73c2c5e34740f52c2bb50d4c2e00eee7c  init_boot.img
+0dc407719e1c15205209c720232f04b9ce0c0408f81d247c4f7bf888041912e9  vendor_boot.img
+9b72237f3158bdf872745d4d7b1ce34401dd6b94ea9489c8675f58e09f0548cf  vendor_kernel_boot.img

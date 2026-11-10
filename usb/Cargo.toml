@@ -1,0 +1,11 @@
+[package]
+name = "omamobile-installer-usb"
+description = "Spike: the fastboot transport over USB, one implementation for Linux, Windows, macOS and WebUSB (nusb)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+omamobile-installer-core = { path = "../core", default-features = false }
+nusb = "0.2"

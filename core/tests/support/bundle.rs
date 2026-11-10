@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: MIT
+//! Builds small signed release bundles for the tests: the published layout
+//! (docs/RELEASES.md §6) with tiny images, signed by a key made on the spot.
+//! A test changes the manifest or the descriptor before signing, so every
+//! refusal is tested on a bundle whose signature and checksums are valid.
+#![allow(dead_code)]
+use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
+use omamobile_installer_core::hash::sha256_hex;
+use omamobile_installer_core::signature::TrustedKeys;
+use omamobile_installer_core::Result;
+use pgp::composed::{DetachedSignature, KeyType, SecretKeyParamsBuilder};
+use pgp::crypto::hash::HashAlgorithm;
+use pgp::ser::Serialize;
+use pgp::types::{KeyDetails, Password};
+use serde_json::{json, Value};
+
+pub const IMAGES: [(&str, usize, Option<usize>); 5] = [("boot", 16 << 10, Some(16 << 10)), ("init_boot", 8 << 10, Some(8 << 10)), ("vendor_boot", 4 << 10, None), ("vendor_kernel_boot", 12 << 10, None), ("dtbo", 4 << 10, None)];
+pub const ROOT_NAME: &str = "omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst";
+
+pub struct TestBundle {
+    pub sums: Vec<u8>,
+    pub sig: Vec<u8>,
+    pub keyring: Vec<u8>,
+    pub manifest_json: Vec<u8>,
+    pub manifest_txt: Vec<u8>,
+    pub device_conf: Vec<u8>,
+    pub images: Vec<(String, Vec<u8>)>,
+    pub root_raw: Vec<u8>,
+    pub root_zst: Vec<u8>,
+    pub fingerprint: String,
+}
+
+/// Deterministic noise.
+pub fn noise(seed: u32, len: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(2654435761).max(1);
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 8) as u8
+        })
+        .collect()
+}
+
+/// A 2 MiB "root image": zero runs, a repeated word, noise, and blocks that
+/// only look uniform.
+pub fn root_image() -> Vec<u8> {
+    let b = 4096;
+    let mut img = vec![0u8; 512 * b];
+    img[64 * b..96 * b].copy_from_slice(&noise(1, 32 * b));
+    for w in img[96 * b..100 * b].chunks_exact_mut(4) {
+        w.copy_from_slice(&0xdead_beef_u32.to_le_bytes());
+    }
+    img[100 * b..300 * b].copy_from_slice(&noise(2, 200 * b));
+    // 300..400 stay zero; then blocks that are zero but for their last byte
+    for i in 400..420 {
+        img[(i + 1) * b - 1] = 1;
+    }
+    img[420 * b..511 * b].copy_from_slice(&noise(3, 91 * b));
+    img[511 * b..].fill(0x11);
+    img
+}
+
+/// A valid zstd frame of raw and RLE blocks, with the content size in its
+/// header (RFC 8878 §3.1.1): enough to drive the decoder's framing without
+/// a compressor. Compressed blocks are covered by the zstd-made fixture.
+pub fn zstd_store(data: &[u8], with_size: bool) -> Vec<u8> {
+    let mut out = vec![0x28, 0xb5, 0x2f, 0xfd];
+    if with_size {
+        out.push(0xc0); // 8-byte content size, a window descriptor, no checksum
+        out.push(0x50); // window 1 MiB
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    } else {
+        out.extend_from_slice(&[0x00, 0x50]);
+    }
+    let pieces: Vec<&[u8]> = data.chunks(100_000).collect();
+    for (i, piece) in pieces.iter().enumerate() {
+        let last = u32::from(i + 1 == pieces.len());
+        let rle = piece.iter().all(|b| *b == piece[0]);
+        let header = ((piece.len() as u32) << 3) | (u32::from(rle) << 1) | last;
+        out.extend_from_slice(&header.to_le_bytes()[..3]);
+        if rle {
+            out.push(piece[0]);
+        } else {
+            out.extend_from_slice(piece);
+        }
+    }
+    out
+}
+
+pub fn default_conf() -> String {
+    ["# test descriptor", "CODENAME=cheetah", "NAME=\"Pixel 7 Pro\"", "SOC_IDS=\"b0:0x9855001 a0:0x9855000\"", "AVB_FOOTERS=\"boot:0x4000 init_boot:0x2000\"", "BOOT_IMAGES=\"boot init_boot vendor_boot vendor_kernel_boot dtbo\"", "UFS_RW=\"boot_b init_boot_b vendor_boot_b vendor_kernel_boot_b dtbo_b userdata\"", ""].join("\n")
+}
+
+impl TestBundle {
+    pub fn new() -> Self {
+        Self::build(|_| {}, |c| c)
+    }
+
+    /// `edit` changes manifest.json and `conf` the descriptor, both before
+    /// the checksums are taken and signed.
+    pub fn build(edit: impl FnOnce(&mut Value), conf: impl FnOnce(String) -> String) -> Self {
+        let images: Vec<(String, Vec<u8>)> = IMAGES.iter().enumerate().map(|(i, (name, size, _))| (name.to_string(), noise(100 + i as u32, *size))).collect();
+        let root_raw = root_image();
+        let root_zst = zstd_store(&root_raw, true);
+        let device_conf = conf(default_conf()).into_bytes();
+        let manifest_txt = format!("version: 2026.01.02\ndevice: cheetah\nkernel release: 7.3.0-test\nroot image: {ROOT_NAME} ({})\n", sha256_hex(&root_zst)).into_bytes();
+
+        // The key: Ed25519 in the v4 format, as the release key is
+        let mut rng = rand::thread_rng();
+        let params = SecretKeyParamsBuilder::default().key_type(KeyType::Ed25519Legacy).can_sign(true).can_certify(true).primary_user_id("Installer spike test key".into()).build().expect("key params");
+        let secret = params.generate(&mut rng).expect("key generation");
+        let public = secret.to_public_key();
+        let keyring = public.to_bytes().expect("serialize the key");
+        let fingerprint = format!("{:X}", public.primary_key.fingerprint());
+
+        let mut files: Vec<(String, Vec<u8>)> = vec![("MANIFEST".into(), manifest_txt.clone()), ("device.conf".into(), device_conf.clone())];
+        files.extend(images.iter().map(|(n, d)| (format!("images/{n}.img"), d.clone())));
+        files.push(("omamobile.gpg".into(), keyring.clone()));
+
+        let mut writes: Vec<Value> = IMAGES.iter().map(|(name, size, psize)| json!({"partition": format!("{name}_b"), "partition_size": psize, "size": size, "source": format!("images/{name}.img")})).collect();
+        writes.push(json!({"erases_userdata": true, "partition": "userdata", "source": "root_image"}));
+        let mut manifest = json!({
+            "format": 1, "version": "2026.01.02", "label": "test", "name": "Omarchy Mobile",
+            "device": {"codename": "cheetah", "name": "Pixel 7 Pro"},
+            "kernel": {"commit": "000000000000", "release": "7.3.0-test"},
+            "files": files.iter().map(|(p, d)| json!({"path": p, "sha256": sha256_hex(d), "size": d.len()})).collect::<Vec<_>>(),
+            "root_image": {"compression": "zstd", "name": ROOT_NAME, "sha256": sha256_hex(&root_zst), "size": root_zst.len()},
+            "install": {
+                "tool": "fastboot", "product": "cheetah",
+                "require_unlocked_bootloader": true, "require_matching_bootloader_slots": true,
+                "storage_guard_allowlist": ["boot_b", "init_boot_b", "vendor_boot_b", "vendor_kernel_boot_b", "dtbo_b", "userdata"],
+                "never": ["slot A (any *_a partition)"],
+                "writes": writes,
+                "after": ["set-active b", "reboot"],
+            },
+        });
+        edit(&mut manifest);
+        let manifest_json = serde_json::to_vec_pretty(&manifest).unwrap();
+        files.push(("manifest.json".into(), manifest_json.clone()));
+        files.sort();
+        let sums: Vec<u8> = files.iter().map(|(p, d)| format!("{}  {p}\n", sha256_hex(d))).collect::<String>().into_bytes();
+        let sig = DetachedSignature::sign_binary_data(&mut rng, &secret.primary_key, &Password::empty(), HashAlgorithm::Sha512, &sums[..]).expect("sign").to_bytes().expect("serialize the signature");
+
+        TestBundle { sums, sig, keyring, manifest_json, manifest_txt, device_conf, images, root_raw, root_zst, fingerprint }
+    }
+
+    pub fn files(&self) -> ReleaseFiles<'_> {
+        ReleaseFiles { sha256sums: &self.sums, sha256sums_sig: &self.sig, keyring: &self.keyring, manifest_json: &self.manifest_json, manifest_txt: &self.manifest_txt, device_conf: &self.device_conf }
+    }
+
+    pub fn trusted(&self) -> TrustedKeys {
+        TrustedKeys::new(&[&self.fingerprint]).unwrap()
+    }
+
+    pub fn verify(&self) -> Result<VerifiedRelease> {
+        verify_release(&self.files(), &self.trusted())
+    }
+
+    pub fn image(&self, name: &str) -> &[u8] {
+        &self.images.iter().find(|(n, _)| n == name).unwrap().1
+    }
+}
