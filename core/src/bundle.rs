@@ -66,12 +66,16 @@ pub struct RootImageCheck {
 }
 
 fn parse_sums(text: &[u8]) -> Result<Vec<(String, String)>> {
-    let text = core::str::from_utf8(text).map_err(|_| Error::Checksum("SHA256SUMS is not UTF-8".into()))?;
+    let text = core::str::from_utf8(text)
+        .map_err(|_| Error::Checksum("SHA256SUMS is not UTF-8".into()))?;
     let mut out: Vec<(String, String)> = Vec::new();
     for line in text.lines().filter(|l| !l.is_empty()) {
         let bad = || Error::Checksum(format!("SHA256SUMS: not a checksum line: {line}"));
         let (digest, rest) = line.split_at_checked(64).ok_or_else(bad)?;
-        let path = rest.strip_prefix("  ").or_else(|| rest.strip_prefix(" *")).ok_or_else(bad)?;
+        let path = rest
+            .strip_prefix("  ")
+            .or_else(|| rest.strip_prefix(" *"))
+            .ok_or_else(bad)?;
         let path = path.strip_prefix("./").unwrap_or(path);
         if !is_sha256_hex(digest) || path.is_empty() {
             return Err(bad());
@@ -85,17 +89,26 @@ fn parse_sums(text: &[u8]) -> Result<Vec<(String, String)>> {
 }
 
 fn manifest_txt_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(": "))
+    text.lines()
+        .find_map(|l| l.strip_prefix(key)?.strip_prefix(": "))
 }
 
 pub fn verify_release(files: &ReleaseFiles<'_>, trusted: &TrustedKeys) -> Result<VerifiedRelease> {
     // 1. The signature, before anything in the bundle is believed
-    let signer = verify_detached(files.keyring, files.sha256sums_sig, files.sha256sums, trusted)?;
+    let signer = verify_detached(
+        files.keyring,
+        files.sha256sums_sig,
+        files.sha256sums,
+        trusted,
+    )?;
 
     // 2. The signed checksums cover the three files the rules come from
     let sums = parse_sums(files.sha256sums)?;
     let covered = |path: &str, bytes: &[u8]| -> Result<()> {
-        let want = sums.iter().find(|(p, _)| p == path).ok_or_else(|| Error::Checksum(format!("the signed checksums don't cover {path}")))?;
+        let want = sums
+            .iter()
+            .find(|(p, _)| p == path)
+            .ok_or_else(|| Error::Checksum(format!("the signed checksums don't cover {path}")))?;
         if sha256_hex(bytes) != want.1 {
             return Err(Error::Checksum(format!("{path} doesn't match SHA256SUMS")));
         }
@@ -109,37 +122,64 @@ pub fn verify_release(files: &ReleaseFiles<'_>, trusted: &TrustedKeys) -> Result
     let manifest = Manifest::parse(files.manifest_json)?;
     manifest.check_descriptor(&DeviceConf::parse(files.device_conf)?)?;
     if !is_calendar_version(&manifest.version) {
-        return Err(Error::Manifest(format!("a signed release is versioned by the calendar (YYYY.MM.DD), not {}", manifest.version)));
+        return Err(Error::Manifest(format!(
+            "a signed release is versioned by the calendar (YYYY.MM.DD), not {}",
+            manifest.version
+        )));
     }
 
     // 4. manifest.json lists exactly the files SHA256SUMS covers
     for f in &manifest.files {
         match sums.iter().find(|(p, _)| *p == f.path) {
             Some((_, d)) if *d == f.sha256 => {}
-            Some(_) => return Err(Error::Checksum(format!("manifest.json and SHA256SUMS disagree on {}", f.path))),
-            None => return Err(Error::Checksum(format!("manifest.json lists {}, which SHA256SUMS doesn't cover", f.path))),
+            Some(_) => {
+                return Err(Error::Checksum(format!(
+                    "manifest.json and SHA256SUMS disagree on {}",
+                    f.path
+                )))
+            }
+            None => {
+                return Err(Error::Checksum(format!(
+                    "manifest.json lists {}, which SHA256SUMS doesn't cover",
+                    f.path
+                )))
+            }
         }
     }
     for (p, _) in &sums {
         if p != "manifest.json" && !manifest.files.iter().any(|f| f.path == *p) {
-            return Err(Error::Checksum(format!("SHA256SUMS covers {p}, which manifest.json doesn't list")));
+            return Err(Error::Checksum(format!(
+                "SHA256SUMS covers {p}, which manifest.json doesn't list"
+            )));
         }
     }
 
     // 5. The signed MANIFEST names the same root image and kernel
-    let txt = core::str::from_utf8(files.manifest_txt).map_err(|_| Error::Manifest("MANIFEST is not UTF-8".into()))?;
-    let want_root = format!("{} ({})", manifest.root_image.name, manifest.root_image.sha256);
+    let txt = core::str::from_utf8(files.manifest_txt)
+        .map_err(|_| Error::Manifest("MANIFEST is not UTF-8".into()))?;
+    let want_root = format!(
+        "{} ({})",
+        manifest.root_image.name, manifest.root_image.sha256
+    );
     if manifest_txt_value(txt, "root image") != Some(want_root.as_str()) {
-        return Err(Error::Manifest("manifest.json and MANIFEST name different root images".into()));
+        return Err(Error::Manifest(
+            "manifest.json and MANIFEST name different root images".into(),
+        ));
     }
     if manifest_txt_value(txt, "kernel release") != Some(manifest.kernel_release.as_str()) {
-        return Err(Error::Manifest("manifest.json and MANIFEST name different kernels".into()));
+        return Err(Error::Manifest(
+            "manifest.json and MANIFEST name different kernels".into(),
+        ));
     }
     if manifest_txt_value(txt, "device").is_some_and(|d| d != manifest.codename) {
         return Err(Error::Manifest("MANIFEST is for another device".into()));
     }
 
-    Ok(VerifiedRelease { manifest, signer, id: sha256_hex(files.manifest_json) })
+    Ok(VerifiedRelease {
+        manifest,
+        signer,
+        id: sha256_hex(files.manifest_json),
+    })
 }
 
 impl VerifiedRelease {
@@ -155,27 +195,62 @@ impl VerifiedRelease {
 
     /// Any bundle file against the signed manifest (size, then SHA-256).
     pub fn check_file(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        let f = self.manifest.files.iter().find(|f| f.path == path).ok_or_else(|| Error::Checksum(format!("{path} is not a file of this release")))?;
+        let f = self
+            .manifest
+            .files
+            .iter()
+            .find(|f| f.path == path)
+            .ok_or_else(|| Error::Checksum(format!("{path} is not a file of this release")))?;
         if bytes.len() as u64 != f.size {
-            return Err(Error::Checksum(format!("{path} is {} bytes, not {}", bytes.len(), f.size)));
+            return Err(Error::Checksum(format!(
+                "{path} is {} bytes, not {}",
+                bytes.len(),
+                f.size
+            )));
         }
         if sha256_hex(bytes) != f.sha256 {
-            return Err(Error::Checksum(format!("{path} doesn't match the signed manifest")));
+            return Err(Error::Checksum(format!(
+                "{path} doesn't match the signed manifest"
+            )));
         }
         Ok(())
     }
 
     /// The bytes of one of the plan's boot images, checked.
-    pub fn verify_boot_image<'a>(&self, write: &BootWrite, bytes: &'a [u8]) -> Result<VerifiedImage<'a>> {
-        let index = self.manifest.boot_writes.iter().position(|w| w == write).ok_or_else(|| Error::Refused(format!("{} is not a write of this release", write.partition.name())))?;
+    pub fn verify_boot_image<'a>(
+        &self,
+        write: &BootWrite,
+        bytes: &'a [u8],
+    ) -> Result<VerifiedImage<'a>> {
+        let index = self
+            .manifest
+            .boot_writes
+            .iter()
+            .position(|w| w == write)
+            .ok_or_else(|| {
+                Error::Refused(format!(
+                    "{} is not a write of this release",
+                    write.partition.name()
+                ))
+            })?;
         self.check_file(&write.source, bytes)?;
-        Ok(VerifiedImage { release: self.id.clone(), index, bytes })
+        Ok(VerifiedImage {
+            release: self.id.clone(),
+            index,
+            bytes,
+        })
     }
 
     /// Start hashing the compressed root image.
     pub fn root_image_check(&self) -> RootImageCheck {
         let r = &self.manifest.root_image;
-        RootImageCheck { release: self.id.clone(), name: r.name.clone(), sha256: r.sha256.clone(), size: r.size, hasher: StreamHasher::new() }
+        RootImageCheck {
+            release: self.id.clone(),
+            name: r.name.clone(),
+            sha256: r.sha256.clone(),
+            size: r.size,
+            hasher: StreamHasher::new(),
+        }
     }
 }
 
@@ -186,11 +261,20 @@ impl RootImageCheck {
     pub fn finish(self) -> Result<VerifiedRootImage> {
         let (digest, len) = self.hasher.finish();
         if self.size.is_some_and(|s| s != len) {
-            return Err(Error::Checksum(format!("{} is {len} bytes, not {}", self.name, self.size.unwrap_or(0))));
+            return Err(Error::Checksum(format!(
+                "{} is {len} bytes, not {}",
+                self.name,
+                self.size.unwrap_or(0)
+            )));
         }
         if digest != self.sha256 {
-            return Err(Error::Checksum(format!("{} doesn't match the signed manifest", self.name)));
+            return Err(Error::Checksum(format!(
+                "{} doesn't match the signed manifest",
+                self.name
+            )));
         }
-        Ok(VerifiedRootImage { release: self.release })
+        Ok(VerifiedRootImage {
+            release: self.release,
+        })
     }
 }

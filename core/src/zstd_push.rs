@@ -63,7 +63,11 @@ pub fn frame_info(data: &[u8]) -> Result<Option<FrameInfo>> {
         4 => Some(u32::from_le_bytes(f.try_into().unwrap()) as u64),
         _ => Some(u64::from_le_bytes(f.try_into().unwrap())),
     };
-    Ok(Some(FrameInfo { header_len, content_size, has_checksum: fhd & 0x04 != 0 }))
+    Ok(Some(FrameInfo {
+        header_len,
+        content_size,
+        has_checksum: fhd & 0x04 != 0,
+    }))
 }
 
 pub struct ZstdPush {
@@ -87,7 +91,15 @@ impl ZstdPush {
     pub fn new() -> Self {
         let mut dec = FrameDecoder::new();
         dec.set_max_window_size(MAX_WINDOW);
-        Self { dec, buf: Vec::new(), off: 0, info: None, finished: false, produced: 0, scratch: vec![0; MAX_BLOCK] }
+        Self {
+            dec,
+            buf: Vec::new(),
+            off: 0,
+            info: None,
+            finished: false,
+            produced: 0,
+            scratch: vec![0; MAX_BLOCK],
+        }
     }
 
     /// Known once the first bytes have been pushed.
@@ -101,7 +113,10 @@ impl ZstdPush {
 
     fn drain(&mut self, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
         loop {
-            let n = self.dec.read(&mut self.scratch).map_err(|e| Error::Zstd(e.to_string()))?;
+            let n = self
+                .dec
+                .read(&mut self.scratch)
+                .map_err(|e| Error::Zstd(e.to_string()))?;
             if n == 0 {
                 return Ok(());
             }
@@ -126,11 +141,19 @@ impl ZstdPush {
     /// is gigabytes of image.
     pub fn step(&mut self, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<bool> {
         if self.finished {
-            return if self.off == self.buf.len() { Ok(false) } else { Err(Error::Zstd("data after the end of the frame".into())) };
+            return if self.off == self.buf.len() {
+                Ok(false)
+            } else {
+                Err(Error::Zstd("data after the end of the frame".into()))
+            };
         }
         if self.info.is_none() {
-            let Some(info) = frame_info(&self.buf)? else { return Ok(false) };
-            self.dec.init(&self.buf[..info.header_len]).map_err(|e| Error::Zstd(e.to_string()))?;
+            let Some(info) = frame_info(&self.buf)? else {
+                return Ok(false);
+            };
+            self.dec
+                .init(&self.buf[..info.header_len])
+                .map_err(|e| Error::Zstd(e.to_string()))?;
             self.off = info.header_len;
             self.info = Some(info);
         }
@@ -154,16 +177,25 @@ impl ZstdPush {
         if avail.len() < need {
             return Ok(false);
         }
-        let done = self.dec.decode_blocks(&avail[..need], BlockDecodingStrategy::UptoBlocks(1)).map_err(|e| Error::Zstd(e.to_string()))?;
+        let done = self
+            .dec
+            .decode_blocks(&avail[..need], BlockDecodingStrategy::UptoBlocks(1))
+            .map_err(|e| Error::Zstd(e.to_string()))?;
         self.off += need;
         self.drain(sink)?;
         if done != last {
-            return Err(Error::Zstd("the decoder and the block headers disagree on the frame's end".into()));
+            return Err(Error::Zstd(
+                "the decoder and the block headers disagree on the frame's end".into(),
+            ));
         }
         if done {
             self.finished = true;
-            if has_checksum && self.dec.get_checksum_from_data() != self.dec.get_calculated_checksum() {
-                return Err(Error::Zstd("the frame's checksum doesn't match its content".into()));
+            if has_checksum
+                && self.dec.get_checksum_from_data() != self.dec.get_calculated_checksum()
+            {
+                return Err(Error::Zstd(
+                    "the frame's checksum doesn't match its content".into(),
+                ));
             }
             if self.off != self.buf.len() {
                 return Err(Error::Zstd("data after the end of the frame".into()));
@@ -188,7 +220,10 @@ impl ZstdPush {
         }
         if let Some(want) = self.info.and_then(|i| i.content_size) {
             if want != self.produced {
-                return Err(Error::Zstd(format!("decompressed to {} bytes, not the {want} its header states", self.produced)));
+                return Err(Error::Zstd(format!(
+                    "decompressed to {} bytes, not the {want} its header states",
+                    self.produced
+                )));
             }
         }
         Ok(self.produced)

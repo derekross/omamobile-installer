@@ -18,7 +18,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 pub fn is_sha256_hex(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// SHA-256 over a stream, with the byte count.

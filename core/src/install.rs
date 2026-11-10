@@ -29,7 +29,15 @@ pub struct UserdataStream {
 impl UserdataStream {
     /// `max_segment`: the phone's `max-download-size`, or a smaller cap.
     pub fn new(max_segment: u64) -> Self {
-        Self { zstd: ZstdPush::new(), sparse: None, max_segment, head: Vec::new(), image_len: None, ready: Vec::new(), ended: false }
+        Self {
+            zstd: ZstdPush::new(),
+            sparse: None,
+            max_segment,
+            head: Vec::new(),
+            image_len: None,
+            ready: Vec::new(),
+            ended: false,
+        }
     }
 
     /// The raw image's size, once the header has arrived.
@@ -51,8 +59,12 @@ impl UserdataStream {
             return Ok(());
         }
         self.head.extend_from_slice(data);
-        let Some(info) = frame_info(&self.head)? else { return Ok(()) };
-        let len = info.content_size.ok_or_else(|| Error::Zstd("the root image's zstd header doesn't state its size".into()))?;
+        let Some(info) = frame_info(&self.head)? else {
+            return Ok(());
+        };
+        let len = info.content_size.ok_or_else(|| {
+            Error::Zstd("the root image's zstd header doesn't state its size".into())
+        })?;
         self.image_len = Some(len);
         self.sparse = Some(SparseSplitter::new(len, self.max_segment)?);
         self.zstd.feed(&core::mem::take(&mut self.head));
@@ -66,7 +78,9 @@ impl UserdataStream {
             if !self.ready.is_empty() {
                 return Ok(Some(self.ready.remove(0)));
             }
-            let Some(sparse) = self.sparse.as_mut() else { return Ok(None) };
+            let Some(sparse) = self.sparse.as_mut() else {
+                return Ok(None);
+            };
             let ready = &mut self.ready;
             if !self.zstd.step(&mut |raw| sparse.push(raw, ready))? {
                 return Ok(None);
@@ -80,9 +94,16 @@ impl UserdataStream {
         if self.ended {
             return Err(Error::Zstd("the stream was already ended".into()));
         }
-        while self.zstd.step(&mut |_| Err(Error::Zstd("segments were left untaken before the end".into())))? {}
+        while self.zstd.step(&mut |_| {
+            Err(Error::Zstd(
+                "segments were left untaken before the end".into(),
+            ))
+        })? {}
         let len = self.zstd.finish()?;
-        let sparse = self.sparse.take().ok_or_else(|| Error::Zstd("the stream ended inside its header".into()))?;
+        let sparse = self
+            .sparse
+            .take()
+            .ok_or_else(|| Error::Zstd("the stream ended inside its header".into()))?;
         sparse.finish(&mut self.ready)?;
         self.ended = true;
         Ok(len)
@@ -92,13 +113,22 @@ impl UserdataStream {
 /// Stream a compressed root image from a reader to `userdata`. The reader
 /// must give the bytes `proof` was made from (the verified, cached download).
 /// `segment_cap` bounds memory below the phone's `max-download-size`.
-pub async fn flash_userdata_from_reader<T: Transport>(session: &mut Session<T>, proof: &VerifiedRootImage, mut reader: impl Read, segment_cap: Option<u64>) -> Result<u64> {
-    let limit = segment_cap.map_or(session.max_download_size(), |c| c.min(session.max_download_size()));
+pub async fn flash_userdata_from_reader<T: Transport>(
+    session: &mut Session<T>,
+    proof: &VerifiedRootImage,
+    mut reader: impl Read,
+    segment_cap: Option<u64>,
+) -> Result<u64> {
+    let limit = segment_cap.map_or(session.max_download_size(), |c| {
+        c.min(session.max_download_size())
+    });
     let mut stream = UserdataStream::new(limit);
     let mut buf = vec![0u8; 256 << 10];
     let mut begun = false;
     loop {
-        let n = reader.read(&mut buf).map_err(|e| Error::Transport(format!("reading the root image: {e}")))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| Error::Transport(format!("reading the root image: {e}")))?;
         if n == 0 {
             break;
         }

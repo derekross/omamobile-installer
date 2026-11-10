@@ -14,7 +14,10 @@ use crate::{Error, Result};
 
 /// The primary fingerprints `tools/install-phone` accepts: the release key,
 /// and the original package key until it is retired.
-pub const OMAMOBILE_KEYS: [&str; 2] = ["20567593566EEEE2DD8864608632C8075EB94673", "6C84FE3D240709E70E27CC94B301F5EA62B249FE"];
+pub const OMAMOBILE_KEYS: [&str; 2] = [
+    "20567593566EEEE2DD8864608632C8075EB94673",
+    "6C84FE3D240709E70E27CC94B301F5EA62B249FE",
+];
 
 /// Primary key fingerprints (40 upper-case hex digits) that may sign a release.
 #[derive(Debug, Clone)]
@@ -29,7 +32,9 @@ impl TrustedKeys {
         for f in fingerprints {
             let f = f.as_ref().to_ascii_uppercase();
             if f.len() != 40 || !f.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(Error::Signature("a trusted key is named by its 40-digit fingerprint".into()));
+                return Err(Error::Signature(
+                    "a trusted key is named by its 40-digit fingerprint".into(),
+                ));
             }
             out.push(f);
         }
@@ -54,26 +59,45 @@ pub struct Signer {
 }
 
 #[cfg(feature = "openpgp")]
-pub fn verify_detached(keyring: &[u8], signature: &[u8], data: &[u8], trusted: &TrustedKeys) -> Result<Signer> {
+pub fn verify_detached(
+    keyring: &[u8],
+    signature: &[u8],
+    data: &[u8],
+    trusted: &TrustedKeys,
+) -> Result<Signer> {
     use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
     use pgp::crypto::hash::HashAlgorithm;
     use pgp::packet::SignatureType;
     use pgp::types::KeyDetails;
 
     let sig_err = |why: String| Error::Signature(why);
-    let (sig, _) = DetachedSignature::from_reader_single(signature).map_err(|e| sig_err(format!("not an OpenPGP signature ({e})")))?;
+    let (sig, _) = DetachedSignature::from_reader_single(signature)
+        .map_err(|e| sig_err(format!("not an OpenPGP signature ({e})")))?;
     let s = &sig.signature;
     if s.typ() != Some(SignatureType::Binary) {
         return Err(sig_err("not a signature over a binary document".into()));
     }
-    if !matches!(s.hash_alg(), Some(HashAlgorithm::Sha256 | HashAlgorithm::Sha384 | HashAlgorithm::Sha512)) {
-        return Err(sig_err("made with a hash this installer doesn't accept".into()));
+    if !matches!(
+        s.hash_alg(),
+        Some(HashAlgorithm::Sha256 | HashAlgorithm::Sha384 | HashAlgorithm::Sha512)
+    ) {
+        return Err(sig_err(
+            "made with a hash this installer doesn't accept".into(),
+        ));
     }
-    let created = s.created().ok_or_else(|| sig_err("carries no creation time".into()))?.as_secs();
-    let issuers: Vec<String> = s.issuer_fingerprint().iter().map(|f| format!("{f:X}")).collect();
+    let created = s
+        .created()
+        .ok_or_else(|| sig_err("carries no creation time".into()))?
+        .as_secs();
+    let issuers: Vec<String> = s
+        .issuer_fingerprint()
+        .iter()
+        .map(|f| format!("{f:X}"))
+        .collect();
 
     // Binary or ASCII-armored (the bundle's omamobile.gpg is armored)
-    let (certs, _) = SignedPublicKey::from_reader_many(keyring).map_err(|e| sig_err(format!("unreadable keyring ({e})")))?;
+    let (certs, _) = SignedPublicKey::from_reader_many(keyring)
+        .map_err(|e| sig_err(format!("unreadable keyring ({e})")))?;
     let mut seen_trusted = false;
     for cert in certs {
         let Ok(cert) = cert else { continue };
@@ -85,24 +109,53 @@ pub fn verify_detached(keyring: &[u8], signature: &[u8], data: &[u8], trusted: &
         // Self-signatures and subkey bindings (with the subkey's own
         // back-signature) must all hold, and a revoked key is never accepted.
         if cert.verify_bindings().is_err() {
-            return Err(sig_err(format!("key {primary} has an invalid self-signature or subkey binding")));
+            return Err(sig_err(format!(
+                "key {primary} has an invalid self-signature or subkey binding"
+            )));
         }
         if !cert.details.revocation_signatures.is_empty() {
             return Err(sig_err(format!("key {primary} is revoked")));
         }
 
         // The primary, when its user ID signatures allow signing
-        let primary_signs = cert.details.users.iter().flat_map(|u| &u.signatures).any(|b| b.key_flags().sign());
-        if primary_signs && (issuers.is_empty() || issuers.contains(&primary)) && sig.verify(&cert.primary_key, data).is_ok() {
-            let expires = cert.details.users.iter().flat_map(|u| &u.signatures).filter_map(|b| b.key_expiration_time()).map(|d| d.as_secs() as u64).filter(|d| *d > 0).min().map(|d| cert.primary_key.created_at().as_secs() as u64 + d);
-            return finish(primary.clone(), primary, cert.primary_key.created_at().as_secs(), created, expires);
+        let primary_signs = cert
+            .details
+            .users
+            .iter()
+            .flat_map(|u| &u.signatures)
+            .any(|b| b.key_flags().sign());
+        if primary_signs
+            && (issuers.is_empty() || issuers.contains(&primary))
+            && sig.verify(&cert.primary_key, data).is_ok()
+        {
+            let expires = cert
+                .details
+                .users
+                .iter()
+                .flat_map(|u| &u.signatures)
+                .filter_map(|b| b.key_expiration_time())
+                .map(|d| d.as_secs() as u64)
+                .filter(|d| *d > 0)
+                .min()
+                .map(|d| cert.primary_key.created_at().as_secs() as u64 + d);
+            return finish(
+                primary.clone(),
+                primary,
+                cert.primary_key.created_at().as_secs(),
+                created,
+                expires,
+            );
         }
         for sub in &cert.public_subkeys {
             let fpr = format!("{:X}", sub.key.fingerprint());
             if !(issuers.is_empty() || issuers.contains(&fpr)) {
                 continue;
             }
-            if sub.signatures.iter().any(|b| b.typ() == Some(SignatureType::SubkeyRevocation)) {
+            if sub
+                .signatures
+                .iter()
+                .any(|b| b.typ() == Some(SignatureType::SubkeyRevocation))
+            {
                 return Err(sig_err(format!("signing subkey {fpr} is revoked")));
             }
             if !sub.signatures.iter().any(|b| b.key_flags().sign()) {
@@ -110,13 +163,22 @@ pub fn verify_detached(keyring: &[u8], signature: &[u8], data: &[u8], trusted: &
             }
             if sig.verify(&sub.key, data).is_ok() {
                 let key_created = sub.key.created_at().as_secs();
-                let expires = sub.signatures.iter().filter_map(|b| b.key_expiration_time()).map(|d| d.as_secs() as u64).filter(|d| *d > 0).min().map(|d| key_created as u64 + d);
+                let expires = sub
+                    .signatures
+                    .iter()
+                    .filter_map(|b| b.key_expiration_time())
+                    .map(|d| d.as_secs() as u64)
+                    .filter(|d| *d > 0)
+                    .min()
+                    .map(|d| key_created as u64 + d);
                 return finish(primary, fpr, key_created, created, expires);
             }
         }
     }
     if seen_trusted {
-        Err(sig_err("the signature does not verify with a trusted key".into()))
+        Err(sig_err(
+            "the signature does not verify with a trusted key".into(),
+        ))
     } else {
         Err(sig_err("not signed by an Omarchy Mobile key: the keyring holds none of the trusted fingerprints".into()))
     }
@@ -127,19 +189,39 @@ pub fn verify_detached(keyring: &[u8], signature: &[u8], data: &[u8], trusted: &
 /// after the key expires; whether a front end also compares with today's
 /// date is a policy decision left to it ([`Signer::key_expires`]).
 #[cfg(feature = "openpgp")]
-fn finish(primary: String, signing_key: String, key_created: u32, created: u32, key_expires: Option<u64>) -> Result<Signer> {
+fn finish(
+    primary: String,
+    signing_key: String,
+    key_created: u32,
+    created: u32,
+    key_expires: Option<u64>,
+) -> Result<Signer> {
     if created < key_created {
-        return Err(Error::Signature("the signature is older than its key".into()));
+        return Err(Error::Signature(
+            "the signature is older than its key".into(),
+        ));
     }
     if key_expires.is_some_and(|e| created as u64 >= e) {
-        return Err(Error::Signature("the signature was made after its key expired".into()));
+        return Err(Error::Signature(
+            "the signature was made after its key expired".into(),
+        ));
     }
-    Ok(Signer { primary, signing_key, created, key_expires })
+    Ok(Signer {
+        primary,
+        signing_key,
+        created,
+        key_expires,
+    })
 }
 
 /// Built without the `openpgp` feature (only to measure its size): nothing
 /// verifies, so nothing can be installed.
 #[cfg(not(feature = "openpgp"))]
-pub fn verify_detached(_keyring: &[u8], _signature: &[u8], _data: &[u8], _trusted: &TrustedKeys) -> Result<Signer> {
+pub fn verify_detached(
+    _keyring: &[u8],
+    _signature: &[u8],
+    _data: &[u8],
+    _trusted: &TrustedKeys,
+) -> Result<Signer> {
     Err(Error::Signature("this build has no OpenPGP support".into()))
 }

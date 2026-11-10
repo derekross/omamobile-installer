@@ -13,7 +13,13 @@ use crate::{Error, Result};
 use serde::Deserialize;
 
 /// The boot images a descriptor may name (docs/RELEASES.md §3.3).
-pub const SLOT_B_IMAGES: [&str; 5] = ["boot", "init_boot", "vendor_boot", "vendor_kernel_boot", "dtbo"];
+pub const SLOT_B_IMAGES: [&str; 5] = [
+    "boot",
+    "init_boot",
+    "vendor_boot",
+    "vendor_kernel_boot",
+    "dtbo",
+];
 /// The images every device has.
 const REQUIRED_IMAGES: [&str; 3] = ["boot", "vendor_boot", "dtbo"];
 pub const FORMAT: u64 = 1;
@@ -24,7 +30,9 @@ pub struct Partition(String);
 
 impl Partition {
     fn slot_b(image: &str) -> Option<Self> {
-        SLOT_B_IMAGES.contains(&image).then(|| Partition(format!("{image}_b")))
+        SLOT_B_IMAGES
+            .contains(&image)
+            .then(|| Partition(format!("{image}_b")))
     }
     fn userdata() -> Self {
         Partition("userdata".into())
@@ -161,15 +169,27 @@ fn is_codename(s: &str) -> bool {
     all(s, |b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 fn is_path(s: &str) -> bool {
-    s.split('/').all(|part| all(part, |b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) && part != ".." && part != ".")
+    s.split('/').all(|part| {
+        all(part, |b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            && part != ".."
+            && part != "."
+    })
 }
 
 /// `YYYY.MM.DD` with an optional `.N`, as a signed release is versioned.
 pub fn is_calendar_version(v: &str) -> bool {
     let mut parts = v.split('.');
-    let (Some(y), Some(m), Some(d)) = (parts.next(), parts.next(), parts.next()) else { return false };
-    let num = |s: &str, len: usize| (s.len() == len && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u32>().ok()).flatten();
-    let ok = matches!(num(y, 4), Some(2000..=2099)) && matches!(num(m, 2), Some(1..=12)) && matches!(num(d, 2), Some(1..=31));
+    let (Some(y), Some(m), Some(d)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let num = |s: &str, len: usize| {
+        (s.len() == len && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse::<u32>().ok())
+            .flatten()
+    };
+    let ok = matches!(num(y, 4), Some(2000..=2099))
+        && matches!(num(m, 2), Some(1..=12))
+        && matches!(num(d, 2), Some(1..=31));
     let rev_ok = match parts.next() {
         None => true,
         Some(r) => !r.starts_with('0') && all(r, |b| b.is_ascii_digit()),
@@ -179,14 +199,20 @@ pub fn is_calendar_version(v: &str) -> bool {
 
 impl Manifest {
     pub fn parse(json: &[u8]) -> Result<Self> {
-        let raw: Raw = serde_json::from_slice(json).map_err(|e| Error::Manifest(format!("not a release manifest ({e})")))?;
+        let raw: Raw = serde_json::from_slice(json)
+            .map_err(|e| Error::Manifest(format!("not a release manifest ({e})")))?;
         if raw.format != FORMAT {
-            return err(format!("format {}; this installer reads format {FORMAT}", raw.format));
+            return err(format!(
+                "format {}; this installer reads format {FORMAT}",
+                raw.format
+            ));
         }
         if !is_name(&raw.version) {
             return err("version is not valid");
         }
-        if !all(&raw.label, |b| b.is_ascii_alphanumeric() || b" ._-".contains(&b)) {
+        if !all(&raw.label, |b| {
+            b.is_ascii_alphanumeric() || b" ._-".contains(&b)
+        }) {
             return err("label is not valid");
         }
         if !is_codename(&raw.device.codename) {
@@ -198,7 +224,10 @@ impl Manifest {
         let codename = raw.device.codename;
         let i = raw.install;
         if i.product != codename {
-            return err(format!("is for {codename}, but install.product is {}", i.product));
+            return err(format!(
+                "is for {codename}, but install.product is {}",
+                i.product
+            ));
         }
         if !i.require_unlocked_bootloader {
             return err("must require an unlocked bootloader");
@@ -210,7 +239,10 @@ impl Manifest {
             return err("install.tool must be fastboot");
         }
         if i.after != ["set-active b", "reboot"] {
-            return err(format!("must end with set-active b and reboot, nothing else (has: {})", i.after.join(",")));
+            return err(format!(
+                "must end with set-active b and reboot, nothing else (has: {})",
+                i.after.join(",")
+            ));
         }
 
         // Files: plain relative paths, each once.
@@ -225,15 +257,23 @@ impl Manifest {
             if files.iter().any(|e: &FileEntry| e.path == f.path) {
                 return err(format!("{} is listed twice", f.path));
             }
-            files.push(FileEntry { path: f.path, size: f.size, sha256: f.sha256 });
+            files.push(FileEntry {
+                path: f.path,
+                size: f.size,
+                sha256: f.sha256,
+            });
         }
 
         // The allowlist: only slot B's boot images and userdata, each once.
         let allow = i.storage_guard_allowlist;
         for (n, p) in allow.iter().enumerate() {
-            let known = p == "userdata" || p.strip_suffix("_b").is_some_and(|img| SLOT_B_IMAGES.contains(&img));
+            let known = p == "userdata"
+                || p.strip_suffix("_b")
+                    .is_some_and(|img| SLOT_B_IMAGES.contains(&img));
             if !known {
-                return err(format!("the allowlist may hold only slot B's boot images and userdata, not {p}"));
+                return err(format!(
+                    "the allowlist may hold only slot B's boot images and userdata, not {p}"
+                ));
             }
             if allow[..n].contains(p) {
                 return err(format!("the allowlist names {p} twice"));
@@ -244,15 +284,23 @@ impl Manifest {
         }
 
         // The writes: slot B's images, then userdata with the root image, last.
-        let Some((last, boots)) = i.writes.split_last() else { return err("no writes") };
+        let Some((last, boots)) = i.writes.split_last() else {
+            return err("no writes");
+        };
         let mut boot_writes: Vec<BootWrite> = Vec::with_capacity(boots.len());
         for w in boots {
             let image = w.partition.strip_suffix("_b").unwrap_or("");
             let Some(partition) = Partition::slot_b(image) else {
-                return err(format!("refusing a write to {}: not a slot B boot image", w.partition));
+                return err(format!(
+                    "refusing a write to {}: not a slot B boot image",
+                    w.partition
+                ));
             };
             if w.source != format!("images/{image}.img") {
-                return err(format!("{} must be written from images/{image}.img, not {}", w.partition, w.source));
+                return err(format!(
+                    "{} must be written from images/{image}.img, not {}",
+                    w.partition, w.source
+                ));
             }
             if w.erases_userdata {
                 return err(format!("{} can't erase userdata", w.partition));
@@ -263,10 +311,15 @@ impl Manifest {
             if boot_writes.iter().any(|b| b.image == image) {
                 return err(format!("{} is written twice", w.partition));
             }
-            let Some(size) = w.size.filter(|s| *s > 0) else { return err(format!("{}: no size", w.partition)) };
+            let Some(size) = w.size.filter(|s| *s > 0) else {
+                return err(format!("{}: no size", w.partition));
+            };
             if w.partition_size.is_some_and(|p| p != size) {
                 // An AVB footer image is padded to the partition (RELEASES §3)
-                return err(format!("{}: a footer image must be exactly its partition's size", w.partition));
+                return err(format!(
+                    "{}: a footer image must be exactly its partition's size",
+                    w.partition
+                ));
             }
             let Some(file) = files.iter().find(|f| f.path == w.source) else {
                 return err(format!("{} is not among the bundle's files", w.source));
@@ -295,14 +348,19 @@ impl Manifest {
             }
         }
         if last.partition != "userdata" || last.source != "root_image" || !last.erases_userdata {
-            return err("the last write must be userdata from the root image, marked as erasing userdata");
+            return err(
+                "the last write must be userdata from the root image, marked as erasing userdata",
+            );
         }
         if last.size.is_some() || last.partition_size.is_some() {
             return err("the userdata write carries no size");
         }
 
         let r = raw.root_image;
-        let root_name_ok = r.name.strip_suffix(".img.zst").is_some_and(|stem| all(stem, |b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+        let root_name_ok = r
+            .name
+            .strip_suffix(".img.zst")
+            .is_some_and(|stem| all(stem, |b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
         if !root_name_ok {
             return err("root_image.name is not valid");
         }
@@ -323,7 +381,12 @@ impl Manifest {
             files,
             allowlist: allow,
             boot_writes,
-            root_image: RootImage { name: r.name, sha256: r.sha256, size: r.size, partition: Partition::userdata() },
+            root_image: RootImage {
+                name: r.name,
+                sha256: r.sha256,
+                size: r.size,
+                partition: Partition::userdata(),
+            },
         })
     }
 
@@ -333,36 +396,68 @@ impl Manifest {
         let bad = |why: String| Err(Error::DeviceConf(why));
         let codename = conf.get("CODENAME").unwrap_or("");
         if codename != self.codename {
-            return bad(format!("CODENAME={codename}, but manifest.json is for {}", self.codename));
+            return bad(format!(
+                "CODENAME={codename}, but manifest.json is for {}",
+                self.codename
+            ));
         }
         let method = conf.get("BOOT_METHOD").unwrap_or("android-v4");
         if method != "android-v4" {
-            return bad(format!("unsupported BOOT_METHOD={method}; only android-v4 can be installed"));
+            return bad(format!(
+                "unsupported BOOT_METHOD={method}; only android-v4 can be installed"
+            ));
         }
-        match (conf.get("SOC_IDS").is_some_and(|v| !v.is_empty()), conf.get("SOC_COMPATIBLE").is_some_and(|v| !v.is_empty())) {
+        match (
+            conf.get("SOC_IDS").is_some_and(|v| !v.is_empty()),
+            conf.get("SOC_COMPATIBLE").is_some_and(|v| !v.is_empty()),
+        ) {
             (true, true) => return bad("SOC_IDS and SOC_COMPATIBLE are exclusive".into()),
-            (false, false) => return bad("SOC_IDS is missing (or SOC_COMPATIBLE); this device can't be installed yet".into()),
+            (false, false) => {
+                return bad(
+                    "SOC_IDS is missing (or SOC_COMPATIBLE); this device can't be installed yet"
+                        .into(),
+                )
+            }
             _ => {}
         }
         let images = conf.list("BOOT_IMAGES");
         let ours: Vec<&str> = self.boot_writes.iter().map(|b| b.image.as_str()).collect();
         if images != ours {
-            return bad(format!("BOOT_IMAGES ({}) is not what manifest.json writes ({})", images.join(" "), ours.join(" ")));
+            return bad(format!(
+                "BOOT_IMAGES ({}) is not what manifest.json writes ({})",
+                images.join(" "),
+                ours.join(" ")
+            ));
         }
         let ufs_rw = conf.list("UFS_RW");
-        if ufs_rw != self.allowlist.iter().map(String::as_str).collect::<Vec<_>>() {
-            return bad(format!("UFS_RW ({}) is not manifest.json's allowlist ({})", ufs_rw.join(" "), self.allowlist.join(" ")));
+        if ufs_rw
+            != self
+                .allowlist
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        {
+            return bad(format!(
+                "UFS_RW ({}) is not manifest.json's allowlist ({})",
+                ufs_rw.join(" "),
+                self.allowlist.join(" ")
+            ));
         }
         let footers = conf.avb_footers()?;
         for (image, _) in &footers {
             if !ours.contains(&image.as_str()) {
-                return bad(format!("AVB_FOOTERS names {image}, which is not in BOOT_IMAGES"));
+                return bad(format!(
+                    "AVB_FOOTERS names {image}, which is not in BOOT_IMAGES"
+                ));
             }
         }
         for w in &self.boot_writes {
             let footer = footers.iter().find(|(i, _)| *i == w.image).map(|(_, s)| *s);
             if footer != w.partition_size {
-                return bad(format!("AVB_FOOTERS and manifest.json disagree on {}'s partition size", w.partition.name()));
+                return bad(format!(
+                    "AVB_FOOTERS and manifest.json disagree on {}'s partition size",
+                    w.partition.name()
+                ));
             }
         }
         Ok(())

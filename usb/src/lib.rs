@@ -24,27 +24,51 @@ pub struct UsbTransport {
 
 /// The numbers of the fastboot interface and its bulk endpoints (out, in).
 fn find_fastboot(device: &Device) -> Result<(u8, u8, u8)> {
-    let config = device.active_configuration().map_err(usb("reading the configuration"))?;
+    let config = device
+        .active_configuration()
+        .map_err(usb("reading the configuration"))?;
     for alt in config.interface_alt_settings() {
-        if (alt.class(), alt.subclass(), alt.protocol()) != (USB_CLASS, USB_SUBCLASS, USB_PROTOCOL) || alt.alternate_setting() != 0 {
+        if (alt.class(), alt.subclass(), alt.protocol()) != (USB_CLASS, USB_SUBCLASS, USB_PROTOCOL)
+            || alt.alternate_setting() != 0
+        {
             continue;
         }
-        let bulk = |dir: Direction| alt.endpoints().find(|e| e.transfer_type() == nusb::descriptors::TransferType::Bulk && e.direction() == dir).map(|e| e.address());
+        let bulk = |dir: Direction| {
+            alt.endpoints()
+                .find(|e| {
+                    e.transfer_type() == nusb::descriptors::TransferType::Bulk
+                        && e.direction() == dir
+                })
+                .map(|e| e.address())
+        };
         if let (Some(out), Some(inp)) = (bulk(Direction::Out), bulk(Direction::In)) {
             return Ok((alt.interface_number(), out, inp));
         }
     }
-    Err(Error::Transport("the device has no fastboot interface (is the phone in fastboot mode?)".into()))
+    Err(Error::Transport(
+        "the device has no fastboot interface (is the phone in fastboot mode?)".into(),
+    ))
 }
 
 impl UsbTransport {
     /// Claim the fastboot interface of an opened device.
     pub async fn open(device: &Device) -> Result<Self> {
         let (number, out, inp) = find_fastboot(device)?;
-        let interface = device.claim_interface(number).await.map_err(usb("claiming the fastboot interface"))?;
-        let ep_out = interface.endpoint::<Bulk, Out>(out).map_err(usb("opening the OUT endpoint"))?;
-        let ep_in = interface.endpoint::<Bulk, In>(inp).map_err(usb("opening the IN endpoint"))?;
-        Ok(Self { ep_out, ep_in, _interface: interface })
+        let interface = device
+            .claim_interface(number)
+            .await
+            .map_err(usb("claiming the fastboot interface"))?;
+        let ep_out = interface
+            .endpoint::<Bulk, Out>(out)
+            .map_err(usb("opening the OUT endpoint"))?;
+        let ep_in = interface
+            .endpoint::<Bulk, In>(inp)
+            .map_err(usb("opening the IN endpoint"))?;
+        Ok(Self {
+            ep_out,
+            ep_in,
+            _interface: interface,
+        })
     }
 }
 

@@ -14,7 +14,13 @@ use pgp::ser::Serialize;
 use pgp::types::{KeyDetails, Password};
 use serde_json::{json, Value};
 
-pub const IMAGES: [(&str, usize, Option<usize>); 5] = [("boot", 16 << 10, Some(16 << 10)), ("init_boot", 8 << 10, Some(8 << 10)), ("vendor_boot", 4 << 10, None), ("vendor_kernel_boot", 12 << 10, None), ("dtbo", 4 << 10, None)];
+pub const IMAGES: [(&str, usize, Option<usize>); 5] = [
+    ("boot", 16 << 10, Some(16 << 10)),
+    ("init_boot", 8 << 10, Some(8 << 10)),
+    ("vendor_boot", 4 << 10, None),
+    ("vendor_kernel_boot", 12 << 10, None),
+    ("dtbo", 4 << 10, None),
+];
 pub const ROOT_NAME: &str = "omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst";
 
 pub struct TestBundle {
@@ -90,7 +96,17 @@ pub fn zstd_store(data: &[u8], with_size: bool) -> Vec<u8> {
 }
 
 pub fn default_conf() -> String {
-    ["# test descriptor", "CODENAME=cheetah", "NAME=\"Pixel 7 Pro\"", "SOC_IDS=\"b0:0x9855001 a0:0x9855000\"", "AVB_FOOTERS=\"boot:0x4000 init_boot:0x2000\"", "BOOT_IMAGES=\"boot init_boot vendor_boot vendor_kernel_boot dtbo\"", "UFS_RW=\"boot_b init_boot_b vendor_boot_b vendor_kernel_boot_b dtbo_b userdata\"", ""].join("\n")
+    [
+        "# test descriptor",
+        "CODENAME=cheetah",
+        "NAME=\"Pixel 7 Pro\"",
+        "SOC_IDS=\"b0:0x9855001 a0:0x9855000\"",
+        "AVB_FOOTERS=\"boot:0x4000 init_boot:0x2000\"",
+        "BOOT_IMAGES=\"boot init_boot vendor_boot vendor_kernel_boot dtbo\"",
+        "UFS_RW=\"boot_b init_boot_b vendor_boot_b vendor_kernel_boot_b dtbo_b userdata\"",
+        "",
+    ]
+    .join("\n")
 }
 
 impl TestBundle {
@@ -101,7 +117,11 @@ impl TestBundle {
     /// `edit` changes manifest.json and `conf` the descriptor, both before
     /// the checksums are taken and signed.
     pub fn build(edit: impl FnOnce(&mut Value), conf: impl FnOnce(String) -> String) -> Self {
-        let images: Vec<(String, Vec<u8>)> = IMAGES.iter().enumerate().map(|(i, (name, size, _))| (name.to_string(), noise(100 + i as u32, *size))).collect();
+        let images: Vec<(String, Vec<u8>)> = IMAGES
+            .iter()
+            .enumerate()
+            .map(|(i, (name, size, _))| (name.to_string(), noise(100 + i as u32, *size)))
+            .collect();
         let root_raw = root_image();
         let root_zst = zstd_store(&root_raw, true);
         let device_conf = conf(default_conf()).into_bytes();
@@ -109,18 +129,33 @@ impl TestBundle {
 
         // The key: Ed25519 in the v4 format, as the release key is
         let mut rng = rand::thread_rng();
-        let params = SecretKeyParamsBuilder::default().key_type(KeyType::Ed25519Legacy).can_sign(true).can_certify(true).primary_user_id("Installer spike test key".into()).build().expect("key params");
+        let params = SecretKeyParamsBuilder::default()
+            .key_type(KeyType::Ed25519Legacy)
+            .can_sign(true)
+            .can_certify(true)
+            .primary_user_id("Installer spike test key".into())
+            .build()
+            .expect("key params");
         let secret = params.generate(&mut rng).expect("key generation");
         let public = secret.to_public_key();
         let keyring = public.to_bytes().expect("serialize the key");
         let fingerprint = format!("{:X}", public.primary_key.fingerprint());
 
-        let mut files: Vec<(String, Vec<u8>)> = vec![("MANIFEST".into(), manifest_txt.clone()), ("device.conf".into(), device_conf.clone())];
-        files.extend(images.iter().map(|(n, d)| (format!("images/{n}.img"), d.clone())));
+        let mut files: Vec<(String, Vec<u8>)> = vec![
+            ("MANIFEST".into(), manifest_txt.clone()),
+            ("device.conf".into(), device_conf.clone()),
+        ];
+        files.extend(
+            images
+                .iter()
+                .map(|(n, d)| (format!("images/{n}.img"), d.clone())),
+        );
         files.push(("omamobile.gpg".into(), keyring.clone()));
 
         let mut writes: Vec<Value> = IMAGES.iter().map(|(name, size, psize)| json!({"partition": format!("{name}_b"), "partition_size": psize, "size": size, "source": format!("images/{name}.img")})).collect();
-        writes.push(json!({"erases_userdata": true, "partition": "userdata", "source": "root_image"}));
+        writes.push(
+            json!({"erases_userdata": true, "partition": "userdata", "source": "root_image"}),
+        );
         let mut manifest = json!({
             "format": 1, "version": "2026.01.02", "label": "test", "name": "Omarchy Mobile",
             "device": {"codename": "cheetah", "name": "Pixel 7 Pro"},
@@ -140,14 +175,45 @@ impl TestBundle {
         let manifest_json = serde_json::to_vec_pretty(&manifest).unwrap();
         files.push(("manifest.json".into(), manifest_json.clone()));
         files.sort();
-        let sums: Vec<u8> = files.iter().map(|(p, d)| format!("{}  {p}\n", sha256_hex(d))).collect::<String>().into_bytes();
-        let sig = DetachedSignature::sign_binary_data(&mut rng, &secret.primary_key, &Password::empty(), HashAlgorithm::Sha512, &sums[..]).expect("sign").to_bytes().expect("serialize the signature");
+        let sums: Vec<u8> = files
+            .iter()
+            .map(|(p, d)| format!("{}  {p}\n", sha256_hex(d)))
+            .collect::<String>()
+            .into_bytes();
+        let sig = DetachedSignature::sign_binary_data(
+            &mut rng,
+            &secret.primary_key,
+            &Password::empty(),
+            HashAlgorithm::Sha512,
+            &sums[..],
+        )
+        .expect("sign")
+        .to_bytes()
+        .expect("serialize the signature");
 
-        TestBundle { sums, sig, keyring, manifest_json, manifest_txt, device_conf, images, root_raw, root_zst, fingerprint }
+        TestBundle {
+            sums,
+            sig,
+            keyring,
+            manifest_json,
+            manifest_txt,
+            device_conf,
+            images,
+            root_raw,
+            root_zst,
+            fingerprint,
+        }
     }
 
     pub fn files(&self) -> ReleaseFiles<'_> {
-        ReleaseFiles { sha256sums: &self.sums, sha256sums_sig: &self.sig, keyring: &self.keyring, manifest_json: &self.manifest_json, manifest_txt: &self.manifest_txt, device_conf: &self.device_conf }
+        ReleaseFiles {
+            sha256sums: &self.sums,
+            sha256sums_sig: &self.sig,
+            keyring: &self.keyring,
+            manifest_json: &self.manifest_json,
+            manifest_txt: &self.manifest_txt,
+            device_conf: &self.device_conf,
+        }
     }
 
     pub fn trusted(&self) -> TrustedKeys {

@@ -14,7 +14,9 @@
 //! owner's first-boot answers on the phone (INSTALL-EXPERIENCE-PLAN §4.4), so
 //! a real write would install a system nobody can log in to.
 use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
-use omamobile_installer_core::fastboot::{PhoneOptions, Session, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS};
+use omamobile_installer_core::fastboot::{
+    PhoneOptions, Session, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
+};
 use omamobile_installer_core::install::{flash_userdata_from_reader, UserdataStream};
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_core::Error;
@@ -33,24 +35,52 @@ fn read(dir: &Path, name: &str) -> Res<Vec<u8>> {
 
 /// The bundle's signature, checksums and rules; then every file it lists.
 fn verify_bundle(dir: &Path) -> Res<VerifiedRelease> {
-    let (sums, sig, keyring) = (read(dir, "SHA256SUMS")?, read(dir, "SHA256SUMS.sig")?, read(dir, "omamobile.gpg")?);
-    let (manifest_json, manifest_txt, device_conf) = (read(dir, "manifest.json")?, read(dir, "MANIFEST")?, read(dir, "device.conf")?);
-    let files = ReleaseFiles { sha256sums: &sums, sha256sums_sig: &sig, keyring: &keyring, manifest_json: &manifest_json, manifest_txt: &manifest_txt, device_conf: &device_conf };
+    let (sums, sig, keyring) = (
+        read(dir, "SHA256SUMS")?,
+        read(dir, "SHA256SUMS.sig")?,
+        read(dir, "omamobile.gpg")?,
+    );
+    let (manifest_json, manifest_txt, device_conf) = (
+        read(dir, "manifest.json")?,
+        read(dir, "MANIFEST")?,
+        read(dir, "device.conf")?,
+    );
+    let files = ReleaseFiles {
+        sha256sums: &sums,
+        sha256sums_sig: &sig,
+        keyring: &keyring,
+        manifest_json: &manifest_json,
+        manifest_txt: &manifest_txt,
+        device_conf: &device_conf,
+    };
     let release = verify_release(&files, &TrustedKeys::omamobile())?;
-    println!("signed by {} (key {})", release.signer().primary, release.signer().signing_key);
+    println!(
+        "signed by {} (key {})",
+        release.signer().primary,
+        release.signer().signing_key
+    );
     for f in &release.manifest().files {
         release.check_file(&f.path, &read(dir, &f.path)?)?;
     }
-    println!("{} files match the signed manifest", release.manifest().files.len());
+    println!(
+        "{} files match the signed manifest",
+        release.manifest().files.len()
+    );
     Ok(release)
 }
 
 /// The root image sits beside the bundle directory, or inside it.
 fn find_root(dir: &Path, name: &str) -> Res<PathBuf> {
-    [dir.join("..").join(name), dir.join(name)].into_iter().find(|p| p.is_file()).ok_or_else(|| format!("no root image {name} beside {}", dir.display()).into())
+    [dir.join("..").join(name), dir.join(name)]
+        .into_iter()
+        .find(|p| p.is_file())
+        .ok_or_else(|| format!("no root image {name} beside {}", dir.display()).into())
 }
 
-fn hash_root(release: &VerifiedRelease, path: &Path) -> Res<omamobile_installer_core::bundle::VerifiedRootImage> {
+fn hash_root(
+    release: &VerifiedRelease,
+    path: &Path,
+) -> Res<omamobile_installer_core::bundle::VerifiedRootImage> {
     let mut check = release.root_image_check();
     let mut file = File::open(path)?;
     let mut buf = vec![0u8; 1 << 20];
@@ -67,7 +97,10 @@ fn hash_root(release: &VerifiedRelease, path: &Path) -> Res<omamobile_installer_
 fn cmd_verify(dir: &Path) -> Res<()> {
     let release = verify_bundle(dir)?;
     let m = release.manifest();
-    println!("Omarchy Mobile {} ({}) for {}", m.version, m.label, m.codename);
+    println!(
+        "Omarchy Mobile {} ({}) for {}",
+        m.version, m.label, m.codename
+    );
     match find_root(dir, &m.root_image.name) {
         Ok(path) => {
             hash_root(&release, &path)?;
@@ -76,9 +109,18 @@ fn cmd_verify(dir: &Path) -> Res<()> {
         Err(e) => println!("root image not checked: {e}"),
     }
     for w in &m.boot_writes {
-        println!("  would flash {} from {} ({} bytes)", w.partition.name(), w.source, w.size);
+        println!(
+            "  would flash {} from {} ({} bytes)",
+            w.partition.name(),
+            w.source,
+            w.size
+        );
     }
-    println!("  would flash {} from {} (erases userdata)", m.root_image.partition.name(), m.root_image.name);
+    println!(
+        "  would flash {} from {} (erases userdata)",
+        m.root_image.partition.name(),
+        m.root_image.name
+    );
     Ok(())
 }
 
@@ -86,7 +128,8 @@ fn cmd_sparse(image: &Path, out_dir: &Path, max: u64) -> Res<()> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(image)?;
     let mut stream = UserdataStream::new(max);
-    let (mut buf, mut count, mut bytes_in, mut bytes_out) = (vec![0u8; 256 << 10], 0usize, 0u64, 0u64);
+    let (mut buf, mut count, mut bytes_in, mut bytes_out) =
+        (vec![0u8; 256 << 10], 0usize, 0u64, 0u64);
     let start = Instant::now();
     let mut save = |stream: &mut UserdataStream| -> Res<()> {
         while let Some(seg) = stream.next_segment()? {
@@ -113,14 +156,21 @@ fn cmd_sparse(image: &Path, out_dir: &Path, max: u64) -> Res<()> {
 }
 
 fn is_fastboot(info: &nusb::DeviceInfo) -> bool {
-    info.interfaces().any(|i| (i.class(), i.subclass(), i.protocol()) == (USB_CLASS, USB_SUBCLASS, USB_PROTOCOL))
+    info.interfaces()
+        .any(|i| (i.class(), i.subclass(), i.protocol()) == (USB_CLASS, USB_SUBCLASS, USB_PROTOCOL))
 }
 
 async fn cmd_devices() -> Res<()> {
     let mut n = 0;
     for info in nusb::list_devices().await?.filter(is_fastboot) {
         n += 1;
-        println!("{:04x}:{:04x} {} serial {}", info.vendor_id(), info.product_id(), info.product_string().unwrap_or("?"), info.serial_number().unwrap_or("?"));
+        println!(
+            "{:04x}:{:04x} {} serial {}",
+            info.vendor_id(),
+            info.product_id(),
+            info.product_string().unwrap_or("?"),
+            info.serial_number().unwrap_or("?")
+        );
     }
     println!("{n} phone(s) in fastboot mode");
     Ok(())
@@ -139,7 +189,9 @@ async fn cmd_install(dir: &Path, serial: &str, options: PhoneOptions) -> Res<()>
     println!("root image matches the signed manifest");
 
     // Exactly one device with this serial number, in fastboot mode
-    let mut found = nusb::list_devices().await?.filter(|d| is_fastboot(d) && d.serial_number() == Some(serial));
+    let mut found = nusb::list_devices()
+        .await?
+        .filter(|d| is_fastboot(d) && d.serial_number() == Some(serial));
     let (Some(info), None) = (found.next(), found.next()) else {
         return Err("expected exactly one phone in fastboot mode with that serial number".into());
     };
@@ -147,16 +199,26 @@ async fn cmd_install(dir: &Path, serial: &str, options: PhoneOptions) -> Res<()>
     let transport = UsbTransport::open(&device).await?;
     let mut session = Session::connect(transport, &release, serial, options).await?;
     let facts = session.facts().clone();
-    println!("{} unlocked, slot {}, bootloader {}", facts.product, facts.current_slot, facts.bootloader);
+    println!(
+        "{} unlocked, slot {}, bootloader {}",
+        facts.product, facts.current_slot, facts.bootloader
+    );
     println!("These commands, and only these, would run:");
     session.plan().iter().for_each(|l| println!("    {l}"));
 
     for (w, bytes) in m.boot_writes.iter().zip(&images) {
-        session.flash_boot(&release.verify_boot_image(w, bytes)?).await?;
+        session
+            .flash_boot(&release.verify_boot_image(w, bytes)?)
+            .await?;
     }
-    flash_userdata_from_reader(&mut session, &root, File::open(&root_path)?, Some(64 << 20)).await?;
+    flash_userdata_from_reader(&mut session, &root, File::open(&root_path)?, Some(64 << 20))
+        .await?;
     session.activate_and_reboot().await?;
-    session.log().iter().filter(|l| l.starts_with("would:")).for_each(|l| println!("    {l}"));
+    session
+        .log()
+        .iter()
+        .filter(|l| l.starts_with("would:"))
+        .for_each(|l| println!("    {l}"));
     println!("Dry run done: nothing was written to the phone");
     Ok(())
 }

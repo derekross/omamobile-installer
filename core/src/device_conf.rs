@@ -24,7 +24,9 @@ impl DeviceConf {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let (key, value) = line.split_once('=').ok_or_else(|| bad(n, "not a KEY=value line"))?;
+            let (key, value) = line
+                .split_once('=')
+                .ok_or_else(|| bad(n, "not a KEY=value line"))?;
             let mut kb = key.bytes();
             let first_ok = kb.next().is_some_and(|b| b.is_ascii_uppercase());
             if !first_ok || !kb.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
@@ -32,14 +34,19 @@ impl DeviceConf {
             }
             let forbidden = |c: char| matches!(c, '"' | '$' | '`' | '\\');
             let value = if let Some(rest) = value.strip_prefix('"') {
-                let inner = rest.strip_suffix('"').ok_or_else(|| bad(n, "unterminated quote"))?;
+                let inner = rest
+                    .strip_suffix('"')
+                    .ok_or_else(|| bad(n, "unterminated quote"))?;
                 if inner.contains(forbidden) {
                     return Err(bad(n, "a quoted value can't hold \", $, ` or \\"));
                 }
                 inner
             } else {
                 if value.contains(|c: char| forbidden(c) || c == '\'' || c.is_whitespace()) {
-                    return Err(bad(n, "an unquoted value can't hold quotes, spaces, $, ` or \\"));
+                    return Err(bad(
+                        n,
+                        "an unquoted value can't hold quotes, spaces, $, ` or \\",
+                    ));
                 }
                 value
             };
@@ -54,20 +61,35 @@ impl DeviceConf {
 
     /// A space-separated list; empty when the key is absent.
     pub fn list(&self, key: &str) -> Vec<&str> {
-        self.get(key).map(|v| v.split(' ').filter(|s| !s.is_empty()).collect()).unwrap_or_default()
+        self.get(key)
+            .map(|v| v.split(' ').filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default()
     }
 
     /// `AVB_FOOTERS` as (image, partition size in bytes).
     pub fn avb_footers(&self) -> Result<Vec<(String, u64)>> {
         let mut out = Vec::new();
         for entry in self.list("AVB_FOOTERS") {
-            let err = || Error::DeviceConf(format!("AVB_FOOTERS entries are image:partition_size, not {entry}"));
+            let err = || {
+                Error::DeviceConf(format!(
+                    "AVB_FOOTERS entries are image:partition_size, not {entry}"
+                ))
+            };
             let (image, size) = entry.split_once(':').ok_or_else(err)?;
             let size = match size.strip_prefix("0x") {
-                Some(h) if !h.is_empty() && h.len() <= 10 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {
+                Some(h)
+                    if !h.is_empty()
+                        && h.len() <= 10
+                        && h.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+                {
                     u64::from_str_radix(h, 16).map_err(|_| err())?
                 }
-                None if !size.is_empty() && size.len() <= 12 && !size.starts_with('0') && size.bytes().all(|b| b.is_ascii_digit()) => {
+                None if !size.is_empty()
+                    && size.len() <= 12
+                    && !size.starts_with('0')
+                    && size.bytes().all(|b| b.is_ascii_digit()) =>
+                {
                     size.parse().map_err(|_| err())?
                 }
                 _ => return Err(err()),

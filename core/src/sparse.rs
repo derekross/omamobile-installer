@@ -65,15 +65,30 @@ impl SparseSplitter {
     /// `max-download-size`, or less).
     pub fn new(image_len: u64, max_segment: u64) -> Result<Self> {
         if image_len == 0 || !image_len.is_multiple_of(BLOCK as u64) {
-            return Err(Error::Sparse(format!("the image is {image_len} bytes, not a multiple of {BLOCK}")));
+            return Err(Error::Sparse(format!(
+                "the image is {image_len} bytes, not a multiple of {BLOCK}"
+            )));
         }
-        let total_blocks = u32::try_from(image_len / BLOCK as u64).map_err(|_| Error::Sparse("the image is too large".into()))?;
+        let total_blocks = u32::try_from(image_len / BLOCK as u64)
+            .map_err(|_| Error::Sparse("the image is too large".into()))?;
         if max_segment < MIN_SEGMENT {
-            return Err(Error::Sparse(format!("a download limit of {max_segment} bytes is too small")));
+            return Err(Error::Sparse(format!(
+                "a download limit of {max_segment} bytes is too small"
+            )));
         }
         // A sparse image's chunk sizes are 32-bit; stay well inside
         let limit = max_segment.min(u32::MAX as u64 / 2) as usize;
-        let mut s = Self { total_blocks, limit, pos: 0, partial: Vec::with_capacity(BLOCK), seg: Vec::new(), chunks: 0, data_chunks: 0, open: Open::None, open_blocks: 0 };
+        let mut s = Self {
+            total_blocks,
+            limit,
+            pos: 0,
+            partial: Vec::with_capacity(BLOCK),
+            seg: Vec::new(),
+            chunks: 0,
+            data_chunks: 0,
+            open: Open::None,
+            open_blocks: 0,
+        };
         s.start_segment();
         Ok(s)
     }
@@ -86,7 +101,8 @@ impl SparseSplitter {
         self.open = Open::None;
         self.open_blocks = 0;
         if self.pos > 0 {
-            self.seg.extend_from_slice(&chunk_header(DONT_CARE, self.pos, 0));
+            self.seg
+                .extend_from_slice(&chunk_header(DONT_CARE, self.pos, 0));
             self.chunks += 1;
         }
     }
@@ -110,7 +126,8 @@ impl SparseSplitter {
     fn finish_segment(&mut self, out: &mut Vec<Vec<u8>>) {
         self.close_chunk();
         if self.pos < self.total_blocks {
-            self.seg.extend_from_slice(&chunk_header(DONT_CARE, self.total_blocks - self.pos, 0));
+            self.seg
+                .extend_from_slice(&chunk_header(DONT_CARE, self.total_blocks - self.pos, 0));
             self.chunks += 1;
         }
         let mut h = [0u8; FILE_HDR];
@@ -130,7 +147,9 @@ impl SparseSplitter {
 
     fn add_block(&mut self, block: &[u8], out: &mut Vec<Vec<u8>>) -> Result<()> {
         if self.pos >= self.total_blocks {
-            return Err(Error::Sparse("more data than the image's stated size".into()));
+            return Err(Error::Sparse(
+                "more data than the image's stated size".into(),
+            ));
         }
         let first: [u8; 4] = block[..4].try_into().unwrap();
         let fill = block.chunks_exact(4).all(|w| w == first);
@@ -205,7 +224,10 @@ impl SparseSplitter {
     pub fn finish(mut self, out: &mut Vec<Vec<u8>>) -> Result<()> {
         if !self.partial.is_empty() || self.pos != self.total_blocks {
             let got = self.pos as u64 * BLOCK as u64 + self.partial.len() as u64;
-            return Err(Error::Sparse(format!("the image ended at {got} bytes, short of its stated {}", self.total_blocks as u64 * BLOCK as u64)));
+            return Err(Error::Sparse(format!(
+                "the image ended at {got} bytes, short of its stated {}",
+                self.total_blocks as u64 * BLOCK as u64
+            )));
         }
         if self.data_chunks > 0 {
             self.finish_segment(out);

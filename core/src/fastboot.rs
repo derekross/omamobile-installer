@@ -66,16 +66,28 @@ impl<T: Transport> Client<T> {
         for _ in 0..MAX_INFO_PACKETS {
             let packet = self.transport.recv().await?;
             if packet.len() < 4 || packet.len() > 256 {
-                return Err(Error::Protocol(format!("a {}-byte answer to '{command}'", packet.len())));
+                return Err(Error::Protocol(format!(
+                    "a {}-byte answer to '{command}'",
+                    packet.len()
+                )));
             }
             let text = String::from_utf8_lossy(&packet[4..]).into_owned();
             match &packet[..4] {
                 b"OKAY" => return Ok(Reply::Okay(text)),
-                b"FAIL" => return Err(Error::DeviceFail { command: command.to_string(), message: text }),
+                b"FAIL" => {
+                    return Err(Error::DeviceFail {
+                        command: command.to_string(),
+                        message: text,
+                    })
+                }
                 b"INFO" | b"TEXT" => info.push(text),
                 b"DATA" => {
-                    let size = (text.len() == 8).then(|| u64::from_str_radix(&text, 16).ok()).flatten();
-                    return size.map(Reply::Data).ok_or_else(|| Error::Protocol(format!("a malformed DATA answer to '{command}'")));
+                    let size = (text.len() == 8)
+                        .then(|| u64::from_str_radix(&text, 16).ok())
+                        .flatten();
+                    return size.map(Reply::Data).ok_or_else(|| {
+                        Error::Protocol(format!("a malformed DATA answer to '{command}'"))
+                    });
                 }
                 _ => return Err(Error::Protocol(format!("an unknown answer to '{command}'"))),
             }
@@ -101,7 +113,11 @@ impl<T: Transport> Client<T> {
     }
 
     async fn getvar(&mut self, name: &str) -> Result<String> {
-        Ok(self.simple(&format!("getvar:{name}")).await?.trim().to_string())
+        Ok(self
+            .simple(&format!("getvar:{name}"))
+            .await?
+            .trim()
+            .to_string())
     }
 
     /// `getvar:all`: the `key:value` INFO lines.
@@ -117,15 +133,27 @@ impl<T: Transport> Client<T> {
         let command = format!("download:{:08x}", data.len());
         match self.command(&command, &mut Vec::new()).await? {
             Reply::Data(n) if n == data.len() as u64 => {}
-            Reply::Data(n) => return Err(Error::ShortDownload { wanted: data.len() as u64, accepted: n }),
-            Reply::Okay(_) => return Err(Error::Protocol(format!("OKAY instead of DATA in answer to '{command}'"))),
+            Reply::Data(n) => {
+                return Err(Error::ShortDownload {
+                    wanted: data.len() as u64,
+                    accepted: n,
+                })
+            }
+            Reply::Okay(_) => {
+                return Err(Error::Protocol(format!(
+                    "OKAY instead of DATA in answer to '{command}'"
+                )))
+            }
         }
         let mut done = 0u64;
         for chunk in data.chunks(SEND_CHUNK) {
             let sent = self.transport.send(chunk).await?;
             done += sent as u64;
             if sent != chunk.len() {
-                return Err(Error::ShortDownload { wanted: data.len() as u64, accepted: done });
+                return Err(Error::ShortDownload {
+                    wanted: data.len() as u64,
+                    accepted: done,
+                });
             }
         }
         match self.read_reply(&command, &mut Vec::new()).await? {
@@ -172,7 +200,10 @@ pub struct PhoneFacts {
 enum State {
     /// Checks passed; the next boot image to write.
     Boot(usize),
-    Userdata { image_len: u64, segments: u32 },
+    Userdata {
+        image_len: u64,
+        segments: u32,
+    },
     UserdataDone,
     Rebooted,
     /// A write failed. Nothing more is sent on this session.
@@ -191,7 +222,10 @@ pub struct Session<T: Transport> {
 impl<T: Transport> core::fmt::Debug for Session<T> {
     // No serial number in debug output
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Session").field("state", &self.state).field("facts", &self.facts).finish_non_exhaustive()
+        f.debug_struct("Session")
+            .field("state", &self.state)
+            .field("facts", &self.facts)
+            .finish_non_exhaustive()
     }
 }
 
@@ -199,32 +233,62 @@ impl<T: Transport> Session<T> {
     /// Open a session on one phone and run every read-only check. Nothing is
     /// written. `expected_serial` is the serial number of the USB device the
     /// person chose; the phone must report the same one.
-    pub async fn connect(transport: T, release: &VerifiedRelease, expected_serial: &str, options: PhoneOptions) -> Result<Self> {
+    pub async fn connect(
+        transport: T,
+        release: &VerifiedRelease,
+        expected_serial: &str,
+        options: PhoneOptions,
+    ) -> Result<Self> {
         let m: &Manifest = release.manifest();
-        let mut client = Client { transport, log: Vec::new() };
+        let mut client = Client {
+            transport,
+            log: Vec::new(),
+        };
         if expected_serial.is_empty() {
-            return Err(Error::Refused("no serial number to pin the phone to".into()));
+            return Err(Error::Refused(
+                "no serial number to pin the phone to".into(),
+            ));
         }
         let serial = client.getvar("serialno").await?;
         if serial != expected_serial {
-            return Err(Error::Refused("the phone that answered is not the one that was chosen (serial numbers differ)".into()));
+            return Err(Error::Refused(
+                "the phone that answered is not the one that was chosen (serial numbers differ)"
+                    .into(),
+            ));
         }
         let product = client.getvar("product").await?;
         if product != m.codename {
             let name = m.device_name.as_deref().unwrap_or("");
-            let shown = if product.is_empty() { "unknown" } else { product.as_str() };
-            return Err(Error::Phone(format!("the phone is '{shown}', not {} ({name}): wrong release or wrong phone", m.codename)));
+            let shown = if product.is_empty() {
+                "unknown"
+            } else {
+                product.as_str()
+            };
+            return Err(Error::Phone(format!(
+                "the phone is '{shown}', not {} ({name}): wrong release or wrong phone",
+                m.codename
+            )));
         }
         if client.getvar("unlocked").await? != "yes" {
-            return Err(Error::Phone("the bootloader is locked: unlock it first (this erases the phone)".into()));
+            return Err(Error::Phone(
+                "the bootloader is locked: unlock it first (this erases the phone)".into(),
+            ));
         }
-        let current_slot = client.getvar("current-slot").await?.trim_start_matches('_').to_string();
+        let current_slot = client
+            .getvar("current-slot")
+            .await?
+            .trim_start_matches('_')
+            .to_string();
         if current_slot != "a" && current_slot != "b" {
-            return Err(Error::Phone(format!("the phone reports current slot '{current_slot}'")));
+            return Err(Error::Phone(format!(
+                "the phone reports current slot '{current_slot}'"
+            )));
         }
         let bootloader = client.getvar("version-bootloader").await?;
         if bootloader.is_empty() {
-            return Err(Error::Phone("the phone reports no version-bootloader".into()));
+            return Err(Error::Phone(
+                "the phone reports no version-bootloader".into(),
+            ));
         }
         // Setting slot B active runs slot B's bootloader: both must match.
         let all = client.getvar_all().await?;
@@ -233,7 +297,9 @@ impl<T: Transport> Session<T> {
                 let rest = line.strip_prefix("version-bootloader")?;
                 let mut c = rest.chars();
                 let sep = c.next()?;
-                (matches!(sep, '-' | '_' | ':') && c.next()? == slot).then(|| c.as_str().strip_prefix(':').map(|v| v.trim().to_string())).flatten()
+                (matches!(sep, '-' | '_' | ':') && c.next()? == slot)
+                    .then(|| c.as_str().strip_prefix(':').map(|v| v.trim().to_string()))
+                    .flatten()
             })
         };
         match (per_slot('a'), per_slot('b'), &options.bootloader_slots_confirmed) {
@@ -246,27 +312,59 @@ impl<T: Transport> Session<T> {
         if current_slot == "b" && !options.reinstall {
             return Err(Error::Phone("the phone runs from slot b. If stock Android is there, installing would overwrite it; if it is Omarchy Mobile, say so (reinstall)".into()));
         }
-        let max_download_size = parse_size(&client.getvar("max-download-size").await?).ok_or_else(|| Error::Phone("the phone reports no max-download-size".into()))?;
+        let max_download_size = parse_size(&client.getvar("max-download-size").await?)
+            .ok_or_else(|| Error::Phone("the phone reports no max-download-size".into()))?;
         if max_download_size < sparse::MIN_SEGMENT {
-            return Err(Error::Phone(format!("max-download-size {max_download_size} is too small")));
+            return Err(Error::Phone(format!(
+                "max-download-size {max_download_size} is too small"
+            )));
         }
         // Each image must fit its slot B partition, a footer image exactly.
         for w in &m.boot_writes {
             let name = w.partition.name();
-            let psize = parse_size(&client.getvar(&format!("partition-size:{name}")).await?).ok_or_else(|| Error::Phone(format!("the phone reports no partition-size for {name}")))?;
+            let psize = parse_size(&client.getvar(&format!("partition-size:{name}")).await?)
+                .ok_or_else(|| {
+                    Error::Phone(format!("the phone reports no partition-size for {name}"))
+                })?;
             if w.size > psize {
-                return Err(Error::Phone(format!("{} is {} bytes, larger than {name} ({psize} bytes)", w.source, w.size)));
+                return Err(Error::Phone(format!(
+                    "{} is {} bytes, larger than {name} ({psize} bytes)",
+                    w.source, w.size
+                )));
             }
             if w.partition_size.is_some_and(|want| want != psize) {
-                return Err(Error::Phone(format!("{name} is {psize} bytes, not the {} the image's AVB footer was built for", w.partition_size.unwrap_or(0))));
+                return Err(Error::Phone(format!(
+                    "{name} is {psize} bytes, not the {} the image's AVB footer was built for",
+                    w.partition_size.unwrap_or(0)
+                )));
             }
             if w.size > max_download_size {
-                return Err(Error::Phone(format!("{} is larger than the phone's max-download-size", w.source)));
+                return Err(Error::Phone(format!(
+                    "{} is larger than the phone's max-download-size",
+                    w.source
+                )));
             }
         }
-        let baseband = client.getvar("version-baseband").await.ok().filter(|v| !v.is_empty());
-        let facts = PhoneFacts { product, current_slot, bootloader, baseband, max_download_size };
-        Ok(Self { client, release: release.clone(), serial, facts, state: State::Boot(0), dry_run: options.dry_run })
+        let baseband = client
+            .getvar("version-baseband")
+            .await
+            .ok()
+            .filter(|v| !v.is_empty());
+        let facts = PhoneFacts {
+            product,
+            current_slot,
+            bootloader,
+            baseband,
+            max_download_size,
+        };
+        Ok(Self {
+            client,
+            release: release.clone(),
+            serial,
+            facts,
+            state: State::Boot(0),
+            dry_run: options.dry_run,
+        })
     }
 
     pub fn facts(&self) -> &PhoneFacts {
@@ -282,8 +380,23 @@ impl<T: Transport> Session<T> {
     /// The plan in words, for the confirmation screen.
     pub fn plan(&self) -> Vec<String> {
         let m = self.release.manifest();
-        let mut out: Vec<String> = m.boot_writes.iter().map(|w| format!("flash {} {} ({} bytes)", w.partition.name(), w.source, w.size)).collect();
-        out.push(format!("flash {} {} (erases userdata)", m.root_image.partition.name(), m.root_image.name));
+        let mut out: Vec<String> = m
+            .boot_writes
+            .iter()
+            .map(|w| {
+                format!(
+                    "flash {} {} ({} bytes)",
+                    w.partition.name(),
+                    w.source,
+                    w.size
+                )
+            })
+            .collect();
+        out.push(format!(
+            "flash {} {} (erases userdata)",
+            m.root_image.partition.name(),
+            m.root_image.name
+        ));
         out.push("set_active b".into());
         out.push("reboot".into());
         out
@@ -300,8 +413,12 @@ impl<T: Transport> Session<T> {
     /// The phone on the other end is still the one the checks passed on.
     async fn still_pinned(&mut self) -> Result<()> {
         let codename = self.release.manifest().codename.clone();
-        if self.client.getvar("serialno").await? != self.serial || self.client.getvar("product").await? != codename {
-            return Err(Error::Refused("the phone changed during the install; nothing more is written".into()));
+        if self.client.getvar("serialno").await? != self.serial
+            || self.client.getvar("product").await? != codename
+        {
+            return Err(Error::Refused(
+                "the phone changed during the install; nothing more is written".into(),
+            ));
         }
         Ok(())
     }
@@ -310,28 +427,43 @@ impl<T: Transport> Session<T> {
     /// verified manifest's rules produced.
     async fn write(&mut self, partition: &Partition, data: &[u8]) -> Result<()> {
         if data.len() as u64 > self.facts.max_download_size {
-            return Err(Error::Refused(format!("{} bytes is over the phone's max-download-size", data.len())));
+            return Err(Error::Refused(format!(
+                "{} bytes is over the phone's max-download-size",
+                data.len()
+            )));
         }
         self.still_pinned().await?;
         if self.dry_run {
-            self.client.log.push(format!("would: download {} bytes, flash:{}", data.len(), partition.name()));
+            self.client.log.push(format!(
+                "would: download {} bytes, flash:{}",
+                data.len(),
+                partition.name()
+            ));
             return Ok(());
         }
         self.client.download(data).await?;
-        self.client.simple(&format!("flash:{}", partition.name())).await?;
+        self.client
+            .simple(&format!("flash:{}", partition.name()))
+            .await?;
         Ok(())
     }
 
     /// Write the next boot image of the plan to its slot B partition.
     pub async fn flash_boot(&mut self, image: &VerifiedImage<'_>) -> Result<()> {
         let State::Boot(next) = self.state else {
-            return Err(Error::Refused("boot images are written first, once each".into()));
+            return Err(Error::Refused(
+                "boot images are written first, once each".into(),
+            ));
         };
         if image.release != self.release.id() {
-            return Err(Error::Refused("the image was verified against another release".into()));
+            return Err(Error::Refused(
+                "the image was verified against another release".into(),
+            ));
         }
         if image.index != next {
-            return Err(Error::Refused("boot images are written in the manifest's order".into()));
+            return Err(Error::Refused(
+                "boot images are written in the manifest's order".into(),
+            ));
         }
         let partition = self.release.manifest().boot_writes[next].partition.clone();
         match self.write(&partition, image.bytes).await {
@@ -345,36 +477,65 @@ impl<T: Transport> Session<T> {
 
     /// After the last boot image: `userdata` is next. `image_len` is the raw
     /// root image's size; it must fit the partition.
-    pub async fn begin_userdata(&mut self, proof: &VerifiedRootImage, image_len: u64) -> Result<()> {
+    pub async fn begin_userdata(
+        &mut self,
+        proof: &VerifiedRootImage,
+        image_len: u64,
+    ) -> Result<()> {
         let boots = self.release.manifest().boot_writes.len();
         if self.state != State::Boot(boots) {
-            return Err(Error::Refused("userdata is written after every boot image, once".into()));
+            return Err(Error::Refused(
+                "userdata is written after every boot image, once".into(),
+            ));
         }
         if proof.release != self.release.id() {
-            return Err(Error::Refused("the root image was verified against another release".into()));
+            return Err(Error::Refused(
+                "the root image was verified against another release".into(),
+            ));
         }
-        let size = parse_size(&self.client.getvar("partition-size:userdata").await?).ok_or_else(|| Error::Phone("the phone reports no partition-size for userdata".into()))?;
+        let size =
+            parse_size(&self.client.getvar("partition-size:userdata").await?).ok_or_else(|| {
+                Error::Phone("the phone reports no partition-size for userdata".into())
+            })?;
         if image_len > size {
-            return Err(Error::Phone(format!("the root image is {image_len} bytes, larger than userdata ({size} bytes)")));
+            return Err(Error::Phone(format!(
+                "the root image is {image_len} bytes, larger than userdata ({size} bytes)"
+            )));
         }
-        self.state = State::Userdata { image_len, segments: 0 };
+        self.state = State::Userdata {
+            image_len,
+            segments: 0,
+        };
         Ok(())
     }
 
     /// One sparse image of the root image, as [`crate::install::UserdataStream`] cuts them.
     pub async fn flash_userdata_segment(&mut self, segment: &[u8]) -> Result<()> {
-        let State::Userdata { image_len, segments } = self.state else {
+        let State::Userdata {
+            image_len,
+            segments,
+        } = self.state
+        else {
             return Err(Error::Refused("no userdata write is open".into()));
         };
         // A sparse image of exactly this root image, nothing else
-        let header_ok = segment.len() >= 28 && segment[0..4] == 0xed26_ff3a_u32.to_le_bytes() && u32::from_le_bytes(segment[12..16].try_into().unwrap()) as u64 * u32::from_le_bytes(segment[16..20].try_into().unwrap()) as u64 == image_len;
+        let header_ok = segment.len() >= 28
+            && segment[0..4] == 0xed26_ff3a_u32.to_le_bytes()
+            && u32::from_le_bytes(segment[12..16].try_into().unwrap()) as u64
+                * u32::from_le_bytes(segment[16..20].try_into().unwrap()) as u64
+                == image_len;
         if !header_ok {
-            return self.fail(Error::Refused("not a sparse image of the root image".into()));
+            return self.fail(Error::Refused(
+                "not a sparse image of the root image".into(),
+            ));
         }
         let partition = self.release.manifest().root_image.partition.clone();
         match self.write(&partition, segment).await {
             Ok(()) => {
-                self.state = State::Userdata { image_len, segments: segments + 1 };
+                self.state = State::Userdata {
+                    image_len,
+                    segments: segments + 1,
+                };
                 Ok(())
             }
             Err(e) => self.fail(e),
@@ -394,7 +555,9 @@ impl<T: Transport> Session<T> {
     /// Make slot B active and restart, only after every write succeeded.
     pub async fn activate_and_reboot(&mut self) -> Result<()> {
         if self.state != State::UserdataDone {
-            return Err(Error::Refused("slot B is made active only after every write succeeded".into()));
+            return Err(Error::Refused(
+                "slot B is made active only after every write succeeded".into(),
+            ));
         }
         if let Err(e) = self.still_pinned().await {
             return self.fail(e);

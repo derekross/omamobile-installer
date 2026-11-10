@@ -44,8 +44,24 @@ pub struct FakeState {
 #[derive(Clone)]
 pub struct FakePhone(pub Rc<RefCell<FakeState>>);
 
-const SLOTTED: [(&str, usize); 8] = [("boot", 16 << 10), ("init_boot", 8 << 10), ("vendor_boot", 16 << 10), ("vendor_kernel_boot", 32 << 10), ("dtbo", 8 << 10), ("vbmeta", 4 << 10), ("bootloader", 8 << 10), ("modem", 8 << 10)];
-const PLAIN: [(&str, usize); 6] = [("userdata", 8 << 20), ("persist", 8 << 10), ("efs", 8 << 10), ("efs_backup", 8 << 10), ("devinfo", 4 << 10), ("misc", 4 << 10)];
+const SLOTTED: [(&str, usize); 8] = [
+    ("boot", 16 << 10),
+    ("init_boot", 8 << 10),
+    ("vendor_boot", 16 << 10),
+    ("vendor_kernel_boot", 32 << 10),
+    ("dtbo", 8 << 10),
+    ("vbmeta", 4 << 10),
+    ("bootloader", 8 << 10),
+    ("modem", 8 << 10),
+];
+const PLAIN: [(&str, usize); 6] = [
+    ("userdata", 8 << 20),
+    ("persist", 8 << 10),
+    ("efs", 8 << 10),
+    ("efs_backup", 8 << 10),
+    ("devinfo", 4 << 10),
+    ("misc", 4 << 10),
+];
 
 impl FakePhone {
     /// An unlocked phone of this product on slot a.
@@ -58,9 +74,20 @@ impl FakePhone {
         for (name, size) in PLAIN {
             partitions.insert(name.to_string(), vec![SENTINEL; size]);
         }
-        let vars = [("product", product), ("serialno", SERIAL), ("unlocked", "yes"), ("current-slot", "a"), ("version-bootloader", "fake-1.0"), ("version-baseband", "fake-radio-1.0"), ("slot-count", "2")];
+        let vars = [
+            ("product", product),
+            ("serialno", SERIAL),
+            ("unlocked", "yes"),
+            ("current-slot", "a"),
+            ("version-bootloader", "fake-1.0"),
+            ("version-baseband", "fake-radio-1.0"),
+            ("slot-count", "2"),
+        ];
         FakePhone(Rc::new(RefCell::new(FakeState {
-            vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             partitions,
             log: Vec::new(),
             active_slot: "a".into(),
@@ -92,7 +119,13 @@ impl FakePhone {
 
     /// Names of the partitions that no longer hold only the sentinel.
     pub fn written(&self) -> Vec<String> {
-        self.0.borrow().partitions.iter().filter(|(_, d)| d.iter().any(|b| *b != SENTINEL)).map(|(n, _)| n.clone()).collect()
+        self.0
+            .borrow()
+            .partitions
+            .iter()
+            .filter(|(_, d)| d.iter().any(|b| *b != SENTINEL))
+            .map(|(n, _)| n.clone())
+            .collect()
     }
 }
 
@@ -121,7 +154,11 @@ pub fn unsparse(image: &[u8], target: &mut [u8]) -> core::result::Result<(), Str
         if image.len() < at + 12 {
             return Err("truncated chunk header".into());
         }
-        let (kind, n, total_sz) = (le16(&image[at..]), le32(&image[at + 4..]), le32(&image[at + 8..]));
+        let (kind, n, total_sz) = (
+            le16(&image[at..]),
+            le32(&image[at + 4..]),
+            le32(&image[at + 8..]),
+        );
         let data = image.get(at + 12..at + total_sz).ok_or("truncated chunk")?;
         if block + n > total_blks {
             return Err("chunks run past total_blks".into());
@@ -129,7 +166,9 @@ pub fn unsparse(image: &[u8], target: &mut [u8]) -> core::result::Result<(), Str
         let out = &mut target[block * blk..(block + n) * blk];
         match kind {
             0xcac1 if data.len() == n * blk => out.copy_from_slice(data),
-            0xcac2 if data.len() == 4 => out.chunks_exact_mut(4).for_each(|w| w.copy_from_slice(data)),
+            0xcac2 if data.len() == 4 => out
+                .chunks_exact_mut(4)
+                .for_each(|w| w.copy_from_slice(data)),
             0xcac3 if data.is_empty() => {}
             _ => return Err(format!("bad chunk {kind:#x}")),
         }
@@ -189,11 +228,15 @@ impl FakeState {
                 Err(_) => self.reply("FAIL", "bad download size"),
             }
         } else if let Some(part) = cmd.strip_prefix("flash:") {
-            let Some(data) = self.staged.take() else { return self.reply("FAIL", "nothing downloaded") };
+            let Some(data) = self.staged.take() else {
+                return self.reply("FAIL", "nothing downloaded");
+            };
             if self.vars.get("unlocked").map(String::as_str) != Some("yes") {
                 return self.reply("FAIL", "device is locked");
             }
-            let Some(target) = self.partitions.get_mut(part) else { return self.reply("FAIL", "partition does not exist") };
+            let Some(target) = self.partitions.get_mut(part) else {
+                return self.reply("FAIL", "partition does not exist");
+            };
             let result = if data.len() >= 4 && le32(&data) == 0xed26_ff3a {
                 unsparse(&data, target)
             } else if data.len() <= target.len() {
@@ -229,7 +272,10 @@ impl Transport for FakePhone {
             return Err(Error::Transport("the phone left the bus".into()));
         }
         if s.expecting > 0 {
-            let take = data.len().min(s.take_at_most.unwrap_or(usize::MAX)).min(s.expecting - s.incoming.len());
+            let take = data
+                .len()
+                .min(s.take_at_most.unwrap_or(usize::MAX))
+                .min(s.expecting - s.incoming.len());
             s.incoming.extend_from_slice(&data[..take]);
             if s.incoming.len() == s.expecting {
                 s.expecting = 0;
@@ -246,6 +292,10 @@ impl Transport for FakePhone {
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
-        self.0.borrow_mut().replies.pop_front().ok_or_else(|| Error::Transport("timed out waiting for the phone".into()))
+        self.0
+            .borrow_mut()
+            .replies
+            .pop_front()
+            .ok_or_else(|| Error::Transport("timed out waiting for the phone".into()))
     }
 }
