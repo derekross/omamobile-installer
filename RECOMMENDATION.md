@@ -1,6 +1,8 @@
 # Installer core: Rust or TypeScript, and which UI (decision D5)
 
-A spike for [INSTALL-EXPERIENCE-PLAN](../../docs/INSTALL-EXPERIENCE-PLAN.md) M3 and M4, built on 2026-11-10 with rustc 1.98.1 on x86_64 Linux. No command was sent to a real phone: every fastboot test runs against a fake device.
+A spike for Omarchy Mobile's [INSTALL-EXPERIENCE-PLAN](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-EXPERIENCE-PLAN.md) M3 and M4, built on 2026-11-10 with rustc 1.98.1 on x86_64 Linux. No command was sent to a real phone: every fastboot test runs against a fake device.
+
+This is the spike's report, kept as it was written. What has been built since (the install flow, the build index, the unlock guidance) and what is open now are in [docs/DESIGN.md](docs/DESIGN.md); the sizes and test counts below are the spike's. One thing the spike's front ends did is gone: they take nobody's word for the other bootloader slot any more (the `--bootloader-slots-match` option).
 
 Each fact carries its source:
 
