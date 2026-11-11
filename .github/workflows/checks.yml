@@ -1,6 +1,7 @@
 # The gate for every push and pull request: no identifiers, formatted, the
-# core's tests against the fake phone, and the web build still compiles.
-# Nothing here touches a USB device: the tests use a fake transport.
+# core's tests and the command-line tool's flow against the fake phone, and
+# the web page built both ways. Nothing here touches a USB device: the tests
+# use a fake transport, and no step lists or opens USB devices.
 name: Checks
 on:
   push:
@@ -29,7 +30,36 @@ jobs:
         run: cargo fmt --all --check
       - name: Lints (errors fail; warnings are listed)
         run: cargo clippy --locked
-      - name: Tests (the core, against the fake phone)
+      - name: Tests (the core, against the fake phone; the install flow and the build index among them)
         run: cargo test --locked
-      - name: The web build compiles
-        run: cargo check --locked -p omamobile-installer-web --target wasm32-unknown-unknown
+      - name: Tests (the command-line tool driving the flow against the pretend phone)
+        run: cargo test --locked -p omamobile-installer-cli --features fake-phone
+      # web/build.sh needs wasm-bindgen-cli at exactly the wasm-bindgen
+      # version in Cargo.lock. Built once per version and kept.
+      - name: Which wasm-bindgen Cargo.lock names
+        id: wbg
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "no wasm-bindgen version in Cargo.lock"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: wasm-bindgen-cli, from an earlier run
+        id: wbg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.wbg.outputs.version }}
+      - name: wasm-bindgen-cli, built
+        if: steps.wbg-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked wasm-bindgen-cli --version "${{ steps.wbg.outputs.version }}"
+      - name: The web page builds with the pretend phone (for its self-test)
+        run: |
+          web/build.sh selftest
+          grep -q fake_phone web/dist/pkg/omamobile_installer_web.js
+      - name: The web page builds as it would ship, without the pretend phone
+        run: |
+          web/build.sh
+          test -s web/dist/pkg/omamobile_installer_web_bg.wasm
+          test -s web/dist/index.html
+          if grep -q fake_phone web/dist/pkg/omamobile_installer_web.js; then
+            echo "the shipping build carries the pretend phone"; exit 1
+          fi
