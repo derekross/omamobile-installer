@@ -24,6 +24,7 @@ pub mod bundle;
 pub mod device_conf;
 pub mod error;
 pub mod fastboot;
+pub mod flow;
 pub mod hash;
 pub mod install;
 pub mod manifest;
