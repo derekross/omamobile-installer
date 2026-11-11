@@ -403,6 +403,22 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
     let bundle = TestBundle::new();
     let phone = phone("locked");
     let mut flow = flow_at(&bundle, &phone, "phone");
+    // How to reach Fastboot Mode comes from the descriptor, when it says
+    assert!(flow.screen().body[0].contains("hold Volume Down, then also hold Power"));
+    let silent = TestBundle::build(
+        |_| {},
+        |c| {
+            c.lines()
+                .filter(|l| !l.starts_with("INSTALL_KEYS_FASTBOOT"))
+                .map(|l| format!("{l}\n"))
+                .collect()
+        },
+    );
+    let elsewhere = flow_at(&silent, &phone, "phone").screen().body[0].clone();
+    assert!(
+        elsewhere.contains("https://omamobile.org/devices/cheetah"),
+        "{elsewhere}"
+    );
     // Nothing found yet: said, and the step stays
     flow.no_phone().unwrap();
     assert_eq!(flow.step(), &Step::Phone { not_found: true });
@@ -442,10 +458,27 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
     assert!(flow.factory_zip(&bundle.factory_zip_name, 1).is_err());
     assert!(block_on(flow.dry_run(phone.clone())).is_err());
 
-    // The owner unlocked it: on to the factory image
+    // A stop after the unlock steps were shown says what unlocking did
+    let mut stopped = flow_at(&bundle, &phone, "phone");
+    look(&mut stopped, &phone).unwrap();
+    assert_eq!(stopped.step(), &Step::Unlock);
     phone.edit(|s| {
         s.vars.insert("unlocked".into(), "yes".into());
+        s.vars.insert("current-slot".into(), "b".into());
     });
+    look(&mut stopped, &phone).unwrap();
+    let s = stop(&stopped);
+    assert_eq!(
+        (s.id(), s.phone),
+        ("runs-from-slot-b", PhoneFact::OnlyReadUnlockShown)
+    );
+    assert!(s.footer().join(" ").contains("that erased the phone"));
+    footer_is_honest(s);
+    phone.edit(|s| {
+        s.vars.insert("current-slot".into(), "a".into());
+    });
+
+    // The owner unlocked it: on to the factory image
     look(&mut flow, &phone).unwrap();
     assert!(matches!(flow.step(), Step::FactoryImage { build, .. } if build.build == PHONE_BUILD));
     only_getvar(&phone);

@@ -108,6 +108,7 @@ pub fn default_conf() -> String {
         "# test descriptor",
         "CODENAME=cheetah",
         "NAME=\"Pixel 7 Pro\"",
+        "INSTALL_KEYS_FASTBOOT=\"with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears\"",
         "SOC_IDS=\"b0:0x9855001 a0:0x9855000\"",
         "AVB_FOOTERS=\"boot:0x4000 init_boot:0x2000\"",
         "BOOT_IMAGES=\"boot init_boot vendor_boot vendor_kernel_boot dtbo\"",

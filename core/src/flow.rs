@@ -579,8 +579,13 @@ fn step(text: impl Into<String>) -> ScreenStep {
     }
 }
 
-fn gigabytes(size: u64) -> String {
-    format!("{:.1} GB", size as f64 / 1e9)
+/// A file's size for a person: `3.9 GB`, or megabytes below one.
+fn about(size: u64) -> String {
+    if size >= 1_000_000_000 {
+        format!("{:.1} GB", size as f64 / 1e9)
+    } else {
+        format!("{:.1} MB", size as f64 / 1e6)
+    }
 }
 
 impl Flow {
@@ -1335,14 +1340,14 @@ impl Flow {
                 ];
                 if !same_pair.is_empty() {
                     s.body.push(format!(
-                        "({} carry the same two versions and can't be told apart from here; {} is the one used.)",
+                        "(Also in the list with the same two versions, which can't be told apart from here: {}. {} is the tested one, and the one used.)",
                         same_pair.join(", "),
                         build.build
                     ));
                 }
                 s.steps = vec![
                     step("Open Google's page (the link below) and accept Google's terms there."),
-                    step(format!("Find build {} in the list for \"{codename}\" and save its file. It is about {}: {}", build.build, gigabytes(build.size), build.zip)),
+                    step(format!("Find build {} in the list for \"{codename}\" and save its file. It is about {}: {}", build.build, about(build.size), build.zip)),
                     step("Hand the saved file to the installer. It checks the file's size and SHA-256 against the release's signed list."),
                 ];
                 s.link = Some(build.page.clone());

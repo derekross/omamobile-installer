@@ -11,8 +11,8 @@
     },
     {
       "path": "device.conf",
-      "sha256": "6b01fb29b00e4fae0b2d5f473f75334aed31b27a01d5cce8afa9b639020cedf7",
-      "size": 277
+      "sha256": "d0d81efd9c0b395d41d77403dcb0f3d81467aa5060cc2524ce6bfb4b52f8746c",
+      "size": 389
     },
     {
       "path": "images/boot.img",
@@ -41,8 +41,13 @@
     },
     {
       "path": "omamobile.gpg",
-      "sha256": "f8a75813ac9ec0139230c0af69002933080dd1bcad4c84f029d9b5419d08123c",
+      "sha256": "97bf5d9bcdf8eebdb29cf5a9aaf066624366c9b24a9fd0b9495a1ee148d7161b",
       "size": 215
+    },
+    {
+      "path": "factory-builds.json",
+      "sha256": "8345cb4c3a4d0abf16f489ee53078ab483a7acbd3b6b9270dd3177f782682875",
+      "size": 2545
     }
   ],
   "format": 1,

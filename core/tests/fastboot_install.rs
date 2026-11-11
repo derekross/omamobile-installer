@@ -527,7 +527,9 @@ fn write_the_selftest_fixture() {
         put(&format!("images/{name}.img"), data);
     }
     put("factory-builds.json", &b.index_json);
-    // The stand-in for Google's factory zip that the index names; its real
-    // name is in the index (it carries its own digest)
-    put("factory.zip", &b.factory_zip);
+    // The stand-in for Google's factory zip, under the name the index gives
+    // it (the name carries its digest, so it changes only with the bytes)
+    let _ = std::fs::remove_dir_all(dir.join("factory"));
+    std::fs::create_dir_all(dir.join("factory")).unwrap();
+    put(&format!("factory/{}", b.factory_zip_name), &b.factory_zip);
 }
