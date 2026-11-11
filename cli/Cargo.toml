@@ -9,6 +9,17 @@ publish.workspace = true
 name = "omamobile-install"
 path = "src/main.rs"
 
+[features]
+# Builds the tests' pretend phone (core/tests/support/fake.rs) into the tool,
+# for `omamobile-install flow DIR --fake-phone STATE`: the whole install flow
+# with no USB device. That command trusts the test key beside a test bundle,
+# so it is not in a default build.
+fake-phone = []
+
+[[test]]
+name = "flow_fake_phone"
+required-features = ["fake-phone"]
+
 [dependencies]
 omamobile-installer-core = { path = "../core" }
 omamobile-installer-usb = { path = "../usb" }
