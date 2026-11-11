@@ -104,10 +104,75 @@ impl FakePhone {
         })))
     }
 
+    /// A phone in one of the states an install can meet, by name: for the
+    /// flow's tests and for the front ends' pretend phone.
+    pub fn scenario(name: &str) -> Option<Self> {
+        let phone = FakePhone::new(if name == "other-model" {
+            "panther"
+        } else {
+            "cheetah"
+        });
+        let set = |pairs: &[(&str, &str)]| {
+            phone.edit(|s| {
+                for (k, v) in pairs {
+                    s.vars.insert(k.to_string(), v.to_string());
+                }
+            });
+        };
+        // A bootloader that reports both slots' versions, as the flow needs
+        let slots = |v: &str| {
+            set(&[
+                ("version-bootloader", v),
+                ("version-bootloader-a", v),
+                ("version-bootloader-b", v),
+            ])
+        };
+        slots("fake-1.0");
+        match name {
+            "ready" | "other-model" => {}
+            "locked" => set(&[("unlocked", "no")]),
+            "slot-b" => set(&[("current-slot", "b")]),
+            "one-slot" => {
+                phone.edit(|s| {
+                    s.vars.remove("version-bootloader-a");
+                    s.vars.remove("version-bootloader-b");
+                });
+            }
+            "slots-differ" => set(&[("version-bootloader-b", "fake-0.9")]),
+            "unknown-build" => {
+                slots("fake-7.7");
+                set(&[("version-baseband", "fake-radio-7.7")]);
+            }
+            "untested-build" => {
+                slots("fake-1.2");
+                set(&[("version-baseband", "fake-radio-1.2")]);
+            }
+            "untested-old-build" => {
+                slots("fake-0.9");
+                set(&[("version-baseband", "fake-radio-0.9")]);
+            }
+            _ => return None,
+        }
+        Some(phone)
+    }
+
     pub fn edit(&self, f: impl FnOnce(&mut FakeState)) -> &Self {
         f(&mut self.0.borrow_mut());
         self
     }
+
+    /// The names [`Self::scenario`] knows.
+    pub const SCENARIOS: [&'static str; 9] = [
+        "ready",
+        "locked",
+        "other-model",
+        "slot-b",
+        "one-slot",
+        "slots-differ",
+        "unknown-build",
+        "untested-build",
+        "untested-old-build",
+    ];
 
     pub fn partition(&self, name: &str) -> Vec<u8> {
         self.0.borrow().partitions[name].clone()
@@ -167,7 +232,9 @@ pub fn unsparse(image: &[u8], target: &mut [u8]) -> core::result::Result<(), Str
         match kind {
             0xcac1 if data.len() == n * blk => out.copy_from_slice(data),
             0xcac2 if data.len() == 4 => out
-                .chunks_exact_mut(4)
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
                 .for_each(|w| w.copy_from_slice(data)),
             0xcac3 if data.is_empty() => {}
             _ => return Err(format!("bad chunk {kind:#x}")),

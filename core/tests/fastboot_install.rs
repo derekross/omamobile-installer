@@ -526,4 +526,8 @@ fn write_the_selftest_fixture() {
     for (name, data) in &b.images {
         put(&format!("images/{name}.img"), data);
     }
+    put("factory-builds.json", &b.index_json);
+    // The stand-in for Google's factory zip that the index names; its real
+    // name is in the index (it carries its own digest)
+    put("factory.zip", &b.factory_zip);
 }

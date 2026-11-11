@@ -24,6 +24,7 @@
 //! Before every write the phone's serial number and product are read again
 //! and must still be the ones pinned at `connect`.
 use crate::bundle::{VerifiedImage, VerifiedRelease, VerifiedRootImage};
+use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
 use crate::sparse;
 use crate::{Error, Result};
@@ -49,6 +50,110 @@ pub trait Transport {
     async fn send(&mut self, data: &[u8]) -> Result<usize>;
     /// One packet from the phone.
     async fn recv(&mut self) -> Result<Vec<u8>>;
+}
+
+/// A transport lent for a few read-only questions ([`probe`]).
+impl<T: Transport + ?Sized> Transport for &mut T {
+    async fn send(&mut self, data: &[u8]) -> Result<usize> {
+        (**self).send(data).await
+    }
+    async fn recv(&mut self) -> Result<Vec<u8>> {
+        (**self).recv().await
+    }
+}
+
+/// Which phone: the SHA-256 of the serial number fastboot reports. The
+/// install is pinned to one, and every later step compares against it. It
+/// is a digest so that nothing holding it prints a serial number by
+/// accident; it still identifies the phone, so treat it as private.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PhoneId(String);
+
+impl PhoneId {
+    /// `None` for an empty serial: a phone that tells none can't be pinned.
+    pub fn of_serial(serial: &str) -> Option<Self> {
+        (!serial.is_empty()).then(|| PhoneId(sha256_hex(serial.as_bytes())))
+    }
+}
+
+impl core::fmt::Debug for PhoneId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PhoneId(..)")
+    }
+}
+
+/// What a phone in fastboot mode says about itself, locked or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneReport {
+    pub id: PhoneId,
+    pub product: String,
+    pub unlocked: bool,
+    /// `a` or `b`.
+    pub current_slot: String,
+    /// The current slot's bootloader version.
+    pub bootloader: String,
+    pub baseband: Option<String>,
+    /// Both slots' bootloader versions (a, b), when the phone reports them.
+    pub slot_bootloaders: Option<(String, String)>,
+}
+
+/// `version-bootloader` for one slot among `getvar:all`'s lines, under any
+/// of the spellings a bootloader may use.
+fn slot_bootloader(all: &[String], slot: char) -> Option<String> {
+    all.iter().find_map(|line| {
+        let rest = line.strip_prefix("version-bootloader")?;
+        let mut c = rest.chars();
+        let sep = c.next()?;
+        (matches!(sep, '-' | '_' | ':') && c.next()? == slot)
+            .then(|| c.as_str().strip_prefix(':').map(|v| v.trim().to_string()))
+            .flatten()
+    })
+}
+
+/// Ask a phone in fastboot mode what it is. Sends `getvar:` commands and
+/// nothing else, so it is safe on a locked phone and before any decision.
+pub async fn probe<T: Transport>(transport: &mut T) -> Result<PhoneReport> {
+    let mut client = Client {
+        transport,
+        log: Vec::new(),
+    };
+    let id = PhoneId::of_serial(&client.getvar("serialno").await?).ok_or_else(|| {
+        Error::Phone("the phone tells no serial number, so an install can't be tied to it".into())
+    })?;
+    let product = client.getvar("product").await?;
+    let unlocked = client.getvar("unlocked").await? == "yes";
+    let current_slot = client
+        .getvar("current-slot")
+        .await?
+        .trim_start_matches('_')
+        .to_string();
+    if current_slot != "a" && current_slot != "b" {
+        return Err(Error::Phone(format!(
+            "the phone reports current slot '{current_slot}'"
+        )));
+    }
+    let bootloader = client.getvar("version-bootloader").await?;
+    if bootloader.is_empty() {
+        return Err(Error::Phone(
+            "the phone reports no version-bootloader".into(),
+        ));
+    }
+    let baseband = client
+        .getvar("version-baseband")
+        .await
+        .ok()
+        .filter(|v| !v.is_empty());
+    let all = client.getvar_all().await?;
+    let slot_bootloaders = slot_bootloader(&all, 'a').zip(slot_bootloader(&all, 'b'));
+    Ok(PhoneReport {
+        id,
+        product,
+        unlocked,
+        current_slot,
+        bootloader,
+        baseband,
+        slot_bootloaders,
+    })
 }
 
 enum Reply {
@@ -239,18 +344,26 @@ impl<T: Transport> Session<T> {
         expected_serial: &str,
         options: PhoneOptions,
     ) -> Result<Self> {
+        let expected = PhoneId::of_serial(expected_serial)
+            .ok_or_else(|| Error::Refused("no serial number to pin the phone to".into()))?;
+        Self::connect_pinned(transport, release, &expected, options).await
+    }
+
+    /// As [`Self::connect`], for a phone already known by its [`PhoneId`]
+    /// (the one an earlier step looked at).
+    pub async fn connect_pinned(
+        transport: T,
+        release: &VerifiedRelease,
+        expected: &PhoneId,
+        options: PhoneOptions,
+    ) -> Result<Self> {
         let m: &Manifest = release.manifest();
         let mut client = Client {
             transport,
             log: Vec::new(),
         };
-        if expected_serial.is_empty() {
-            return Err(Error::Refused(
-                "no serial number to pin the phone to".into(),
-            ));
-        }
         let serial = client.getvar("serialno").await?;
-        if serial != expected_serial {
+        if PhoneId::of_serial(&serial).as_ref() != Some(expected) {
             return Err(Error::Refused(
                 "the phone that answered is not the one that was chosen (serial numbers differ)"
                     .into(),
@@ -292,16 +405,7 @@ impl<T: Transport> Session<T> {
         }
         // Setting slot B active runs slot B's bootloader: both must match.
         let all = client.getvar_all().await?;
-        let per_slot = |slot: char| {
-            all.iter().find_map(|line| {
-                let rest = line.strip_prefix("version-bootloader")?;
-                let mut c = rest.chars();
-                let sep = c.next()?;
-                (matches!(sep, '-' | '_' | ':') && c.next()? == slot)
-                    .then(|| c.as_str().strip_prefix(':').map(|v| v.trim().to_string()))
-                    .flatten()
-            })
-        };
+        let per_slot = |slot: char| slot_bootloader(&all, slot);
         match (per_slot('a'), per_slot('b'), &options.bootloader_slots_confirmed) {
             (Some(a), Some(b), _) if a == b => {}
             (Some(a), Some(b), _) => return Err(Error::Phone(format!("the bootloader slots differ (a: {a}, b: {b})"))),
@@ -403,6 +507,13 @@ impl<T: Transport> Session<T> {
     }
     pub fn into_transport(self) -> T {
         self.client.transport
+    }
+    /// Whether this session holds every write back.
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+    pub(crate) fn release_id(&self) -> &str {
+        self.release.id()
     }
 
     fn fail<V>(&mut self, e: Error) -> Result<V> {

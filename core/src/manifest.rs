@@ -88,6 +88,10 @@ struct RawInstall {
     writes: Vec<RawWrite>,
     #[serde(default)]
     tool: Option<String>,
+    // Not written by any release yet: read so that a release which states
+    // the rule can be installed by this version (docs/DESIGN.md).
+    #[serde(default)]
+    bootloader_slot_probe: Option<bool>,
     #[serde(default)]
     #[allow(dead_code)] // documentation for people; the rules are in code
     never: Vec<String>,
@@ -153,6 +157,9 @@ pub struct Manifest {
     pub allowlist: Vec<String>,
     pub boot_writes: Vec<BootWrite>,
     pub root_image: RootImage,
+    /// `install.bootloader_slot_probe`, when the manifest states it. It must
+    /// agree with the descriptor's `BOOTLOADER_SLOT_PROBE`.
+    pub bootloader_slot_probe: Option<bool>,
 }
 
 fn err<T>(why: impl Into<String>) -> Result<T> {
@@ -381,6 +388,7 @@ impl Manifest {
             files,
             allowlist: allow,
             boot_writes,
+            bootloader_slot_probe: i.bootloader_slot_probe,
             root_image: RootImage {
                 name: r.name,
                 sha256: r.sha256,
@@ -419,6 +427,15 @@ impl Manifest {
                 )
             }
             _ => {}
+        }
+        // The slot probe changes what an install sends to the phone, so the
+        // signed plan and the descriptor may not disagree about it.
+        let probe = conf.bootloader_slot_probe()?;
+        if self.bootloader_slot_probe.is_some_and(|m| m != probe) {
+            return bad(format!(
+                "BOOTLOADER_SLOT_PROBE ({}) is not manifest.json's install.bootloader_slot_probe",
+                if probe { "yes" } else { "no or unset" }
+            ));
         }
         let images = conf.list("BOOT_IMAGES");
         let ours: Vec<&str> = self.boot_writes.iter().map(|b| b.image.as_str()).collect();

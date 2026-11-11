@@ -19,6 +19,7 @@
 //! Nothing here does I/O on its own: bytes come in from the caller, and the
 //! only way out is the transport trait.
 
+pub mod build_index;
 pub mod bundle;
 pub mod device_conf;
 pub mod error;

@@ -8,6 +8,8 @@ pub enum Error {
     Manifest(String),
     /// `device.conf` is not a valid descriptor, or disagrees with the manifest.
     DeviceConf(String),
+    /// `factory-builds.json` is not a valid build index.
+    BuildIndex(String),
     /// A file does not match its signed checksum or size.
     Checksum(String),
     /// The signature is missing, invalid or not by a trusted key.
@@ -35,6 +37,7 @@ impl fmt::Display for Error {
         match self {
             Error::Manifest(s) => write!(f, "manifest.json: {s}"),
             Error::DeviceConf(s) => write!(f, "device.conf: {s}"),
+            Error::BuildIndex(s) => write!(f, "factory-builds.json: {s}"),
             Error::Checksum(s) => write!(f, "checksum: {s}"),
             Error::Signature(s) => write!(f, "signature: {s}"),
             Error::Refused(s) => write!(f, "refused: {s}"),
