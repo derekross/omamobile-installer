@@ -931,6 +931,36 @@ fn a_phone_swapped_between_steps_stops_the_install() {
 }
 
 #[test]
+fn a_phone_that_tells_no_serial_number_is_not_taken() {
+    // Nothing could tie an install to it, so nothing is decided on it
+    let bundle = TestBundle::new();
+    let phone = phone("ready");
+    phone.edit(|s| {
+        s.vars.insert("serialno".into(), String::new());
+    });
+    let mut flow = flow_at(&bundle, &phone, "phone");
+    assert!(matches!(
+        look(&mut flow, &phone),
+        Err(Error::Phone(why)) if why.contains("tells no serial number")
+    ));
+    assert_eq!(flow.screen().state, "phone");
+    assert!(PhoneId::of_serial("").is_none());
+    assert_eq!(phone.log(), ["getvar:serialno"]);
+    // And the same at the dry run, for a phone that told one before
+    let phone = self::phone("ready");
+    let mut flow = flow_at(&bundle, &phone, "dry-run");
+    phone.edit(|s| {
+        s.vars.insert("serialno".into(), String::new());
+    });
+    assert!(matches!(
+        block_on(flow.dry_run(phone.clone())),
+        Err(Error::Phone(_))
+    ));
+    assert_eq!(flow.screen().state, "dry-run");
+    only_getvar(&phone);
+}
+
+#[test]
 fn the_dry_run_judges_the_phone_again() {
     let bundle = TestBundle::new();
     let set = |p: &FakePhone, pairs: &[(&str, &str)]| {
