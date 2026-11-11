@@ -1,11 +1,27 @@
 :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.5; }
 main { max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
 h1 small { font-weight: normal; opacity: 0.6; }
-section { border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent); padding-top: 0.5rem; }
+section { border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent); padding-top: 0.5rem; margin-top: 1rem; }
+.banner { border: 2px solid currentColor; border-radius: 0.4rem; padding: 0.6rem 0.8rem; font-weight: 600; }
 .pending { opacity: 0.6; }
 .ok::before { content: "ok  "; font-weight: bold; }
 .bad { color: #c22; }
 .bad::before { content: "refused  "; font-weight: bold; }
-ul { padding-left: 1.2rem; font-family: ui-monospace, monospace; font-size: 0.9rem; }
+.problem { color: #c22; font-weight: 600; }
+#progress { display: flex; flex-wrap: wrap; gap: 0.3rem 2.4rem; padding-left: 1.2rem; opacity: 0.8; }
+#progress li.now { font-weight: bold; opacity: 1; }
+#progress li.past { text-decoration: line-through; opacity: 0.6; }
+#screen ol li { margin-bottom: 0.5rem; }
+#screen .plan { padding-left: 1.2rem; font-family: ui-monospace, monospace; font-size: 0.9rem; }
+#screen .command { display: block; margin: 0.4rem 0; padding: 0.5rem 0.8rem; border: 1px solid color-mix(in srgb, currentColor 40%, transparent); border-radius: 0.3rem; font-family: ui-monospace, monospace; user-select: all; }
+#screen .command-note { font-size: 0.9rem; opacity: 0.8; }
+#screen .footer { border-left: 3px solid currentColor; padding-left: 0.8rem; margin-top: 1rem; }
+#screen.stopped h2 { color: #c22; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin-top: 1rem; }
+form.answers { display: grid; grid-template-columns: minmax(10rem, max-content) 1fr; gap: 0.5rem 0.8rem; align-items: center; }
+form.answers .field-problem { grid-column: 2; color: #c22; margin: -0.3rem 0 0; }
+form.answers .actions { grid-column: 1 / -1; }
+input, select, button { font: inherit; }
+button, a.button { padding: 0.4rem 0.8rem; }
+progress { width: 100%; }
 pre { white-space: pre-wrap; }
-button { font: inherit; padding: 0.4rem 0.8rem; }
