@@ -570,7 +570,7 @@ async function selftest() {
       !$("quote") &&
       !!$("zip") &&
       text().includes("A web page is not allowed to read files from Google's server, so this page cannot download the image for you.") &&
-      text().includes("The installer's desktop app and its command-line tool can download it for you.") &&
+      text().includes("The installer's command-line tool can download it for you.") &&
       !text().includes("got no answer") &&
       stepCount() === 3 &&
       $("google").href.startsWith("https://developers.google.com/android/images") &&

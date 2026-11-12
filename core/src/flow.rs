@@ -73,7 +73,7 @@ pub const GOOGLE_PRIVACY_POLICY: &str = "https://policies.google.com/privacy";
 /// the terms step: why the owner fetches the file by hand there. Measured on
 /// 2026-11-12: `dl.google.com` sends no `Access-Control-Allow-Origin`
 /// header, so a browser lets no page read the file.
-pub const CANNOT_FETCH_FROM_GOOGLE: &str = "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's desktop app and its command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.";
+pub const CANNOT_FETCH_FROM_GOOGLE: &str = "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.";
 /// The command the owner runs to unlock the bootloader. Shown, never sent:
 /// the one `flashing` command this crate sends is the question
 /// [`crate::fastboot::GET_UNLOCK_ABILITY`], which only reads.

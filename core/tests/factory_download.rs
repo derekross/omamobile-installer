@@ -266,7 +266,7 @@ fn declining_the_terms_leaves_the_owners_own_download_and_the_installer_fetches_
 #[test]
 fn a_front_end_that_cannot_fetch_from_google_is_not_asked_for_googles_terms() {
     // What the owner reads in place of the terms step
-    assert_eq!(CANNOT_FETCH_FROM_GOOGLE, "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's desktop app and its command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.");
+    assert_eq!(CANNOT_FETCH_FROM_GOOGLE, "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.");
     let bundle = TestBundle::new();
     let id = omamobile_installer_core::fastboot::PhoneId::of_serial(SERIAL).unwrap();
     let begin = || {

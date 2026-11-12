@@ -15,8 +15,10 @@
 //!
 //! Nothing is dropped silently. A tab or a line break becomes a space, and
 //! every other such character is spelled out where it stood (`\u{1b}` for
-//! ESC), so the text still shows that something odd was there and two
-//! answers that differ only by one of them still differ.
+//! ESC), so the text still shows that something odd was there, and two
+//! answers that differ only by one of those still differ. (A tab and a
+//! line break both read as a space, so answers that differ only in which
+//! of the three stood there do not.)
 
 /// Whether `c` is acted on rather than shown: the C0 and C1 control
 /// characters and DEL, and the marks that change the reading order of the
