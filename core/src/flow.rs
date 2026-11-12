@@ -12,6 +12,8 @@
 //!   -> Phone          read_phone / no_phone
 //!   -> Unlock         read_phone again, after the owner unlocked
 //!   -> GoogleTerms    accept_google_terms / decline_google_terms
+//!                     (left out when the owner has the file, or the front
+//!                     end says it can't fetch from Google)
 //!   -> FactoryImage   factory_download, the fetch, factory_download_done; or
 //!                     factory_zip, then the bytes, then factory_zip_done
 //!   -> Answers        answers
@@ -66,6 +68,12 @@ pub const GOOGLE_TERMS: [&str; 2] = [
 pub const GOOGLE_TERMS_THIRD_PARTY: &str = "Google's page also says that the download and use \"may also be subject to certain third-party terms of service, which can be found in Settings > About phone > Legal information\".";
 pub const GOOGLE_TERMS_OF_SERVICE: &str = "https://policies.google.com/terms";
 pub const GOOGLE_PRIVACY_POLICY: &str = "https://policies.google.com/privacy";
+/// Said on the factory-image step of a front end that cannot fetch from
+/// Google's server ([`FlowOptions::cannot_fetch_from_google`]), in place of
+/// the terms step: why the owner fetches the file by hand there. Measured on
+/// 2026-11-12: `dl.google.com` sends no `Access-Control-Allow-Origin`
+/// header, so a browser lets no page read the file.
+pub const CANNOT_FETCH_FROM_GOOGLE: &str = "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's desktop app and its command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.";
 /// The command the owner runs to unlock the bootloader. Shown, never sent:
 /// the one `flashing` command this crate sends is the question
 /// [`crate::fastboot::GET_UNLOCK_ABILITY`], which only reads.
@@ -99,6 +107,15 @@ pub struct FlowOptions {
     /// so the step that shows Google's terms is left out: they were Google's
     /// to ask on its page.
     pub owner_has_factory_zip: bool,
+    /// The front end can't fetch the factory image from Google's server at
+    /// all, and says so here, once, at the start: a web page, which a
+    /// browser does not let read a file from `dl.google.com` (the server
+    /// sends no `Access-Control-Allow-Origin`; measured on 2026-11-12). The
+    /// flow then leaves the terms step out, as it does for an owner who has
+    /// the file: there are no terms to ask for a download that can't be
+    /// made. It goes straight to the owner's own download and says why
+    /// ([`CANNOT_FETCH_FROM_GOOGLE`]), and gives out no download.
+    pub cannot_fetch_from_google: bool,
 }
 
 /// The owner accepted Google's terms on the terms step: for which build,
@@ -148,6 +165,9 @@ pub enum ImageSource {
 pub enum OwnerFileWhy {
     /// They said up front that they have it ([`FlowOptions::owner_has_factory_zip`]).
     SaidSo,
+    /// The front end can't fetch from Google's server
+    /// ([`FlowOptions::cannot_fetch_from_google`]).
+    CannotFetch,
     /// They did not accept Google's terms in the installer.
     TermsDeclined,
     /// They accepted, and the installer could not download the file.
@@ -1027,6 +1047,17 @@ impl Flow {
                     trouble: None,
                 };
             }
+            // The front end can't download it: no terms are asked for a
+            // download that can't be made
+            Judged::Ready { build, same_pair } if self.options.cannot_fetch_from_google => {
+                self.step = Step::FactoryImage {
+                    build: *build,
+                    same_pair,
+                    source: ImageSource::OwnerFile(OwnerFileWhy::CannotFetch),
+                    refused: None,
+                    trouble: None,
+                };
+            }
             Judged::Ready { build, same_pair } => {
                 self.step = Step::GoogleTerms {
                     build: *build,
@@ -1852,6 +1883,7 @@ impl Flow {
                         s.action = "take-file";
                         s.body.push(match why {
                             OwnerFileWhy::SaidSo => "The installer downloads nothing in this run: it checks the file you saved from Google's page.".to_string(),
+                            OwnerFileWhy::CannotFetch => CANNOT_FETCH_FROM_GOOGLE.to_string(),
                             OwnerFileWhy::TermsDeclined => "You did not accept Google's terms in the installer, so it downloads nothing. You download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.".to_string(),
                             OwnerFileWhy::Unavailable(u) => format!(
                                 "The installer could not download the image from Google's server: {} That says nothing against the file. You can still go on: download the image from Google's page yourself, and the installer checks the file you saved.",

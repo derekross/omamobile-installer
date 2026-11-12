@@ -82,8 +82,9 @@ class StandIn(http.server.BaseHTTPRequestHandler):
 
     The first part of the path says how it answers; the last is the file's
     name in fixtures/selftest/factory. `allowed` is a server that lets a page
-    on another origin read its files, `refused` one that does not: which of
-    the two Google's server is has not been checked.
+    on another origin read its files, `refused` one that does not. Google's
+    server is the second kind (no Access-Control-Allow-Origin header, measured
+    on 2026-11-12), so the page as it ships begins no download at all.
     """
     files = HERE.parent / "fixtures" / "selftest" / "factory"
     asked = []

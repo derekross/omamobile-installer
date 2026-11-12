@@ -10,7 +10,8 @@ use omamobile_installer_core::download::{
 };
 use omamobile_installer_core::flow::{
     DownloadEnd, DownloadTrouble, Flow, FlowOptions, ImageSource, OwnerFileWhy, PhoneFact, Retry,
-    Step, Stop, StopKind, GOOGLE_PRIVACY_POLICY, GOOGLE_TERMS, GOOGLE_TERMS_OF_SERVICE,
+    Step, Stop, StopKind, CANNOT_FETCH_FROM_GOOGLE, GOOGLE_PRIVACY_POLICY, GOOGLE_TERMS,
+    GOOGLE_TERMS_OF_SERVICE,
 };
 use omamobile_installer_core::Error;
 use pollster::block_on;
@@ -260,6 +261,93 @@ fn declining_the_terms_leaves_the_owners_own_download_and_the_installer_fetches_
         .contains("The installer downloads nothing in this run"));
     assert!(matches!(flow.factory_download(0), Err(Error::Refused(_))));
     only_getvar(&phone);
+}
+
+#[test]
+fn a_front_end_that_cannot_fetch_from_google_is_not_asked_for_googles_terms() {
+    // What the owner reads in place of the terms step
+    assert_eq!(CANNOT_FETCH_FROM_GOOGLE, "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's desktop app and its command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.");
+    let bundle = TestBundle::new();
+    let id = omamobile_installer_core::fastboot::PhoneId::of_serial(SERIAL).unwrap();
+    let begin = || {
+        let mut flow = Flow::begin(
+            &bundle.files(),
+            bundle.index(),
+            &bundle.trusted(),
+            // Said once, at the start, by the front end
+            FlowOptions {
+                cannot_fetch_from_google: true,
+                ..Default::default()
+            },
+        );
+        flow.acknowledge_warning().unwrap();
+        flow
+    };
+    let phone = phone();
+    let mut flow = begin();
+    block_on(flow.read_phone(&mut phone.clone(), &id)).unwrap();
+    // Straight to the owner's own download: no terms for a download that
+    // can't be made
+    assert_eq!(
+        source(&flow),
+        ImageSource::OwnerFile(OwnerFileWhy::CannotFetch)
+    );
+    let screen = flow.screen();
+    assert_eq!(
+        (screen.state, screen.action),
+        ("factory-image", "take-file")
+    );
+    assert_eq!(screen.quote, None);
+    assert!(
+        screen.body.contains(&CANNOT_FETCH_FROM_GOOGLE.to_string()),
+        "{:?}",
+        screen.body
+    );
+    // Nothing on the screen offers a download or hedges about why
+    let text = serde_json::to_string(&screen).unwrap();
+    assert!(!text.contains("got no answer"), "{text}");
+    assert!(!text.contains("downloads the image"), "{text}");
+    assert_eq!(screen.steps.len(), 3);
+    assert!(screen.steps[0].text.contains("accept Google's terms there"));
+    assert_eq!(screen.link.as_deref(), Some(PAGE));
+    // The terms were never asked, can't be answered, and nothing is fetched
+    assert!(flow.google_terms_accepted().is_none());
+    assert!(flow.accept_google_terms(NOW).is_err());
+    assert!(flow.decline_google_terms().is_err());
+    assert!(matches!(
+        flow.factory_download(0),
+        Err(Error::Refused(why)) if why.contains("nothing is downloaded")
+    ));
+    assert!(flow.google_terms_accepted().is_none());
+    // The file the owner saved is checked as ever
+    let mut check = flow
+        .factory_zip(&bundle.factory_zip_name, bundle.factory_zip.len() as u64)
+        .unwrap()
+        .unwrap();
+    check.update(&bundle.factory_zip);
+    flow.factory_zip_done(check).unwrap();
+    assert_eq!(flow.step(), &Step::Answers);
+    only_getvar(&phone);
+
+    // A locked phone comes the same way, after its owner unlocked it
+    let locked = FakePhone::scenario("locked").unwrap();
+    let mut flow = begin();
+    block_on(flow.read_phone(&mut locked.clone(), &id)).unwrap();
+    assert_eq!(flow.screen().state, "unlock");
+    locked.edit(|s| {
+        s.vars.insert("unlocked".into(), "yes".into());
+    });
+    block_on(flow.read_phone(&mut locked.clone(), &id)).unwrap();
+    assert_eq!(
+        source(&flow),
+        ImageSource::OwnerFile(OwnerFileWhy::CannotFetch)
+    );
+
+    // A front end that can fetch (the default) is shown the terms as before
+    let flow = at_terms(&bundle, &phone);
+    assert!(!serde_json::to_string(&flow.screen())
+        .unwrap()
+        .contains("A web page is not allowed"));
 }
 
 #[test]

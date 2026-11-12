@@ -14,11 +14,18 @@
 //! (`navigator.usb.requestDevice`, which needs a click), fetching files and
 //! reading the file the person picked. Bytes come in as `Uint8Array`s.
 //!
-//! Google's factory image is such a fetch. Once the owner has accepted
-//! Google's terms on the flow's terms step, the page asks this module what
-//! to fetch ([`InstallFlow::download_begin`]: the address from the release's
-//! signed build index, never one of the page's), fetches it, and hands the
-//! answer and the bytes back; the core decides the rest. A fetch the browser
+//! Google's factory image is not such a fetch, as measured on 2026-11-12:
+//! Google's server sends no `Access-Control-Allow-Origin` header, so a
+//! browser lets no page read the file. The page says so to the core at the
+//! start of every flow ([`page_options`]), and the flow then asks for no
+//! terms and goes straight to the file the owner saves from Google's page.
+//!
+//! The code that carries a download out is still here, for a build whose
+//! flow does offer one (today only the self-test's, against a stand-in):
+//! the page asks this module what to fetch
+//! ([`InstallFlow::download_begin`]: the address from the release's signed
+//! build index, never one of the page's), fetches it, and hands the answer
+//! and the bytes back; the core decides the rest. A fetch the browser
 //! refuses falls back to the file the owner saves from Google's page.
 //!
 //! [`Install`] is the older, direct way to a session, kept for the write
@@ -223,6 +230,19 @@ pub async fn request_phone() -> Result<Phone, JsError> {
     })
 }
 
+/// What the page says to the core at the start of every flow.
+fn page_options(reinstall: bool) -> FlowOptions {
+    FlowOptions {
+        reinstall,
+        // A web page can't read a file from Google's server: the flow asks
+        // for no terms and offers no download (docs/DESIGN.md §7)
+        cannot_fetch_from_google: true,
+        // The maintainer's bootloader-slot override is not offered here:
+        // the page as it ships has no way to set it
+        ..Default::default()
+    }
+}
+
 /// The core's install flow, for the page: one screen at a time, as JSON
 /// (`core/src/flow.rs`, [`omamobile_installer_core::flow::Screen`]). Every
 /// decision and every word on a screen is the core's.
@@ -267,12 +287,7 @@ impl InstallFlow {
                 &files,
                 index.as_deref(),
                 &TrustedKeys::omamobile(),
-                // The maintainer's bootloader-slot override is not offered
-                // here: the page as it ships has no way to set it
-                FlowOptions {
-                    reinstall,
-                    ..Default::default()
-                },
+                page_options(reinstall),
             ),
             check: None,
             download: None,
@@ -709,10 +724,14 @@ impl InstallFlow {
     /// that file first, to show the refusal. `slot_override`: the
     /// maintainer's override for the bootloader-slot stop, which the page
     /// has no control for; the self-test sets it to see the page say so.
+    /// `fetches`: a flow that offers the download, which the page as it
+    /// ships never begins ([`page_options`]); the self-test sets it to run
+    /// the page's download code against a stand-in for Google's server.
     pub fn selftest(
         reinstall: bool,
         tamper: &str,
         slot_override: bool,
+        fetches: bool,
     ) -> Result<InstallFlow, JsError> {
         let flip = |data: &[u8], on: bool| {
             let mut v = data.to_vec();
@@ -735,17 +754,14 @@ impl InstallFlow {
         let trusted =
             TrustedKeys::new(&[core::str::from_utf8(fx!("test-key.fingerprint")).map_err(js)?])
                 .map_err(js)?;
+        // As the page ships it, but for what the self-test asks to differ
+        let mut options = page_options(reinstall);
+        options.maintainer_skip_bootloader_slot_check = slot_override;
+        if fetches {
+            options.cannot_fetch_from_google = false;
+        }
         Ok(InstallFlow {
-            flow: Flow::begin(
-                &files,
-                Some(&index),
-                &trusted,
-                FlowOptions {
-                    reinstall,
-                    maintainer_skip_bootloader_slot_check: slot_override,
-                    ..Default::default()
-                },
-            ),
+            flow: Flow::begin(&files, Some(&index), &trusted, options),
             check: None,
             download: None,
             built_in: true,

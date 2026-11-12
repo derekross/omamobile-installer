@@ -7,11 +7,20 @@
 // sentence on a screen are the core's. What is the page's own: the buttons,
 // the file picker, the form, and reading the picked file a piece at a time.
 //
-// One file is fetched from Google: its factory image, and only after the
-// person accepted Google's terms on the flow's terms step. The address is
-// the core's (from the release's signed build index), the page fetches it,
-// and the core decides what the answer and the bytes are worth. A fetch the
-// browser refuses falls back to the file the person saves from Google's page.
+// Nothing is fetched from Google by the page as it ships: a browser lets no
+// page read a file from Google's server (it sends no
+// Access-Control-Allow-Origin header; measured on 2026-11-12). The wasm
+// module tells the core so at the start of every flow, and the flow goes
+// straight to the file the person saves from Google's page, with no terms
+// step and no download on offer.
+//
+// The download code below is for a flow that does offer one (action
+// "download"), which today only the self-test begins, against a stand-in:
+// one file, only after the person accepted Google's terms on the flow's
+// terms step. The address is the core's (from the release's signed build
+// index), the page fetches it, and the core decides what the answer and the
+// bytes are worth. A fetch the browser refuses falls back to the file the
+// person saves from Google's page.
 //
 //   /            the published release's files, and a real phone over WebUSB
 //   /?pretend    a pretend phone and a test bundle (self-test builds only)
@@ -52,7 +61,9 @@ async function bytes(url, optional = false) {
 
 // `slotOverride` is the maintainer's override for the bootloader-slot stop.
 // Nothing on the page sets it: only the self-test does, on the pretend phone.
-async function start(tamper = "", slotOverride = false) {
+// `fetches` begins a flow that offers the download from Google, which the
+// page as it ships never does: only the self-test sets it, with a stand-in.
+async function start(tamper = "", slotOverride = false, fetches = false) {
   phone = null;
   if (pretend) {
     if (!standIn) {
@@ -60,7 +71,7 @@ async function start(tamper = "", slotOverride = false) {
       const config = await fetch("google-stand-in.json");
       if (config.ok) standIn = { origin: (await config.json()).origin, mode: "allowed" };
     }
-    flow = core.InstallFlow.selftest($("reinstall").checked, tamper, slotOverride);
+    flow = core.InstallFlow.selftest($("reinstall").checked, tamper, slotOverride, fetches);
     phone = core.fake_phone($("scenario").value);
   } else {
     const files = await Promise.all(RELEASE_FILES.map((name) => bytes("release/" + name)));
@@ -385,10 +396,12 @@ async function selftest() {
     b.click();
     await busy;
   };
-  const begin = async (scenario, { reinstall = false, tamper = "", slotOverride = false } = {}) => {
+  // `fetches`: a flow that offers the download, as the page's download code
+  // needs it. The page as it ships begins none (section 1c)
+  const begin = async (scenario, { reinstall = false, tamper = "", slotOverride = false, fetches = true } = {}) => {
     $("scenario").value = scenario;
     $("reinstall").checked = reinstall;
-    await start(tamper, slotOverride);
+    await start(tamper, slotOverride, fetches);
   };
   const sent = () => JSON.parse(phone.fake_report());
   // getvar and nothing else; a locked phone at the unlock steps is also
@@ -542,6 +555,37 @@ async function selftest() {
   check("with the download on offer, a file the person saved is taken as well", state() === "answers");
   google("allowed");
 
+  // 1c. The page as it ships: it tells the core that it cannot fetch from
+  // Google, and the flow asks for no terms and offers no download
+  await begin("ready", { fetches: false });
+  await click("accept");
+  const unasked = await asked();
+  await click("look");
+  check(
+    "the page as it ships is not asked for Google's terms: it goes straight to the person's own download and says why",
+    state() === "factory-image" &&
+      !$("accept-terms") &&
+      !$("decline-terms") &&
+      !$("download") &&
+      !$("quote") &&
+      !!$("zip") &&
+      text().includes("A web page is not allowed to read files from Google's server, so this page cannot download the image for you.") &&
+      text().includes("The installer's desktop app and its command-line tool can download it for you.") &&
+      !text().includes("got no answer") &&
+      stepCount() === 3 &&
+      $("google").href.startsWith("https://developers.google.com/android/images") &&
+      (await asked()) === unasked,
+    text(),
+  );
+  await pick(new File([zip], name));
+  check("the page as it ships takes the file the person saved, and nothing was fetched", state() === "answers" && (await asked()) === unasked);
+  await begin("locked", { fetches: false });
+  await click("accept");
+  await click("look");
+  await click("pretend-unlock");
+  await click("look");
+  check("the page as it ships: an unlocked phone comes to the same step, with no terms", state() === "factory-image" && !$("download") && !$("accept-terms"), state());
+
   // 2. A locked phone: the command is shown, nothing is sent
   await begin("locked");
   await click("accept");
@@ -675,7 +719,7 @@ async function selftest() {
 
   result.failed = failures;
   result.pass = failures.length === 0;
-  await begin("ready");
+  await begin("ready", { fetches: false });
   return result;
 }
 
