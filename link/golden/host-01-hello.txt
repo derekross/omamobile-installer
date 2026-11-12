@@ -1,0 +1,13 @@
+frame: host-01-hello
+hello, id 1
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 0
+len: 110
+offset: 0
+payload sha256: d5a4d4e6c6a1ff49030c5d74fc0cb133b18fd6810d0d25ddb039bbb98b05b641
+pad byte: no
+frame bytes: 166
+frame sha256: f12214024afff3d4e2af476d77a03c9bfa3fb663537b87dd481dcc76f9dd759b
+payload: {"t":"hello","id":1,"proto":[1],"installer":{"name":"omamobile-install","version":"0.0.1"},"max_data":1048576}

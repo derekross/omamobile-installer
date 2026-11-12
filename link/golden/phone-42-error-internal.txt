@@ -1,0 +1,13 @@
+frame: phone-42-error-internal
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 41
+len: 102
+offset: 0
+payload sha256: e1600d9b15fc9fac2ddb70b409be1f5cdb2477e37bba0be4453ffecc3558be80
+pad byte: no
+frame bytes: 158
+frame sha256: bb078d5211e74eafad781f8b5339b137b779efcf391bcee49106332308634cd5
+payload: {"t":"error","re":21,"code":"internal","message":"the phone could not do it","stage":"firstboot-done"}

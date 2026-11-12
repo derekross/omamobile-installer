@@ -1,0 +1,13 @@
+frame: phone-26-error-unknown
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 25
+len: 96
+offset: 0
+payload sha256: ff80fcad03cc36e663a63b45ddfb5ea7e720de8c68f475be6cb0491a016ce130
+pad byte: no
+frame bytes: 152
+frame sha256: 7a42392151d6457da51e64b20e866b3090f299d0f4b0f5ff290f3249a139971c
+payload: {"t":"error","re":21,"code":"unknown","message":"unknown message type","stage":"firstboot-done"}

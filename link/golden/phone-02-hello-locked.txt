@@ -1,0 +1,13 @@
+frame: phone-02-hello-locked
+hello, answering id 1
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 1
+len: 208
+offset: 0
+payload sha256: cf9dd40282d3259a305c40ca4ec71c0ef728dfc397e90a741bc75456d9389dd9
+pad byte: no
+frame bytes: 264
+frame sha256: d259ffeded71298124009e318db4b32ce9156fd6ca8f60be84aefe7790566d76
+payload: {"t":"hello","re":1,"proto":1,"link":"0.0.1","device":"cheetah","max_data":1048576,"nonce":"404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f","stage":"provisioned","pair":"locked","wait_s":30}

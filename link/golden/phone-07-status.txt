@@ -1,0 +1,13 @@
+frame: phone-07-status
+status, answering id 6
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 6
+len: 489
+offset: 0
+payload sha256: 2028dcce0b9e5cec110e8b6159a53300f29a1312f7289608cd6c1473d9302749
+pad byte: no
+frame bytes: 545
+frame sha256: bd31156c918909a91d5276a0c22afb568a52dbfab90c807264b7cdf35fc1d302
+payload: {"t":"status","re":6,"stage":"firstboot-done","boot":1,"release":"2026.11.08","kernel":"7.3.0-rc6-omamobile","device":"cheetah","firstboot":{"state":"done","step":"Omarchy setup","n":9,"of":9,"failed":[]},"backup":{"state":"listed","parts":[{"name":"efs","size":3000,"verified":true},{"name":"modem_a","size":2048,"verified":false}]},"factory":{"state":"partial","have":4096,"size":9316},"provision":{"state":"none","step":"","n":0,"of":0},"battery":80,"charging":true,"free":100000000000}

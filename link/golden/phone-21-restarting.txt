@@ -1,0 +1,13 @@
+frame: phone-21-restarting
+restarting, answering id 18
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 20
+len: 26
+offset: 0
+payload sha256: 990937b2b98104ff8fd3f7d81b7bab75cad1e69ba60a624fc39f298d7e6f08b3
+pad byte: no
+frame bytes: 82
+frame sha256: 00e1c216e30a1dd3a16fc933f6b8f81debb02d1d6a2ccbffb496b5a0cf75658a
+payload: {"t":"restarting","re":18}

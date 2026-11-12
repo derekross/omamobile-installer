@@ -1,0 +1,13 @@
+frame: phone-37-error-too-large
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 36
+len: 112
+offset: 0
+payload sha256: d5e11891c4ab38173ed054997f74eddfd2de1e28167f44f9fd521a360666f5c8
+pad byte: no
+frame bytes: 168
+frame sha256: 2bb44a3529dc29b7cd02236f4754a5b3a66ddd1a4cee9394d8dc39032d2f5c62
+payload: {"t":"error","re":21,"code":"too-large","message":"larger than a factory image may be","stage":"firstboot-done"}

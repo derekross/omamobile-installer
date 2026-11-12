@@ -1,0 +1,13 @@
+frame: phone-05-paired-resume
+paired, answering id 4
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 4
+len: 103
+offset: 0
+payload sha256: 1e57f3f2868a24277152a4a5e585e029a46183647859d02105b62bd7a31b84a6
+pad byte: no
+frame bytes: 159
+frame sha256: 4f1fc6c0fa12797f2a77d781683b23439e167240bdd749dc50bc733726bf0be1
+payload: {"t":"paired","re":4,"serial_proof":"505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f"}

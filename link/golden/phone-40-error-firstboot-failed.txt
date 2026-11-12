@@ -1,0 +1,13 @@
+frame: phone-40-error-firstboot-failed
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 39
+len: 129
+offset: 0
+payload sha256: c126aa4745881e13f7f5bfcca055986c12330b4434af2cdacfd48883882323e7
+pad byte: no
+frame bytes: 185
+frame sha256: dc045aea3a143cf6e4fcb59d9182024df4f1d4cbaf7540b49ceb3b423803ef56
+payload: {"t":"error","re":21,"code":"firstboot-failed","message":"first-boot setup failed","stage":"firstboot-done","steps":["SSH keys"]}

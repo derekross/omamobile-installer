@@ -1,0 +1,13 @@
+frame: phone-18-provision-started
+provision-started, answering id 17
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 17
+len: 33
+offset: 0
+payload sha256: 42005c4ae215910a3b8c7fd8a4f178865c28327e415887d138c0711c9ad1ecd8
+pad byte: no
+frame bytes: 89
+frame sha256: 1daf8383d7551f33db2c6fbb46a6a10d919a08f7b240bb3ca15f578ff175eb65
+payload: {"t":"provision-started","re":17}

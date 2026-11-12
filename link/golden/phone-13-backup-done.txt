@@ -1,0 +1,13 @@
+frame: phone-13-backup-done
+backup-done, answering id 13
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 12
+len: 27
+offset: 0
+payload sha256: 85013b93adde13756052592e05443d4ab529ccd0e8f3425d4ba4f1ce30547111
+pad byte: no
+frame bytes: 83
+frame sha256: 62aec39dcd7b1923fe74104519ad310acd9301291776009de60445ad526c02c5
+payload: {"t":"backup-done","re":13}

@@ -1,0 +1,13 @@
+frame: phone-17-factory-verified
+factory-verified, answering id 16
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 16
+len: 32
+offset: 0
+payload sha256: f22751d803fd9b8ea095dad95b32e889c26240b31fe07d969f49e19d86bb1045
+pad byte: no
+frame bytes: 88
+frame sha256: 51e17eb84bf264f60b9a092f066362f281be702d47e6f069a8b5dc54353a6549
+payload: {"t":"factory-verified","re":16}

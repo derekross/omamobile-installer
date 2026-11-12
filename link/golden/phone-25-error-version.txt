@@ -1,0 +1,13 @@
+frame: phone-25-error-version
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 24
+len: 116
+offset: 0
+payload sha256: 303795d2fc5fc30b4a2e7b8c4c50c414afb63e62e0b79c3c550d02e3537a74fa
+pad byte: no
+frame bytes: 172
+frame sha256: 3a57d6a4e6f78358ab92ba92f1b537473716dd48b612a7df6d9062589e8adfb1
+payload: {"t":"error","re":21,"code":"version","message":"no protocol number in common","stage":"firstboot-done","proto":[1]}

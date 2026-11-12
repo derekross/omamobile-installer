@@ -1,0 +1,13 @@
+frame: host-13-backup-commit
+backup-commit, id 13
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 12
+len: 29
+offset: 0
+payload sha256: befd936b029a9415ee2ae0679eec840b3fa6d8673c4890b798c8ec675a8d04ee
+pad byte: no
+frame bytes: 85
+frame sha256: ad61c84ef0c5071a494c74cde28aacaa3a1b5c35a850a07f5b663f323315d486
+payload: {"t":"backup-commit","id":13}

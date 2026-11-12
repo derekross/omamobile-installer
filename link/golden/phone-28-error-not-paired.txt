@@ -1,0 +1,13 @@
+frame: phone-28-error-not-paired
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 27
+len: 89
+offset: 0
+payload sha256: ae32730a32901663f190be90f3a0720db9d28facb666b25791e1f65497c7969f
+pad byte: no
+frame bytes: 145
+frame sha256: 42ab7922c8c5f5243d5b9be0edc8140ecc44ec613a90ea0b94c283d6b6fc36e9
+payload: {"t":"error","re":21,"code":"not-paired","message":"pair first","stage":"firstboot-done"}
