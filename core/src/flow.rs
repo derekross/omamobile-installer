@@ -129,10 +129,11 @@ pub struct FlowOptions {
     /// then on ([`SLOT_CHECK_SKIPPED`]). It passes no other stop: two
     /// versions that are known to differ still stop.
     ///
-    /// This flow ends at the dry run, so here it can't reach a write. The
-    /// session it opens is refused with [`Error::OverrideOutsideDryRun`]
-    /// unless it holds every write back; a version of this flow that writes
-    /// must refuse the override the same way before its first write.
+    /// It can't reach a write. Together with [`Self::write`] it stops the
+    /// flow in [`Flow::begin`] ([`StopKind::OverrideInInstall`]); the
+    /// session a dry run opens is refused with
+    /// [`Error::OverrideOutsideDryRun`] unless it holds every write back;
+    /// and [`Flow::begin_write`] refuses a run in which a check was skipped.
     pub maintainer_skip_bootloader_slot_check: bool,
     /// The owner already has Google's factory image, saved from Google's
     /// page, and hands that file in. The installer then downloads nothing,
