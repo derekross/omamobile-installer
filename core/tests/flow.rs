@@ -161,6 +161,8 @@ fn footer_is_honest(stop: &Stop) {
             assert!(text.contains("written nothing to either"));
             assert_eq!(text.contains("erased that phone"), unlock_shown);
         }
+        // The stops after a write began are tested in write_path.rs
+        PhoneFact::WriteStopped { .. } => panic!("no stop of this file follows a write"),
     }
 }
 
