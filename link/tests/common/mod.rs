@@ -2,6 +2,9 @@
 //! What the link's tests share: answers that first boot takes, and one of
 //! every message of protocol 1 (the golden frames are made of these).
 #![allow(dead_code)]
+// The two machines, their stand-ins and the loopback between them
+pub mod rig;
+
 use omamobile_link::answers::{Answers, Field, Problem, ValidAnswers};
 use omamobile_link::json::Value;
 use omamobile_link::msg::*;

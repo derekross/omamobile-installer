@@ -19,6 +19,7 @@ pub mod digest;
 pub mod frame;
 pub mod json;
 pub mod msg;
+pub mod phone;
 #[cfg(feature = "sim")]
 pub mod sim;
 
