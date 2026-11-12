@@ -1,10 +1,11 @@
 # Omarchy Mobile installer
 
-The installer for [Omarchy Mobile](https://github.com/derekross/omarchy-mobile): one core, written in Rust, behind a command-line tool and a web page. It is an early prototype.
+The installer for [Omarchy Mobile](https://github.com/derekross/omarchy-mobile): one core, written in Rust, behind a command-line tool, a web page and a desktop window. It is an early prototype.
 
-**It cannot install anything yet, and nothing here was ever run against a real phone.** The install flow ends at a dry run, real writes are switched off in both front ends, and every test uses a pretend phone in the test code.
+**It cannot install anything yet, and nothing here was ever run against a real phone.** The install flow ends at a dry run, real writes are switched off in every front end, and every test uses a pretend phone in the test code.
 
 - [docs/DESIGN.md](docs/DESIGN.md): the install flow, its states and stops, the build index, the bootloader-slot rule, what a front end must do, and what is open.
+- [docs/APP.md](docs/APP.md): the desktop window (`app/`), and the protocol it speaks with the command-line tool, `omamobile-install json`, which is also the interface for agents and scripts.
 - [RECOMMENDATION.md](RECOMMENDATION.md): why Rust and a web UI (the spike this grew from), with measurements.
 - [CONTRIBUTING.md](CONTRIBUTING.md): the safety rules.
 
@@ -13,9 +14,10 @@ The installer for [Omarchy Mobile](https://github.com/derekross/omarchy-mobile):
 Works, against the pretend phone and the fixtures:
 
 - **Verifying a release:** the release key's signature, the checksums, `manifest.json` and `device.conf` against the installer's rules. The published Pixel 7 Pro release 2026.11.08 verifies, natively and in a browser.
-- **The install flow up to the dry run,** the same in both front ends: the one warning; reading the phone's state; the unlock steps as text for the owner, with what the phone says about "OEM unlocking"; looking the phone up in the release's signed build index; Google's terms for its factory image, shown for the owner to accept; the factory zip, downloaded from Google's server by the installer or saved by the owner and handed in, checked by size and SHA-256 either way; the owner's answers; and a dry run that lists what an install would write.
+- **The install flow up to the dry run,** the same in every front end: the one warning; reading the phone's state; the unlock steps as text for the owner, with what the phone says about "OEM unlocking"; looking the phone up in the release's signed build index; Google's terms for its factory image, shown for the owner to accept; the factory zip, downloaded from Google's server by the installer or saved by the owner and handed in, checked by size and SHA-256 either way; the owner's answers; and a dry run that lists what an install would write.
 - **Every stop,** with words that are true for the phone at that point: another model, slot B, the bootloader slots, a build that isn't listed or tested, another phone than the first, a release or an index that fails its checks, a download that is not the file the release lists.
 - **The write path, on the pretend phone only:** slot B's boot images and `userdata`, the root image decompressed and cut into sparse images.
+- **The flow as JSON lines,** `omamobile-install json`: the same flow for a program instead of a person, up to the dry run and no further (below, "For agents and scripts"). The desktop window, `omainstall`, is built on it.
 
 Does not work, or is not built:
 
@@ -24,16 +26,18 @@ Does not work, or is not built:
 - **The published release in the flow.** 2026.11.08 carries no build index, so the flow stops and says so. It needs a release that ships `factory-builds.json`.
 - **A Pixel 7 Pro, even then.** Its bootloader reports one slot's version only, and the flow stops there by decision (DESIGN §6). The maintainer has a hidden override that takes a dry run, and nothing else, past that stop; such a run says on every screen that the check was skipped and that it is not evidence that an install would be allowed.
 - **Android to Fastboot Mode, and the unlock,** are the owner's: the installer shows the keys and the command.
-- **The web page's downloads of the release** (the images and the root image), **the desktop window, Windows and macOS.**
+- **The web page's downloads of the release** (the images and the root image), **Windows and macOS.**
+- **A release found or fetched by the tool.** `json` and `install` take a release's directory; `omainstall` without one has nothing to start from.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `core/` | The shared core: the install flow (`flow.rs`), the build index, the download of Google's factory image as decisions on what a front end fetched (`download.rs`), `manifest.json` and `device.conf` rules, the release signature and checksums, fastboot over a transport trait, Android sparse cutting, zstd. No I/O of its own |
-| `core/tests/` | 68 tests, and 3 beside the command layer in `core/src/fastboot.rs`. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
+| `core/tests/` | 70 tests, and 3 beside the command layer in `core/src/fastboot.rs`. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
 | `usb/` | The fastboot transport over USB (nusb): one file for Linux, Windows, macOS and WebUSB |
-| `cli/` | `omamobile-install`. `verify` and `sparse` need no phone; `flow --fake-phone` runs the install flow against the pretend phone; `devices` and `install --dry-run` use USB. It downloads Google's factory image with `ureq`, into `--work-dir` |
+| `cli/` | `omamobile-install`. `verify` and `sparse` need no phone; `flow --fake-phone` runs the install flow against the pretend phone; `devices`, `install --dry-run` and `json` use USB. `json` (`src/json.rs`) is the flow as JSON lines on standard input and output. It downloads Google's factory image with `ureq`, into `--work-dir` |
+| `app/` | `omainstall`, the desktop window: C++ and Qt Quick, in the style of Omarchy's own apps. It starts `omamobile-install json` and draws the screens it is sent ([app/README.md](app/README.md), [docs/APP.md](docs/APP.md)) |
 | `web/` | The same core as WebAssembly, a static page with a screen for each state of the flow, a local server that sends the strict headers (and, for the self-test, runs a stand-in for Google's server), and a self-test that clicks through the page in a headless browser |
 | `fixtures/published/` | The small signed files of the published cheetah 2026.11.08 release, and the first 32 bytes of its root image. `omamobile.gpg` is the project's public key as published; its user ID holds the maintainer's address |
 | `fixtures/index/` | `device/cheetah/factory-builds.json` as Omarchy Mobile carries it: public metadata about two of Google's builds |
@@ -46,7 +50,7 @@ The toolchain is pinned in `rust-toolchain.toml`.
 
 ```sh
 cargo test                      # the core, against the pretend phone; no USB
-cargo test -p omamobile-installer-cli --features fake-phone   # the built tool driving the flow, and downloading from a stand-in
+cargo test -p omamobile-installer-cli --features fake-phone   # the built tool driving the flow, as text and as JSON lines, and downloading from a stand-in
 cargo build --release           # target/release/omamobile-install
 cargo check -p omamobile-installer-cli --target x86_64-pc-windows-msvc   # also -gnu, and the two apple-darwin targets
 
@@ -56,6 +60,9 @@ web/build.sh selftest           # with the pretend phone built in
 web/serve.py                    # http://127.0.0.1:8765/
 web/serve.py --stand-in         # for a selftest build: ?pretend and ?selftest, with a stand-in for Google's server
 web/selftest.sh                 # builds, serves, and runs ?selftest in a headless Chromium
+
+app/bin/build                   # app/build/omainstall (needs Qt 6: qt6-base, qt6-declarative)
+app/bin/test                    # the window's tests, offscreen, against a stand-in and against the real tool with its pretend phone
 ```
 
 Commands that touch no USB device:
@@ -72,11 +79,35 @@ cargo run --features fake-phone -p omamobile-installer-cli -- flow fixtures/self
 # Other pretend phones: locked, locked-oem-off, other-model, slot-b, one-slot, slots-differ, unknown-build, untested-build, untested-old-build
 ```
 
+## For agents and scripts
+
+`omamobile-install json [--release DIR] [--work-dir DIR]` is the installer's machine interface, and the supported one: JSON lines on standard input and output, one object per line, specified in [docs/APP.md](docs/APP.md) §3 (protocol 1). Standard output carries the protocol and nothing else. The tool says `hello`; after `hello` and `start` from the other side, every message that is sent is answered by exactly one `screen` (the core's screen: what a person would read, the action it asks for, and on a stop whether starting again can help), with `progress`, `problems`, `phones` or `error` before it where they apply. `quit`, or the end of the input, ends the run.
+
+It ends at the dry run. There is no message and no argument in this mode that writes to a phone, and an argument it does not know stops it before it says anything else.
+
+An install driven to the dry run, against the pretend phone of a `fake-phone` build (no USB device is opened). The lines are taken in order, so a script that knows the way can write them all at once:
+
+```sh
+cargo build -p omamobile-installer-cli --features fake-phone
+zip=$PWD/fixtures/selftest/factory/cheetah-test.260101.001-factory-31c2322a.zip
+printf '%s\n' '{"type":"hello","protocol":1,"app":"a script","version":"0"}' \
+  '{"type":"start","reinstall":false}' '{"type":"acknowledge"}' '{"type":"read-phone"}' \
+  '{"type":"decline-terms"}' "{\"type\":\"take-file\",\"path\":\"$zip\"}" \
+  '{"type":"answers","username":"alex","password":"2580","password_again":"2580","hostname":"","timezone":"Europe/Paris","wifi_ssid":"","wifi_psk":""}' \
+  '{"type":"dry-run"}' |
+  target/debug/omamobile-install json --release fixtures/selftest --fake-phone ready |
+  jq -c 'select(.type == "screen").screen | {state, stop, retry, action, title}'
+```
+
+It prints one line for each screen, from `warning` to `done`; the last screen's `plan` lists what an install would write. A driver that decides as it goes reads each screen and answers the action it names: docs/APP.md §3.7 has one in Python. Other pretend phones show the stops (`--fake-phone slot-b`), a locked phone (`locked`), two phones (`ready,slot-b`) or none (`none`).
+
+On a real phone this mode sends what `install --dry-run` sends: `getvar`, and one read-only question to a locked phone. The warning and Google's terms are the phone's owner's to answer, not a program's.
+
 ## Safety
 
-- `omamobile-install devices` and `install` open USB devices, and so does the page's "Choose the phone". `install` runs only with `--dry-run`. Both go through the install flow, which sends `getvar` and, to a locked phone it is about to show the unlock steps for, the one question `flashing get_unlock_ability`. Both read, and nothing else is sent. Ask the phone's owner before either.
-- The core can send `getvar:`, `download:`, `flash:` to slot B's boot images and `userdata`, `set_active:b`, `reboot` and the read-only question `flashing get_unlock_ability`. That list is closed and checked where a command is sent: no other `flashing` command (`flashing unlock` among them), no `oem`, no `erase`, no other slot. The writes are reachable only from the tests and from a `web` build with `enable-writes`, which nothing here turns on.
+- `omamobile-install devices`, `install` and `json` open USB devices (`json` from its first `read-phone` on, never before `start`), and so does the page's "Choose the phone". `install` runs only with `--dry-run`, and `json` has no message or argument for a write. All go through the install flow, which sends `getvar` and, to a locked phone it is about to show the unlock steps for, the one question `flashing get_unlock_ability`. Both read, and nothing else is sent. Ask the phone's owner before either.
+- The core can send `getvar:`, `download:`, `flash:` to slot B's boot images and `userdata`, `set_active:b`, `reboot` and the read-only question `flashing get_unlock_ability`. That list is closed and checked where a command is sent: no other `flashing` command (`flashing unlock` among them), no `oem`, no `erase`, no other slot. The writes are reachable only from the tests and from a `web` build with `enable-writes`, which nothing here turns on. The tests of `json` end each run by reading the pretend phone's record of what it received.
 - The unlock command is shown for the owner to type. The installer never sends it and never switches slots.
 - **Google's factory image** (the maintainer's decision of 2026-11-12, which reverses the one of 2026-11-10): the installer downloads it for the owner, from Google's own server, after showing Google's terms for the owner to accept, and checks it on this computer before it uses anything of it. The address comes only from the release's signed build index, on `https://dl.google.com/` and nowhere else, redirects included. **This project hosts none of Google's files** and passes none on. An owner can still save the file from Google's page and hand it in (`--factory-zip FILE`, or the page's file picker). Whether the project may ship files extracted from a factory image itself is a separate question, and it is not decided.
-- `omamobile-install install --dry-run` on a real phone therefore also reaches the internet, once the owner accepts Google's terms: one file, from Google. `flow --fake-phone` and every test reach a stand-in on this computer, or nothing.
+- `omamobile-install install --dry-run` and `json` on a real phone therefore also reach the internet, once the owner accepts Google's terms: one file, from Google. `flow --fake-phone`, `json --fake-phone` and every test reach a stand-in on this computer, or nothing.
 - No serial number is stored or printed by the core: it compares a digest. Tests use placeholders.
