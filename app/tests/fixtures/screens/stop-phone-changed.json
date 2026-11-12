@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "phone-changed",
+  "retry": "after-fix",
   "title": "This is not the phone the install was started on",
   "notice": null,
   "body": [

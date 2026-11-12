@@ -1,6 +1,7 @@
 {
   "state": "dry-run",
   "stop": null,
+  "retry": null,
   "title": "The dry run",
   "notice": null,
   "body": [

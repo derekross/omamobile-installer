@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "runs-from-slot-b",
+  "retry": "stops-again",
   "title": "This phone runs from its second system copy",
   "notice": null,
   "body": [

@@ -28,6 +28,9 @@ class Backend : public QObject {
     Q_PROPERTY(bool hasScreen READ hasScreen NOTIFY screenChanged)
     Q_PROPERTY(QString state READ state NOTIFY screenChanged)
     Q_PROPERTY(QString action READ action NOTIFY screenChanged)
+    // The core says that starting the installer again can get past the stop
+    // on show (Screen.retry): at any time, or once its message's fix is done.
+    Q_PROPERTY(bool canStartAgain READ canStartAgain NOTIFY screenChanged)
     // An action was handed in and the tool has not answered with a screen.
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     // The message that made it busy ("download", "take-file", ...), or nothing.
@@ -83,6 +86,10 @@ public:
     bool hasScreen() const { return !m_screen.isEmpty(); }
     QString state() const { return m_screen.value("state").toString(); }
     QString action() const { return m_screen.value("action").toString(); }
+    bool canStartAgain() const {
+        const QString retry = m_screen.value("retry").toString();
+        return action() == "none" && (retry == "whenever" || retry == "after-fix");
+    }
     bool busy() const { return m_busy; }
     QString pending() const { return m_busy ? m_pending : QString(); }
     bool hasProgress() const { return m_hasProgress; }

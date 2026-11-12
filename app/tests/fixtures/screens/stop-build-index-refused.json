@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "build-index-refused",
+  "retry": "after-fix",
   "title": "The list of Google's builds did not pass its checks",
   "notice": null,
   "body": [

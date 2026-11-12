@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "release-not-verified",
+  "retry": "after-fix",
   "title": "This release did not pass its checks",
   "notice": null,
   "body": [

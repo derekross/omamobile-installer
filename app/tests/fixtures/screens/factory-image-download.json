@@ -1,6 +1,7 @@
 {
   "state": "factory-image",
   "stop": null,
+  "retry": null,
   "title": "Google's factory image",
   "notice": null,
   "body": [

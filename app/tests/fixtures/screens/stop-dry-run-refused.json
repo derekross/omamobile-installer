@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "dry-run-refused",
+  "retry": "stops-again",
   "title": "The dry run stopped",
   "notice": null,
   "body": [

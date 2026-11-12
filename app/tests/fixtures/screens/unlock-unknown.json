@@ -1,6 +1,7 @@
 {
   "state": "unlock",
   "stop": null,
+  "retry": null,
   "title": "Unlock the bootloader",
   "notice": null,
   "body": [

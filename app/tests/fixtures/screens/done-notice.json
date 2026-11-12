@@ -1,6 +1,7 @@
 {
   "state": "done",
   "stop": null,
+  "retry": null,
   "title": "The dry run finished with one check skipped. Nothing was written",
   "notice": "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.",
   "body": [

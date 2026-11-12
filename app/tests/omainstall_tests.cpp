@@ -690,6 +690,10 @@ private slots:
         QVERIFY(!with("body", "one paragraph").isEmpty());
         QVERIFY(!with("body", QJsonArray{1}).isEmpty());
         QVERIFY(!with("notice", QJsonArray{}).isEmpty());
+        QVERIFY(!with("retry", true).isEmpty());
+        // A word for `retry` that this version does not know is not refused
+        // (and offers nothing).
+        QCOMPARE(with("retry", "after-a-while"), QString());
         QVERIFY(!with("steps", QJsonArray{QJsonObject{{"text", "no command key"}}}).isEmpty());
         QVERIFY(!with("quote", QJsonObject{{"intro", "x"}}).isEmpty());
         QVERIFY(!with("file", QJsonObject{{"name", "x"}, {"size", "big"}, {"build", "b"}}).isEmpty());
@@ -759,15 +763,25 @@ private slots:
         const QString action = screen.value("action").toString();
         QCOMPARE(w.text("primaryButton"), primaryLabel(action));
         QVERIFY(w.shown("primaryButton"));
-        QCOMPARE(w.shown("secondaryButton"), action == "acknowledge" || action == "accept-terms" || action == "download");
+        // "Start again" beside it exactly where the core says a new run can
+        // get past the stop (Screen.retry), and on no other screen.
+        const QString retry = screen.value("retry").toString();
+        const bool again = action == "none" && (retry == "whenever" || retry == "after-fix");
+        QCOMPARE(backend.canStartAgain(), again);
+        QCOMPARE(w.shown("secondaryButton"), action == "acknowledge" || action == "accept-terms" || action == "download" || again);
         QCOMPARE(w.shown("answersLoader"), action == "answers");
         QVERIFY(!w.shown("toolError"));
         QVERIFY(!w.shown("unknownAction"));
         QVERIFY(w.text("banner").contains("cannot write to a phone"));
-        // A stop and the last screen: the core's text and a single Close.
+        // A stop and the last screen: the core's text and Close. A stop
+        // that starting again can't pass, and the last screen, have no other.
         if (action == "none") {
             QCOMPARE(w.text("primaryButton"), QString("Close"));
-            QVERIFY(!w.shown("secondaryButton"));
+            if (again)
+                QCOMPARE(w.text("secondaryButton"), QString("Start again"));
+            else
+                QVERIFY(!w.shown("secondaryButton"));
+            QCOMPARE(screen.value("state").toString() == "stopped", !screen.value("retry").isNull());
         }
 
         const QString shots = qEnvironmentVariable("OMAINSTALL_SHOTS");
@@ -1050,6 +1064,61 @@ private slots:
         QTest::keyClick(w.window, Qt::Key_Q);
         QTRY_VERIFY(!w.window->isVisible());
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void startAgainIsOfferedWhereTheCoreSaysItCanHelp() {
+        // The stops, by what the core says of each (Screen.retry).
+        int offered = 0, withheld = 0;
+        for (const QString &name : fixtureNames()) {
+            const QJsonObject screen = fixture(name);
+            if (screen.value("state").toString() != "stopped")
+                continue;
+            const QString retry = screen.value("retry").toString();
+            QVERIFY2(retry == "whenever" || retry == "after-fix" || retry == "stops-again", qPrintable(name));
+            (retry == "stops-again" ? withheld : offered)++;
+        }
+        QVERIFY(offered >= 5 && withheld >= 5);
+
+        // Declined: the core says a new run can start at any time. The
+        // button starts one: a new run of the tool, and so a new flow.
+        standIn("flow");
+        Backend backend;
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QTRY_COMPARE(backend.state(), QString("warning"));
+        QVERIFY(!backend.canStartAgain());
+        QVERIFY(w.click("secondaryButton"));
+        QTRY_COMPARE(backend.state(), QString("stopped"));
+        QTRY_VERIFY(!backend.busy());
+        w.settle();
+        QVERIFY(backend.canStartAgain());
+        QCOMPARE(w.text("secondaryButton"), QString("Start again"));
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        QSignalSpy sent(&backend, &Backend::sent);
+        QVERIFY(w.click("secondaryButton"));
+        QTRY_COMPARE(backend.state(), QString("warning"));
+        QTRY_VERIFY(!backend.busy());
+        // The old run was told to leave, and the new one greeted and started.
+        QCOMPARE(sent.count(), 3);
+        QCOMPARE(json(sent.at(0).at(0).toByteArray()).value("type").toString(), QString("quit"));
+        QCOMPARE(json(sent.at(1).at(0).toByteArray()).value("type").toString(), QString("hello"));
+        QCOMPARE(json(sent.at(2).at(0).toByteArray()), (QJsonObject{{"type", "start"}, {"reinstall", false}}));
+        w.settle();
+        QCOMPARE(w.text("secondaryButton"), QString("Stop here"));
+
+        // A stop that starting again can't pass: nothing to press but Close,
+        // and Space does not restart.
+        standIn("screen:stop-bootloader-slots-unknown");
+        Backend stuck;
+        Window v(&stuck);
+        stuck.start();
+        QTRY_VERIFY(stuck.hasScreen());
+        v.settle();
+        QVERIFY(!stuck.canStartAgain());
+        QVERIFY(!v.shown("secondaryButton"));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        QVERIFY2(v.warnings.isEmpty(), qPrintable(v.warnings.join("\n")));
     }
 
     void aStepTheAppDoesNotKnowIsSaid() {

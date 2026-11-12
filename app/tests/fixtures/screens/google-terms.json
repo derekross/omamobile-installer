@@ -1,6 +1,7 @@
 {
   "state": "google-terms",
   "stop": null,
+  "retry": null,
   "title": "Google's terms for the factory image",
   "notice": null,
   "body": [

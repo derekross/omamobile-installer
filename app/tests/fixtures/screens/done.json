@@ -1,6 +1,7 @@
 {
   "state": "done",
   "stop": null,
+  "retry": null,
   "title": "The dry run passed. Nothing was written",
   "notice": null,
   "body": [

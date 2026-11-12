@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "factory-download-mismatch",
+  "retry": "whenever",
   "title": "The downloaded file is not the one this release lists",
   "notice": null,
   "body": [

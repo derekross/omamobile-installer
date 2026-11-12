@@ -1,6 +1,7 @@
 {
   "state": "warning",
   "stop": null,
+  "retry": null,
   "title": "Read this once",
   "notice": null,
   "body": [

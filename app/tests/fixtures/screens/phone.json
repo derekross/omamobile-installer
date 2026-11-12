@@ -1,6 +1,7 @@
 {
   "state": "phone",
   "stop": null,
+  "retry": null,
   "title": "Connect the Pixel 7 Pro",
   "notice": null,
   "body": [

@@ -1,6 +1,7 @@
 {
   "state": "google-terms",
   "stop": null,
+  "retry": null,
   "title": "Google's terms for the factory image",
   "notice": "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.",
   "body": [
