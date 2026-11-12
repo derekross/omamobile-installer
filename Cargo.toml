@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["core", "usb", "cli", "web"]
+members = ["core", "usb", "cli", "web", "link"]
 # web builds only for wasm32-unknown-unknown (web/build.sh)
-default-members = ["core", "usb", "cli"]
+default-members = ["core", "usb", "cli", "link"]
 
 [workspace.package]
 version = "0.0.1"
