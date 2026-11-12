@@ -305,7 +305,9 @@ function controls(s) {
       );
       break;
     default:
-      row.append(button("again", "Start over", () => start()));
+      // The core says whether starting again can get past a stop (Screen.retry);
+      // where it can't, the page offers no button that would only stop again
+      if (s.retry !== "stops-again") row.append(button("again", "Start over", () => start()));
   }
   return row;
 }
@@ -593,6 +595,7 @@ async function selftest() {
   await click("accept");
   await click("look");
   check("the slot stop hands out no way around and says a retry stops again", text().includes("will stop here again") && !text().includes("--") && !text().includes("override") && !notice() && sent().not_reads.length === 0);
+  check("a stop that starting again can't pass offers no \"Start over\"", JSON.parse(flow.screen()).retry === "stops-again" && !$("again"));
   await begin("untested-old-build");
   await click("accept");
   await click("look");
@@ -644,6 +647,7 @@ async function selftest() {
   await begin("ready");
   await click("decline");
   check("declining the warning ends the install with nothing sent", stop() === "warning-declined" && sent().commands === 0 && text().includes("Nothing was sent to a phone."));
+  check("a stop that starting again can pass offers \"Start over\"", JSON.parse(flow.screen()).retry === "whenever" && !!$("again"));
   await begin("ready", { tamper: "manifest" });
   check("a changed manifest stops before the warning", stop() === "release-not-verified" && !$("accept") && $("release").className === "bad");
   await begin("ready", { tamper: "index" });
