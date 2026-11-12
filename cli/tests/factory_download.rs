@@ -554,11 +554,14 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
     wrong[file.len() / 2] ^= 1;
     let mut longer = file.clone();
     longer.extend_from_slice(&[0u8; 4096]);
-    let cases: [(&str, Reply, &str); 4] = [
+    let deleted = "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.";
+    let nothing_taken = "The installer took nothing of what the server offered. Starting the installer again tries the download again.";
+    let cases: [(&str, Reply, &str, &str); 4] = [
         (
             "another-sha256",
             Reply::whole(&wrong),
             "the file is not what the release's signed list of Google's builds says: its SHA-256 is another than the one the list records for build TEST.260101.001.",
+            deleted,
         ),
         (
             // No length said, and more bytes than the file has
@@ -568,19 +571,22 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
                 ..Reply::whole(&longer)
             },
             "Google's server sent more for cheetah-test.260101.001-factory-31c2322a.zip than the file has, so what it sent is not what the release's signed list of Google's builds says",
+            deleted,
         ),
         (
             "another-size-said",
             Reply::whole(&longer),
             "Google's server offered a file of 53248 bytes as cheetah-test.260101.001-factory-31c2322a.zip, and that is not what the release's signed list of Google's builds says: the list records 49152 bytes",
+            nothing_taken,
         ),
         (
             "a-smaller-size-said",
             Reply::whole(&file[..1000]),
             "Google's server offered a file of 1000 bytes",
+            nothing_taken,
         ),
     ];
-    for (name, reply, says) in cases {
+    for (name, reply, says, then) in cases {
         let work = work(name);
         let reply = Mutex::new(Some(reply));
         let google = StandIn::start(move |_, _| reply.lock().unwrap().take().unwrap());
@@ -590,7 +596,7 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
         assert_eq!(*titles(&out).last().unwrap(), MISMATCH, "{name}");
         let text = flat(&out);
         assert!(text.contains(says), "{name}: {out}");
-        assert!(text.contains("The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer."));
+        assert!(text.contains(then), "{name}: {out}");
         assert!(text.contains("It has written nothing to it."));
         assert!(text.contains("You can start the installer again at any time."));
         // Nothing of it is left, and no later step was shown
@@ -598,6 +604,83 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
         assert!(!titles(&out).contains(&"About you and the phone"));
         assert_eq!(google.asked().len(), 1);
         assert!(out.contains("0 others; partitions written: 0"));
+    }
+}
+
+#[test]
+fn another_size_said_by_the_server_leaves_a_good_part_on_disk() {
+    let file = zip();
+    let mut longer = file.clone();
+    longer.push(0);
+    // A true start of the file, left by an earlier run
+    let with_part = |name: &str| {
+        let work = work(name);
+        std::fs::create_dir_all(work.join("factory")).unwrap();
+        std::fs::write(
+            work.join("factory").join(format!("{ZIP}.part")),
+            &file[..20_000],
+        )
+        .unwrap();
+        work
+    };
+    let cases: [(&str, Reply, u64); 3] = [
+        // The whole file again, one byte too long
+        ("part-kept-200-longer", Reply::whole(&longer), 49153),
+        // A short page with status 200 in the file's place
+        ("part-kept-200-page", Reply::whole(&[b'x'; 35]), 35),
+        // The rest, of a file one byte too long
+        (
+            "part-kept-206-total",
+            Reply {
+                status: 206,
+                headers: vec![("Content-Range", "bytes 20000-49152/49153".into())],
+                ..Reply::whole(&longer[20_000..])
+            },
+            49153,
+        ),
+    ];
+    for (name, reply, said) in cases {
+        let work = with_part(name);
+        let reply = Mutex::new(Some(reply));
+        let good = file.clone();
+        // The first answer names another size; later ones are a good server's
+        let google = StandIn::start(move |asked, _| match reply.lock().unwrap().take() {
+            Some(reply) => reply,
+            None => Reply::ranged(&good, asked),
+        });
+        let typed = format!("yes\nyes\n{ANSWERS}");
+        let (code, out, err) = flow(&work, Some(&google), &[], &typed);
+        // It is not the listed file: the install stops, as before
+        assert_eq!(code, 2, "{name}: {out}\n{err}");
+        assert_eq!(*titles(&out).last().unwrap(), MISMATCH, "{name}");
+        let text = flat(&out);
+        assert!(
+            text.contains(&format!("Google's server offered a file of {said} bytes")),
+            "{name}: {out}"
+        );
+        assert!(text.contains("The installer took nothing of what the server offered. The 20000 bytes an earlier try downloaded stay on this computer: the server's answer says nothing about them, and they are checked from the first byte, together with the rest, before anything of the file is used."), "{name}: {out}");
+        assert!(
+            text.contains("Starting the installer again goes on from those bytes."),
+            "{name}: {out}"
+        );
+        assert!(!text.contains("deleted"), "{name}: {out}");
+        assert_eq!(google.asked()[0].range.as_deref(), Some("bytes=20000-"));
+        // The part is there, byte for byte
+        assert_eq!(kept(&work), [(format!("{ZIP}.part"), 20_000)], "{name}");
+        assert_eq!(
+            std::fs::read(work.join("factory").join(format!("{ZIP}.part"))).unwrap(),
+            file[..20_000],
+            "{name}"
+        );
+
+        // The next run goes on from it, and the whole file passes its check
+        let (code, out, err) = flow(&work, Some(&google), &[], &typed);
+        assert_eq!(code, 0, "{name}: {out}\n{err}");
+        let asked = google.asked();
+        assert_eq!(asked.len(), 2, "{name}: {asked:?}");
+        assert_eq!(asked[1].range.as_deref(), Some("bytes=20000-"));
+        assert_eq!(kept(&work), [(ZIP.to_string(), file.len() as u64)]);
+        assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
     }
 }
 

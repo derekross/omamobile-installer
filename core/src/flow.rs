@@ -194,9 +194,13 @@ pub enum DownloadTrouble {
 pub enum DownloadEnd {
     /// The file is complete and is the one the signed index describes.
     Verified,
-    /// Not complete. What arrived may be kept, to go on from.
+    /// Not complete, or nothing of this try was taken. What is on this
+    /// computer of the file may be kept, to go on from.
     Kept,
-    /// Not the file. Delete every byte that was kept of it.
+    /// What is on this computer can't be the file: it is complete with
+    /// another SHA-256, or more arrived than the file has. Delete every byte
+    /// that was kept of it. Never the answer to a size the server only
+    /// announced: that says nothing about bytes kept earlier.
     Discard,
 }
 
@@ -1377,6 +1381,8 @@ impl Flow {
         }
         *refused = None;
         let (got, want) = download.progress();
+        // What an earlier try left that this one went on from
+        let had = download.resume_from();
         let ending = match (download.ending().cloned(), failure) {
             (Some(ending), _) => ending,
             (None, Some(FetchFailure::NoAnswer)) => Ending::Unavailable(Unavailable::NoAnswer),
@@ -1443,17 +1449,37 @@ impl Flow {
                     Mismatch::AnnouncedSize { got } => format!("Google's server offered a file of {got} bytes as {zip}, and that is not what {list} says: the list records {size} bytes for build {id}."),
                     Mismatch::TooManyBytes => format!("Google's server sent more for {zip} than the file has, so what it sent is not what {list} says: the list records {size} bytes for build {id}, and the installer took no more than that."),
                 };
+                let tell = format!("If it stops here again, Google's file and this release's list do not agree: please tell us at {ISSUES}");
+                // Bytes on this computer are deleted only when they can't be
+                // part of the right file: the file is complete with another
+                // SHA-256, or more arrived than it has. A size the server
+                // said before sending anything is no such proof: nothing of
+                // that answer was taken, and what an earlier try kept is
+                // still hashed from its first byte before it is used.
+                let (end, second, third) = match &why {
+                    Mismatch::AnnouncedSize { .. } if had > 0 => (
+                        DownloadEnd::Kept,
+                        format!("The installer took nothing of what the server offered. The {had} bytes an earlier try downloaded stay on this computer: the server's answer says nothing about them, and they are checked from the first byte, together with the rest, before anything of the file is used."),
+                        format!("Starting the installer again goes on from those bytes. {tell}"),
+                    ),
+                    Mismatch::AnnouncedSize { .. } => (
+                        DownloadEnd::Kept,
+                        "The installer took nothing of what the server offered.".to_string(),
+                        format!("Starting the installer again tries the download again. {tell}"),
+                    ),
+                    Mismatch::Sha256 | Mismatch::TooManyBytes => (
+                        DownloadEnd::Discard,
+                        "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.".to_string(),
+                        format!("Starting the installer again downloads the file afresh. {tell}"),
+                    ),
+                };
                 self.stop(
                     StopKind::FactoryDownloadMismatch { build: id, why },
                     Retry::Whenever,
                     "The downloaded file is not the one this release lists",
-                    vec![
-                        first,
-                        "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.".into(),
-                        format!("Starting the installer again downloads the file afresh. If it stops here again, Google's file and this release's list do not agree: please tell us at {ISSUES}"),
-                    ],
+                    vec![first, second, third],
                 );
-                Ok(DownloadEnd::Discard)
+                Ok(end)
             }
         }
     }
