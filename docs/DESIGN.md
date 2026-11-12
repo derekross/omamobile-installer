@@ -187,6 +187,8 @@ Setting slot B active runs slot B's bootloader, so both slots' versions must mat
 - only the current slot's reported, and nothing stated about the other: **stop** (`bootloader-slots-unknown`);
 - only the current slot's reported, and the owner stated the other slot's version: go on if it is the version the phone reports, **stop** if it is not (`bootloader-slots-stated-other`). Below.
 
+**Reported means a version, not a line.** A bootloader that answers `version-bootloader-a:` or `:b:` with nothing after the colon has not reported that slot, as `tools/install-phone` reads it (`[[ -n $bl_a && -n $bl_b ]]`). Two empty answers are therefore not "both reported and equal": such a phone is one that tells one slot, and takes the third or fourth line above. The rule is in the one function that reads a per-slot version (`slot_bootloader` in `core/src/fastboot.rs`), which the flow's judge and every session's `connect` both use. Tests: `a_slot_whose_bootloader_version_is_empty_is_a_slot_not_reported` (there), and `a_phone_whose_per_slot_bootloader_versions_are_empty_has_not_reported_them` (`core/tests/write_path.rs`).
+
 The flow never switches slots, on any of these paths.
 
 ### The owner's statement

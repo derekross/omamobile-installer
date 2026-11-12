@@ -969,6 +969,56 @@ fn a_phone_that_tells_one_bootloader_slot_is_written_only_on_the_owners_statemen
     nothing_written(&phone);
 }
 
+/// A bootloader that answers the per-slot versions with nothing after the
+/// colon has not reported them. As in tools/install-phone, which takes an
+/// empty answer as none: two empty answers are not "both reported and
+/// equal", and the phone is written only on its owner's statement.
+#[test]
+fn a_phone_whose_per_slot_bootloader_versions_are_empty_has_not_reported_them() {
+    let bundle = TestBundle::new();
+    let empty_slots = |a: &str, b: &str| {
+        let phone = ready();
+        phone.edit(|s| {
+            s.vars.insert("version-bootloader-a".into(), a.into());
+            s.vars.insert("version-bootloader-b".into(), b.into());
+        });
+        phone
+    };
+    for (a, b) in [("", ""), (" ", " "), ("", "fake-1.0"), ("fake-1.0", "")] {
+        // The flow's judge: the stop of a phone that tells one slot
+        let phone = empty_slots(a, b);
+        let flow = run(&bundle, &phone, writing());
+        assert_eq!(stop(&flow).id(), "bootloader-slots-unknown", "{a:?} {b:?}");
+        nothing_written(&phone);
+        // A session reads the same lines the same way
+        let phone = empty_slots(a, b);
+        let release = bundle.verify().unwrap();
+        let err = block_on(Session::connect(
+            phone.clone(),
+            &release,
+            SERIAL,
+            Default::default(),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Phone(why) if why.contains("only reports slot a's bootloader")),
+            "{a:?} {b:?}: {err}"
+        );
+        nothing_written(&phone);
+    }
+    // With the owner's statement such a phone is written, and every screen
+    // says whose word the run rests on: nothing was read from the phone
+    let phone = empty_slots("", "");
+    let flow = run(&bundle, &phone, stating("fake-1.0"));
+    assert!(
+        matches!(flow.step(), Step::Installed(_)),
+        "{:?}",
+        flow.step()
+    );
+    assert_eq!(flow.screen().notice, Some(SLOTS_ON_THE_OWNERS_WORD.into()));
+    holds_the_release(&bundle, &phone);
+}
+
 #[test]
 fn a_flow_that_writes_says_before_the_unlock_steps_what_its_install_leaves() {
     let bundle = TestBundle::new();

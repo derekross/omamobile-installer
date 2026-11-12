@@ -205,6 +205,12 @@ pub struct PhoneReport {
 
 /// `version-bootloader` for one slot among `getvar:all`'s lines, under any
 /// of the spellings a bootloader may use.
+///
+/// A line with an empty value is a slot the phone did not report, as in
+/// Omarchy Mobile's `tools/install-phone` (`[[ -n $bl_a && -n $bl_b ]]`):
+/// two empty answers are not "both reported and equal". This is the one
+/// place a per-slot version is read, for the flow's judge ([`probe`]) and
+/// for every session (`connect`).
 fn slot_bootloader(all: &[String], slot: char) -> Option<String> {
     all.iter().find_map(|line| {
         let rest = line.strip_prefix("version-bootloader")?;
@@ -213,6 +219,7 @@ fn slot_bootloader(all: &[String], slot: char) -> Option<String> {
         (matches!(sep, '-' | '_' | ':') && c.next()? == slot)
             .then(|| c.as_str().strip_prefix(':').map(|v| v.trim().to_string()))
             .flatten()
+            .filter(|version| !version.is_empty())
     })
 }
 
@@ -1332,6 +1339,30 @@ mod tests {
         // Either can ask
         let mut client = Client::for_session(Recorder::default(), list(), true);
         assert!(block_on(client.simple("getvar:all")).is_ok());
+    }
+
+    #[test]
+    fn a_slot_whose_bootloader_version_is_empty_is_a_slot_not_reported() {
+        let lines = |a: &str, b: &str| {
+            vec![
+                "version-bootloader:fake-1.0".to_string(),
+                format!("version-bootloader{a}"),
+                format!("version-bootloader{b}"),
+            ]
+        };
+        // Each spelling, with a value: reported
+        for (a, b) in [("-a:", "-b:"), ("_a:", "_b:"), (":a:", ":b:")] {
+            let all = lines(&format!("{a}fake-1.0"), &format!("{b} fake-1.1 "));
+            assert_eq!(slot_bootloader(&all, 'a').as_deref(), Some("fake-1.0"));
+            assert_eq!(slot_bootloader(&all, 'b').as_deref(), Some("fake-1.1"));
+            // The same lines with nothing after the colon, or only spaces:
+            // not reported, so never "both reported and equal"
+            for empty in ["", " ", "\t"] {
+                let all = lines(&format!("{a}{empty}"), &format!("{b}{empty}"));
+                assert_eq!(slot_bootloader(&all, 'a'), None, "{a:?} {empty:?}");
+                assert_eq!(slot_bootloader(&all, 'b'), None, "{b:?} {empty:?}");
+            }
+        }
     }
 
     #[test]
