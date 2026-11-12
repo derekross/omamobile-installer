@@ -7,7 +7,7 @@
 //! format, parsed here independently of the core's writer), so a test can
 //! compare the partitions afterwards with what should be on them.
 #![allow(dead_code)]
-use omamobile_installer_core::fastboot::Transport;
+use omamobile_installer_core::fastboot::{Transport, GET_UNLOCK_ABILITY};
 use omamobile_installer_core::{Error, Result};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -25,6 +25,9 @@ pub struct FakeState {
     pub active_slot: String,
     pub rebooted: bool,
     pub max_download: usize,
+    /// The INFO line that answers `flashing get_unlock_ability`. `None`: a
+    /// bootloader that doesn't know the command, and answers FAIL.
+    pub unlock_ability: Option<String>,
     // Faults
     /// Answer FAIL to a command starting with any of these.
     pub fail_on: Vec<String>,
@@ -93,6 +96,7 @@ impl FakePhone {
             active_slot: "a".into(),
             rebooted: false,
             max_download: 256 << 10,
+            unlock_ability: None,
             fail_on: Vec::new(),
             short_data: false,
             take_at_most: None,
@@ -104,10 +108,85 @@ impl FakePhone {
         })))
     }
 
+    /// A phone in one of the states an install can meet, by name: for the
+    /// flow's tests and for the front ends' pretend phone.
+    pub fn scenario(name: &str) -> Option<Self> {
+        let phone = FakePhone::new(if name == "other-model" {
+            "panther"
+        } else {
+            "cheetah"
+        });
+        let set = |pairs: &[(&str, &str)]| {
+            phone.edit(|s| {
+                for (k, v) in pairs {
+                    s.vars.insert(k.to_string(), v.to_string());
+                }
+            });
+        };
+        // A bootloader that reports both slots' versions, as the flow needs
+        let slots = |v: &str| {
+            set(&[
+                ("version-bootloader", v),
+                ("version-bootloader-a", v),
+                ("version-bootloader-b", v),
+            ])
+        };
+        slots("fake-1.0");
+        match name {
+            "ready" | "other-model" => {}
+            // Locked, with "OEM unlocking" switched on in Developer options
+            "locked" => {
+                set(&[("unlocked", "no")]);
+                phone.edit(|s| s.unlock_ability = Some("get_unlock_ability: 1".into()));
+            }
+            // Locked, and "OEM unlocking" still off
+            "locked-oem-off" => {
+                set(&[("unlocked", "no")]);
+                phone.edit(|s| s.unlock_ability = Some("get_unlock_ability: 0".into()));
+            }
+            "slot-b" => set(&[("current-slot", "b")]),
+            "one-slot" => {
+                phone.edit(|s| {
+                    s.vars.remove("version-bootloader-a");
+                    s.vars.remove("version-bootloader-b");
+                });
+            }
+            "slots-differ" => set(&[("version-bootloader-b", "fake-0.9")]),
+            "unknown-build" => {
+                slots("fake-7.7");
+                set(&[("version-baseband", "fake-radio-7.7")]);
+            }
+            "untested-build" => {
+                slots("fake-1.2");
+                set(&[("version-baseband", "fake-radio-1.2")]);
+            }
+            "untested-old-build" => {
+                slots("fake-0.9");
+                set(&[("version-baseband", "fake-radio-0.9")]);
+            }
+            _ => return None,
+        }
+        Some(phone)
+    }
+
     pub fn edit(&self, f: impl FnOnce(&mut FakeState)) -> &Self {
         f(&mut self.0.borrow_mut());
         self
     }
+
+    /// The names [`Self::scenario`] knows.
+    pub const SCENARIOS: [&'static str; 10] = [
+        "ready",
+        "locked",
+        "locked-oem-off",
+        "other-model",
+        "slot-b",
+        "one-slot",
+        "slots-differ",
+        "unknown-build",
+        "untested-build",
+        "untested-old-build",
+    ];
 
     pub fn partition(&self, name: &str) -> Vec<u8> {
         self.0.borrow().partitions[name].clone()
@@ -115,6 +194,24 @@ impl FakePhone {
 
     pub fn log(&self) -> Vec<String> {
         self.0.borrow().log.clone()
+    }
+
+    /// What was received that is neither `getvar:` nor the one read-only
+    /// question of the flashing family: for a flow that only reads, nothing.
+    pub fn not_reads(&self) -> Vec<String> {
+        self.0
+            .borrow()
+            .log
+            .iter()
+            .filter(|c| !c.starts_with("getvar:") && *c != GET_UNLOCK_ABILITY)
+            .cloned()
+            .collect()
+    }
+
+    /// How many times `flashing get_unlock_ability` was received.
+    pub fn unlock_questions(&self) -> usize {
+        let log = &self.0.borrow().log;
+        log.iter().filter(|c| *c == GET_UNLOCK_ABILITY).count()
     }
 
     /// Names of the partitions that no longer hold only the sentinel.
@@ -167,7 +264,9 @@ pub fn unsparse(image: &[u8], target: &mut [u8]) -> core::result::Result<(), Str
         match kind {
             0xcac1 if data.len() == n * blk => out.copy_from_slice(data),
             0xcac2 if data.len() == 4 => out
-                .chunks_exact_mut(4)
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
                 .for_each(|w| w.copy_from_slice(data)),
             0xcac3 if data.is_empty() => {}
             _ => return Err(format!("bad chunk {kind:#x}")),
@@ -258,8 +357,13 @@ impl FakeState {
         } else if cmd == "reboot" {
             self.rebooted = true;
             self.reply("OKAY", "");
+        } else if cmd == GET_UNLOCK_ABILITY && self.unlock_ability.is_some() {
+            // The one question of the flashing family: it reads
+            let line = self.unlock_ability.clone().unwrap_or_default();
+            self.reply("INFO", &line);
+            self.reply("OKAY", "");
         } else {
-            // erase:, format:, oem, flashing, ...: a test that sees one fails
+            // erase:, format:, oem, flashing unlock, ...: a test that sees one fails
             self.reply("FAIL", "unknown command");
         }
     }

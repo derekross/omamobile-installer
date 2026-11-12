@@ -152,7 +152,7 @@ impl SparseSplitter {
             ));
         }
         let first: [u8; 4] = block[..4].try_into().unwrap();
-        let fill = block.chunks_exact(4).all(|w| w == first);
+        let fill = block.as_chunks::<4>().0.iter().all(|w| *w == first);
         // What this block adds to the segment
         let extends = match self.open {
             Open::Raw(_) => !fill,
@@ -207,11 +207,11 @@ impl SparseSplitter {
             self.partial = block;
             self.partial.clear();
         }
-        let mut blocks = data.chunks_exact(BLOCK);
-        for block in &mut blocks {
+        let (blocks, rest) = data.as_chunks::<BLOCK>();
+        for block in blocks {
             self.add_block(block, out)?;
         }
-        self.partial.extend_from_slice(blocks.remainder());
+        self.partial.extend_from_slice(rest);
         Ok(())
     }
 

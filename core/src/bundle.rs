@@ -13,6 +13,7 @@
 //! into a [`VerifiedImage`] or a [`VerifiedRootImage`], and those are the
 //! only things [`crate::fastboot::Session`] accepts to write. There is no
 //! unsigned path in this crate.
+use crate::build_index::{self, BuildIndex, IndexData};
 use crate::device_conf::DeviceConf;
 use crate::hash::{is_sha256_hex, sha256_hex, StreamHasher};
 use crate::manifest::{is_calendar_version, BootWrite, Manifest};
@@ -32,9 +33,23 @@ pub struct ReleaseFiles<'a> {
     pub device_conf: &'a [u8],
 }
 
+/// What the release's signed descriptor says about installing on this
+/// device, beyond the manifest's plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRules {
+    /// `BOOTLOADER_SLOT_PROBE=yes`: the installer may read the other slot's
+    /// bootloader version by switching slots. Parsed and carried; nothing in
+    /// this version acts on it.
+    pub bootloader_slot_probe: bool,
+    /// `INSTALL_KEYS_FASTBOOT`: how this phone's keys reach Fastboot Mode, as
+    /// a phrase that ends a sentence.
+    pub keys_fastboot: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct VerifiedRelease {
     manifest: Manifest,
+    rules: DeviceRules,
     signer: Signer,
     /// SHA-256 of `manifest.json`: ties tokens to this release.
     id: String,
@@ -120,7 +135,15 @@ pub fn verify_release(files: &ReleaseFiles<'_>, trusted: &TrustedKeys) -> Result
 
     // 3. The manifest's own rules, and the descriptor
     let manifest = Manifest::parse(files.manifest_json)?;
-    manifest.check_descriptor(&DeviceConf::parse(files.device_conf)?)?;
+    let conf = DeviceConf::parse(files.device_conf)?;
+    manifest.check_descriptor(&conf)?;
+    let rules = DeviceRules {
+        bootloader_slot_probe: conf.bootloader_slot_probe()?,
+        keys_fastboot: conf
+            .get("INSTALL_KEYS_FASTBOOT")
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
+    };
     if !is_calendar_version(&manifest.version) {
         return Err(Error::Manifest(format!(
             "a signed release is versioned by the calendar (YYYY.MM.DD), not {}",
@@ -177,6 +200,7 @@ pub fn verify_release(files: &ReleaseFiles<'_>, trusted: &TrustedKeys) -> Result
 
     Ok(VerifiedRelease {
         manifest,
+        rules,
         signer,
         id: sha256_hex(files.manifest_json),
     })
@@ -188,6 +212,28 @@ impl VerifiedRelease {
     }
     pub fn signer(&self) -> &Signer {
         &self.signer
+    }
+    pub fn rules(&self) -> &DeviceRules {
+        &self.rules
+    }
+
+    /// Whether this release carries a build index at all.
+    pub fn has_build_index(&self) -> bool {
+        self.manifest
+            .files
+            .iter()
+            .any(|f| f.path == build_index::FILE)
+    }
+
+    /// The release's build index: `bytes` must be the `factory-builds.json`
+    /// the signed checksums cover, and pass every rule of
+    /// [`build_index`]. This is the only way to a [`BuildIndex`], so a
+    /// factory image is never checked against a digest the release key
+    /// didn't sign.
+    pub fn build_index(&self, bytes: &[u8]) -> Result<BuildIndex> {
+        self.check_file(build_index::FILE, bytes)?;
+        let data = IndexData::parse(bytes, &self.manifest.codename)?;
+        Ok(BuildIndex::new(data, self.id.clone()))
     }
     pub(crate) fn id(&self) -> &str {
         &self.id

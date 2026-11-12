@@ -8,12 +8,17 @@ pub enum Error {
     Manifest(String),
     /// `device.conf` is not a valid descriptor, or disagrees with the manifest.
     DeviceConf(String),
+    /// `factory-builds.json` is not a valid build index.
+    BuildIndex(String),
     /// A file does not match its signed checksum or size.
     Checksum(String),
     /// The signature is missing, invalid or not by a trusted key.
     Signature(String),
     /// A safety rule refused the request (allowlist, order, pinning).
     Refused(String),
+    /// The maintainer's bootloader-slot override was asked for where a write
+    /// could follow. It exists for dry runs only.
+    OverrideOutsideDryRun,
     /// The phone is not in a state the install accepts.
     Phone(String),
     /// The phone answered something the fastboot protocol does not allow here.
@@ -35,9 +40,14 @@ impl fmt::Display for Error {
         match self {
             Error::Manifest(s) => write!(f, "manifest.json: {s}"),
             Error::DeviceConf(s) => write!(f, "device.conf: {s}"),
+            Error::BuildIndex(s) => write!(f, "factory-builds.json: {s}"),
             Error::Checksum(s) => write!(f, "checksum: {s}"),
             Error::Signature(s) => write!(f, "signature: {s}"),
             Error::Refused(s) => write!(f, "refused: {s}"),
+            Error::OverrideOutsideDryRun => write!(
+                f,
+                "refused: the bootloader-slot check can be skipped in a dry run only, never where a write could follow"
+            ),
             Error::Phone(s) => write!(f, "phone: {s}"),
             Error::Protocol(s) => write!(f, "fastboot protocol: {s}"),
             Error::DeviceFail { command, message } => {

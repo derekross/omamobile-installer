@@ -16,13 +16,20 @@
 //!   cut into Android sparse images no larger than the phone's
 //!   `max-download-size`, without holding the image in memory.
 //!
+//! - [`download`]: Google's factory image, fetched by a front end from the
+//!   address in the signed build index and decided here, answer by answer.
+//!
 //! Nothing here does I/O on its own: bytes come in from the caller, and the
-//! only way out is the transport trait.
+//! only ways out are the transport trait and, for Google's factory image, a
+//! typed request the front end carries out ([`download::FetchRequest`]).
 
+pub mod build_index;
 pub mod bundle;
 pub mod device_conf;
+pub mod download;
 pub mod error;
 pub mod fastboot;
+pub mod flow;
 pub mod hash;
 pub mod install;
 pub mod manifest;

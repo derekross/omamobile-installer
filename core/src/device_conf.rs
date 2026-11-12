@@ -66,6 +66,22 @@ impl DeviceConf {
             .unwrap_or_default()
     }
 
+    /// `BOOTLOADER_SLOT_PROBE`: whether this device's maintainers allow the
+    /// installer to read the other slot's bootloader version by making that
+    /// slot active and switching back. Off unless the descriptor says `yes`;
+    /// anything but `yes` or `no` is refused. No published descriptor sets
+    /// it, and this version of the installer never switches slots either way
+    /// (docs/DESIGN.md, "The bootloader's two slots").
+    pub fn bootloader_slot_probe(&self) -> Result<bool> {
+        match self.get("BOOTLOADER_SLOT_PROBE") {
+            None | Some("no") => Ok(false),
+            Some("yes") => Ok(true),
+            Some(other) => Err(Error::DeviceConf(format!(
+                "BOOTLOADER_SLOT_PROBE is yes or no, not {other}"
+            ))),
+        }
+    }
+
     /// `AVB_FOOTERS` as (image, partition size in bytes).
     pub fn avb_footers(&self) -> Result<Vec<(String, u64)>> {
         let mut out = Vec::new();

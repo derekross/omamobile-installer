@@ -3,38 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Omarchy Mobile installer (spike)</title>
+<title>Omarchy Mobile installer (preview)</title>
 <link rel="stylesheet" href="style.css">
 <script type="module" src="app.js"></script>
 </head>
 <body>
 <main>
-<h1>Omarchy Mobile installer <small>spike</small></h1>
-<p>The installer core, built from Rust to WebAssembly, running in this page. Nothing here writes to a phone.</p>
+<h1>Omarchy Mobile installer <small>preview</small></h1>
+<p id="banner" class="banner">This is a preview. It cannot write to a phone: it goes through the steps of an install, asks the phone what it is, and ends by listing what an install would write.</p>
 
-<section>
-<h2>1. The core</h2>
-<p id="core" class="pending">loading</p>
+<section id="status">
+<p id="core" class="pending">loading the installer</p>
+<p id="release" class="pending">waiting for the installer</p>
+<p id="options" hidden><label id="scenario-label" hidden>A pretend phone: <select id="scenario"></select></label> <label><input id="reinstall" type="checkbox"> slot B already holds Omarchy Mobile (a reinstall)</label> <button id="restart" type="button">Start over</button></p>
 </section>
 
-<section>
-<h2>2. A release, checked in the browser</h2>
-<p>The signed files of the published Pixel 7 Pro release 2026.11.08, checked against the release key's fingerprint built into the module.</p>
-<p id="release" class="pending">waiting for the core</p>
-<ul id="plan"></ul>
-</section>
+<ol id="progress" hidden>
+<li data-state="warning">The warning</li>
+<li data-state="phone unlock">The phone</li>
+<li data-state="google-terms factory-image">Google's factory image</li>
+<li data-state="answers">About you</li>
+<li data-state="dry-run done">The dry run</li>
+</ol>
 
-<section>
-<h2>3. A phone, read-only</h2>
-<p>With the phone in fastboot mode: pick it in the browser's chooser, and the core runs every check it would run before an install. This build sends no write.</p>
-<p><button id="check" type="button" disabled>Check my phone</button> <label><input id="reinstall" type="checkbox"> slot B already holds Omarchy Mobile</label></p>
-<p id="phone" class="pending">not connected</p>
-<ul id="log"></ul>
-</section>
+<section id="screen" hidden aria-live="polite"></section>
 
 <section id="selftest-section" hidden>
 <h2>Self-test</h2>
-<p>An install against the tests' fake phone, inside the browser. No USB.</p>
+<p>The whole flow, and each way it stops, driven through this page against the pretend phone. No USB.</p>
 <pre id="selftest" class="pending">running</pre>
 </section>
 </main>

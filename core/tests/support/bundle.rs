@@ -22,6 +22,8 @@ pub const IMAGES: [(&str, usize, Option<usize>); 5] = [
     ("dtbo", 4 << 10, None),
 ];
 pub const ROOT_NAME: &str = "omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst";
+/// The build the fake phone runs: its bootloader and baseband are the fake's.
+pub const PHONE_BUILD: &str = "TEST.260101.001";
 
 pub struct TestBundle {
     pub sums: Vec<u8>,
@@ -34,6 +36,12 @@ pub struct TestBundle {
     pub root_raw: Vec<u8>,
     pub root_zst: Vec<u8>,
     pub fingerprint: String,
+    /// `factory-builds.json`, or empty when the bundle carries none.
+    pub index_json: Vec<u8>,
+    /// A stand-in for Google's factory zip for [`PHONE_BUILD`]: noise, with
+    /// the size and SHA-256 the index records. Nothing ever opens it.
+    pub factory_zip: Vec<u8>,
+    pub factory_zip_name: String,
 }
 
 /// Deterministic noise.
@@ -55,7 +63,7 @@ pub fn root_image() -> Vec<u8> {
     let b = 4096;
     let mut img = vec![0u8; 512 * b];
     img[64 * b..96 * b].copy_from_slice(&noise(1, 32 * b));
-    for w in img[96 * b..100 * b].chunks_exact_mut(4) {
+    for w in img[96 * b..100 * b].as_chunks_mut::<4>().0 {
         w.copy_from_slice(&0xdead_beef_u32.to_le_bytes());
     }
     img[100 * b..300 * b].copy_from_slice(&noise(2, 200 * b));
@@ -100,6 +108,7 @@ pub fn default_conf() -> String {
         "# test descriptor",
         "CODENAME=cheetah",
         "NAME=\"Pixel 7 Pro\"",
+        "INSTALL_KEYS_FASTBOOT=\"with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears\"",
         "SOC_IDS=\"b0:0x9855001 a0:0x9855000\"",
         "AVB_FOOTERS=\"boot:0x4000 init_boot:0x2000\"",
         "BOOT_IMAGES=\"boot init_boot vendor_boot vendor_kernel_boot dtbo\"",
@@ -107,6 +116,68 @@ pub fn default_conf() -> String {
         "",
     ]
     .join("\n")
+}
+
+/// The stand-in factory zip's bytes.
+pub fn factory_zip() -> Vec<u8> {
+    noise(77, 48 << 10)
+}
+
+fn index_entry(
+    build: &str,
+    versions: &str,
+    zip: Option<&[u8]>,
+    tested_with: Option<&str>,
+) -> Value {
+    // A build that isn't the phone's has no file here: a digest and a size
+    // that only look the part
+    let (sha256, size) = match zip {
+        Some(data) => (sha256_hex(data), data.len() as u64),
+        None => (
+            sha256_hex(build.as_bytes()),
+            3_900_000_000 + build.len() as u64,
+        ),
+    };
+    let name = format!(
+        "cheetah-{}-factory-{}.zip",
+        build.to_ascii_lowercase(),
+        &sha256[..8]
+    );
+    let mut entry = json!({
+        "build": build,
+        "bootloader": format!("fake-{versions}"),
+        "baseband": format!("fake-radio-{versions}"),
+        "zip": name,
+        "url": format!("https://dl.google.com/dl/android/aosp/{name}"),
+        "page": "https://developers.google.com/android/images#cheetah",
+        "sha256": sha256,
+        "size": size,
+        "tested": tested_with.is_some(),
+    });
+    if let Some(release) = tested_with {
+        entry["tested_with"] = json!(release);
+    }
+    entry
+}
+
+/// A build index around the fake phone (bootloader `fake-1.0`, baseband
+/// `fake-radio-1.0`), newest first: an untested build newer than every
+/// tested one; a tested one; the phone's, tested, and a carrier variant
+/// with the same two versions; and an old untested one.
+pub fn default_index() -> Value {
+    let zip = factory_zip();
+    json!({
+        "format": 1,
+        "codename": "cheetah",
+        "updated": "2026-01-02",
+        "builds": [
+            index_entry("TEST.260301.001", "1.2", None, None),
+            index_entry("TEST.260201.001", "1.1", None, Some("2026.01.02")),
+            index_entry(PHONE_BUILD, "1.0", Some(&zip), Some("2026.01.02")),
+            index_entry("TEST.260101.001.A1", "1.0", None, None),
+            index_entry("TEST.251201.001", "0.9", None, None),
+        ],
+    })
 }
 
 impl TestBundle {
@@ -117,6 +188,20 @@ impl TestBundle {
     /// `edit` changes manifest.json and `conf` the descriptor, both before
     /// the checksums are taken and signed.
     pub fn build(edit: impl FnOnce(&mut Value), conf: impl FnOnce(String) -> String) -> Self {
+        Self::build_all(edit, conf, |_| {})
+    }
+
+    /// A bundle whose build index was changed before it was signed. Setting
+    /// it to `null` leaves the index out of the bundle.
+    pub fn with_index(index: impl FnOnce(&mut Value)) -> Self {
+        Self::build_all(|_| {}, |c| c, index)
+    }
+
+    pub fn build_all(
+        edit: impl FnOnce(&mut Value),
+        conf: impl FnOnce(String) -> String,
+        index: impl FnOnce(&mut Value),
+    ) -> Self {
         let images: Vec<(String, Vec<u8>)> = IMAGES
             .iter()
             .enumerate()
@@ -151,6 +236,21 @@ impl TestBundle {
                 .map(|(n, d)| (format!("images/{n}.img"), d.clone())),
         );
         files.push(("omamobile.gpg".into(), keyring.clone()));
+        let factory_zip = factory_zip();
+        let mut index_value = default_index();
+        index(&mut index_value);
+        let index_json = if index_value.is_null() {
+            Vec::new()
+        } else {
+            let mut text = serde_json::to_vec_pretty(&index_value).unwrap();
+            text.push(b'\n');
+            files.push(("factory-builds.json".into(), text.clone()));
+            text
+        };
+        let factory_zip_name = default_index()["builds"][2]["zip"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let mut writes: Vec<Value> = IMAGES.iter().map(|(name, size, psize)| json!({"partition": format!("{name}_b"), "partition_size": psize, "size": size, "source": format!("images/{name}.img")})).collect();
         writes.push(
@@ -202,6 +302,9 @@ impl TestBundle {
             root_raw,
             root_zst,
             fingerprint,
+            index_json,
+            factory_zip,
+            factory_zip_name,
         }
     }
 
@@ -222,6 +325,11 @@ impl TestBundle {
 
     pub fn verify(&self) -> Result<VerifiedRelease> {
         verify_release(&self.files(), &self.trusted())
+    }
+
+    /// The index as a front end hands it to the flow.
+    pub fn index(&self) -> Option<&[u8]> {
+        (!self.index_json.is_empty()).then_some(&self.index_json[..])
     }
 
     pub fn image(&self, name: &str) -> &[u8] {
