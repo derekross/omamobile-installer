@@ -34,6 +34,19 @@ jobs:
         run: cargo test --locked
       - name: Tests (the command-line tool driving the flow against the pretend phone)
         run: cargo test --locked -p omamobile-installer-cli --features fake-phone
+      # The write path is the command-line tool's alone. The page begins
+      # every flow as a dry run and calls none of the flow's write steps.
+      - name: The web page has no write path
+        run: |
+          if grep -nE 'confirm_install|begin_write|write_done|write_failed|write_path|write: *true|\.write *= *true' web/src/*.rs web/static/*; then
+            echo "the web page reaches the flow's write path"; exit 1
+          fi
+          grep -c 'write: false' web/src/lib.rs
+          # The older direct session writes only in a build with
+          # enable-writes, which nothing may turn on
+          if grep -nE 'enable-writes' web/build.sh web/selftest.sh web/serve.py; then
+            echo "something builds the web page with enable-writes"; exit 1
+          fi
       # web/build.sh needs wasm-bindgen-cli at exactly the wasm-bindgen
       # version in Cargo.lock. Built once per version and kept.
       - name: Which wasm-bindgen Cargo.lock names
@@ -67,3 +80,8 @@ jobs:
           if grep -qiE 'slot_override|maintainer' web/dist/pkg/omamobile_installer_web.js web/dist/*.html; then
             echo "the shipping build offers the bootloader-slot override"; exit 1
           fi
+          # The write path: no entry point for it in what the page loads
+          if grep -qE 'confirm_install|begin_write|write_done|write_failed' web/dist/pkg/omamobile_installer_web.js web/dist/*.js web/dist/*.html; then
+            echo "the shipping build carries the flow's write steps"; exit 1
+          fi
+          grep -q 'cannot write to a phone' web/dist/index.html
