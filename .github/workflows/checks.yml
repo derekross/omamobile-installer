@@ -1,7 +1,11 @@
 # The gate for every push and pull request: no identifiers, formatted, the
-# core's tests and the command-line tool's flow against the fake phone, and
-# the web page built both ways. Nothing here touches a USB device: the tests
-# use a fake transport, and no step lists or opens USB devices.
+# core's tests and the command-line tool's flow against the fake phone, the
+# web page built both ways and its self-test in a headless browser, and a
+# look at what ships: no way to write to a phone, no pretend phone. Nothing
+# here touches a USB device: the tests use a fake transport, and no step
+# lists or opens USB devices. Nothing here reaches Google: downloads go to
+# stand-ins on the runner, and the self-test's browser can resolve no host
+# but 127.0.0.1.
 name: Checks
 on:
   push:
@@ -30,6 +34,8 @@ jobs:
         run: rustup show
       - name: Format
         run: cargo fmt --all --check
+      - name: The sources of what ships hold no way to write and no pretend phone
+        run: tools/check-shipping
       - name: Lints (errors fail; warnings are listed)
         run: cargo clippy --locked
       - name: Tests (the core, against the fake phone; the install flow and the build index among them)
@@ -57,6 +63,47 @@ jobs:
         run: |
           web/build.sh selftest
           grep -q fake_phone web/dist/pkg/omamobile_installer_web.js
+      # The only test of the page's own script: every state of the flow
+      # clicked through against the pretend phone, in a headless browser
+      # that is held to 127.0.0.1 (web/selftest.sh). It builds the self-test
+      # page itself and needs a Chromium, which the runner has.
+      - name: The web page's self-test, in a headless browser
+        run: |
+          for b in chromium chromium-browser google-chrome google-chrome-stable; do
+            if command -v "$b" >/dev/null; then echo "browser: $b, $("$b" --version)"; break; fi
+          done
+          web/selftest.sh
+      # What ships, as built: the command-line tool without features and the
+      # page without the self-test. The tool is read as bytes, with the
+      # tool the tests built with the pretend phone as the control; the
+      # page's module is loaded in node and asked whether it can write.
+      - name: What ships holds no way to write and no pretend phone
+        run: |
+          cargo build --release --locked -p omamobile-installer-cli
+          web/build.sh
+          tools/check-shipping --built --control target/debug/omamobile-install
+      # The shipping tool itself, on two commands it refuses from their
+      # arguments alone, before any USB device is listed or opened: the
+      # pretend phone, and an install that is not a dry run.
+      - name: The shipping tool refuses the pretend phone and an install that is not a dry run
+        run: |
+          tool=target/release/omamobile-install
+          refused() {   # refused WHAT SAYS ARGS...: status 1, SAYS on stderr, nothing on stdout
+            local what=$1 says=$2 status=0; shift 2
+            "$tool" "$@" </dev/null >out.txt 2>err.txt || status=$?
+            if [[ $status == 1 && ! -s out.txt ]] && grep -qF -- "$says" err.txt; then
+              echo "ok - $what"
+            else
+              echo "not ok - $what (status $status)"; cat out.txt err.txt; exit 1
+            fi
+          }
+          refused "the shipping tool has no pretend phone" \
+            "this build has no pretend phone" \
+            flow fixtures/selftest --fake-phone ready
+          refused "the shipping tool installs only as a dry run" \
+            "this version installs only with --dry-run" \
+            install fixtures/selftest --serial '<SERIAL>'
+          rm -f out.txt err.txt
       - name: The web page builds as it would ship, without the pretend phone
         run: |
           web/build.sh

@@ -36,10 +36,14 @@ cargo fmt --all --check
 cargo clippy
 cargo test
 cargo test -p omamobile-installer-cli --features fake-phone
-web/build.sh selftest && web/build.sh     # needs wasm-bindgen-cli at the version in Cargo.lock
+tools/check-shipping                      # the sources: no way to write, no pretend phone, in what ships
+web/build.sh selftest                     # needs wasm-bindgen-cli at the version in Cargo.lock
+web/selftest.sh                           # needs a Chromium; it is held to 127.0.0.1
+cargo build --release --locked -p omamobile-installer-cli && web/build.sh
+tools/check-shipping --built --control target/debug/omamobile-install   # reads the built tool, loads the page's module in node; runs neither
 ```
 
-If you changed the flow or the page, also run `web/selftest.sh` (a headless Chromium clicks through the page against the pretend phone and a stand-in for Google's server; CI doesn't run it).
+`web/selftest.sh` clicks through the page in a headless Chromium against the pretend phone and a stand-in for Google's server. It is the only test of the page's script, and CI runs it. CI also runs the shipping tool on two commands that it refuses from their arguments (the pretend phone, and an install without `--dry-run`); don't run a tool built without `fake-phone` on a computer with a phone attached to see that for yourself.
 
 The toolchain is pinned in `rust-toolchain.toml`, so `cargo` installs the right one.
 

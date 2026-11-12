@@ -56,7 +56,8 @@ web/build.sh                    # web/dist, the page as it would ship
 web/build.sh selftest           # with the pretend phone built in
 web/serve.py                    # http://127.0.0.1:8765/
 web/serve.py --stand-in         # for a selftest build: ?pretend and ?selftest, with a stand-in for Google's server
-web/selftest.sh                 # builds, serves, and runs ?selftest in a headless Chromium
+web/selftest.sh                 # builds, serves, and runs ?selftest in a headless Chromium held to 127.0.0.1
+tools/check-shipping            # what ships has no way to write and no pretend phone (--built: also the built tool and page)
 ```
 
 Commands that touch no USB device:
