@@ -717,6 +717,13 @@ impl<T: Transport> Session<T> {
     pub fn userdata_walk(&self) -> Option<UserdataWalk> {
         self.userdata_walk
     }
+    /// The partitions the gate lets this session's `flash:` name: the
+    /// verified release's (its boot images with `_b`, and `userdata`) in
+    /// the session that writes, and none at all in a dry run, where the
+    /// gate passes no command that writes or stages a write.
+    pub fn may_flash(&self) -> &[String] {
+        &self.client.flashable
+    }
     /// How far this session's writes got. In a dry run: nothing, always.
     pub fn reach(&self) -> WriteReach {
         self.reach

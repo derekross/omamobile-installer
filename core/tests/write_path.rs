@@ -10,7 +10,8 @@ mod support;
 use omamobile_installer_core::bundle::VerifiedRelease;
 use omamobile_installer_core::fastboot::{PhoneId, Session, Transport, WriteReach};
 use omamobile_installer_core::flow::{
-    AnswersInput, Flow, FlowOptions, OwnerAnswers, PhoneFact, Step, Stop, StopKind,
+    AnswersInput, Flow, FlowOptions, OwnerAnswers, PhoneFact, Step, Stop, StopKind, NO_INSTALL_YET,
+    NO_USABLE_PHONE_YET,
 };
 use omamobile_installer_core::install::flash_userdata_from_reader;
 use omamobile_installer_core::Error;
@@ -792,6 +793,59 @@ fn the_maintainers_override_never_reaches_a_write() {
         stop(&run(&bundle, &phone, writing())).id(),
         "bootloader-slots-unknown"
     );
+    nothing_written(&phone);
+}
+
+#[test]
+fn a_flow_that_writes_says_before_the_unlock_steps_what_its_install_leaves() {
+    let bundle = TestBundle::new();
+    // A dry run: this version installs nothing, so there is no reason to
+    // unlock for it
+    let phone = FakePhone::scenario("locked").unwrap();
+    let flow = run(&bundle, &phone, FlowOptions::default());
+    assert!(flow.ends_at_dry_run());
+    let screen = flow.screen();
+    assert_eq!(screen.state, "unlock");
+    assert_eq!(screen.notice.as_deref(), Some(NO_INSTALL_YET));
+    // A run that writes does install, so that sentence would be false. It
+    // says what the install leaves: a phone nobody can sign in to
+    let phone = FakePhone::scenario("locked").unwrap();
+    let flow = run(&bundle, &phone, writing());
+    assert!(!flow.ends_at_dry_run());
+    let screen = flow.screen();
+    assert_eq!(screen.state, "unlock");
+    assert_eq!(screen.notice.as_deref(), Some(NO_USABLE_PHONE_YET));
+    assert_eq!(NO_USABLE_PHONE_YET, "This version of the installer can install Omarchy Mobile, but it cannot put your answers on the phone: the phone it installs has no user account, and there is nothing to unlock it with. Unlocking the bootloader erases the phone. Unlock it for this version only if the phone is one you can do without.");
+    let all = screen.body.join(" ");
+    assert!(!all.contains("cannot install") && !all.contains("not for now"));
+    assert!(
+        all.contains("The installer does not send the unlock command. You do, when you are ready:")
+    );
+    nothing_written(&phone);
+}
+
+#[test]
+fn the_one_gate_has_the_releases_list_only_in_the_session_that_writes() {
+    let bundle = TestBundle::new();
+    let phone = ready();
+    let mut flow = flow_at(&bundle, &phone, "dry-run");
+    let release = flow.release().unwrap().clone();
+    block_on(async {
+        // The dry run of a flow that will write: its gate passes no flash
+        // at all, whatever the session above it does
+        let mut session = flow.dry_run(phone.clone()).await.unwrap().unwrap();
+        assert!(session.is_dry_run());
+        assert_eq!(session.may_flash(), [] as [String; 0]);
+        walk(&mut session, &bundle, &release).await.unwrap();
+        flow.dry_run_done(session).unwrap();
+        nothing_written(&phone);
+        flow.confirm_install("cheetah").unwrap();
+        // The session that writes: the release's partitions, whole and in
+        // its order, and nothing else
+        let session = flow.begin_write(phone.clone()).await.unwrap().unwrap();
+        assert!(!session.is_dry_run());
+        assert_eq!(session.may_flash(), OURS);
+    });
     nothing_written(&phone);
 }
 
