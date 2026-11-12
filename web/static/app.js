@@ -548,6 +548,13 @@ async function selftest() {
   await click("look");
   const commands = [...document.querySelectorAll("#screen .command")].map((c) => c.textContent);
   check("a locked phone gets the unlock steps, with the command as text", state() === "unlock" && commands.length === 1 && commands[0] === "fastboot flashing unlock" && text().includes("does not send the unlock command"));
+  check(
+    "a locked phone is told first, right under the title, that this version cannot install and not to unlock for it",
+    $("screen").children[1] === $("notice") &&
+      notice() === "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it." &&
+      text().includes("This version gives you no reason to take them."),
+    notice(),
+  );
   check("a locked phone was sent getvar and the one unlock question, and nothing else", onlyGetvar(1), JSON.stringify(sent()));
   check("a locked phone with OEM unlocking on is told so, without the Developer options step", text().includes('"OEM unlocking" is already switched on') && !text().includes("Developer options") && stepCount() === 3, text());
   await click("look");

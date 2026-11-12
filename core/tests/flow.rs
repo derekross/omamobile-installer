@@ -10,7 +10,7 @@ use omamobile_installer_core::fastboot::{
 };
 use omamobile_installer_core::flow::{
     AnswerField, AnswersInput, Flow, FlowOptions, OwnerAnswers, PhoneFact, Retry, Step, Stop,
-    StopKind, ZipRefusal, SLOT_CHECK_SKIPPED, UNLOCK_COMMAND,
+    StopKind, ZipRefusal, NO_INSTALL_YET, SLOT_CHECK_SKIPPED, UNLOCK_COMMAND,
 };
 use omamobile_installer_core::install::flash_userdata_from_reader;
 use omamobile_installer_core::Error;
@@ -536,6 +536,51 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
     only_reads(&phone, 3);
 }
 
+#[test]
+fn a_flow_that_ends_at_a_dry_run_says_so_before_the_unlock_steps() {
+    // The sentence an owner reads before the steps that erase the phone
+    assert_eq!(NO_INSTALL_YET, "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.");
+    let bundle = TestBundle::new();
+    for scenario in ["locked", "locked-oem-off"] {
+        let phone = phone(scenario);
+        let mut flow = flow_at(&bundle, &phone, "phone");
+        // Not before a locked phone was found: the screens before it show
+        // no step that erases anything
+        assert_eq!(flow.screen().notice, None);
+        look(&mut flow, &phone).unwrap();
+        let screen = flow.screen();
+        assert_eq!(screen.state, "unlock");
+        assert!(flow.ends_at_dry_run());
+        // In the notice, which both front ends draw right under the title,
+        // before the body and the steps
+        assert_eq!(screen.notice.as_deref(), Some(NO_INSTALL_YET), "{scenario}");
+        // The steps are still there, and named for what they are
+        assert!(screen
+            .steps
+            .iter()
+            .any(|s| s.command.as_deref() == Some(UNLOCK_COMMAND)));
+        let body = screen.body.join(" ");
+        assert!(
+            body.contains("They are what a version that can install will ask of you, shown so that you know them. This version gives you no reason to take them."),
+            "{body}"
+        );
+        assert!(!body.contains("when you are ready"), "{body}");
+        let v: Value = serde_json::to_value(&screen).unwrap();
+        assert_eq!(v["notice"], json!(NO_INSTALL_YET));
+        // Still locked at the next look: still said
+        look(&mut flow, &phone).unwrap();
+        assert_eq!(flow.screen().notice.as_deref(), Some(NO_INSTALL_YET));
+        // Once the phone is unlocked the unlock steps are gone, and so is
+        // the notice about them
+        phone.edit(|s| {
+            s.vars.insert("unlocked".into(), "yes".into());
+        });
+        look(&mut flow, &phone).unwrap();
+        assert_eq!(flow.screen().state, "google-terms");
+        assert_eq!(flow.screen().notice, None);
+    }
+}
+
 /// The unlock screen's text for a locked fake phone that answers
 /// `flashing get_unlock_ability` as `edit` sets it up.
 fn unlock_screen(
@@ -871,7 +916,11 @@ fn the_maintainers_override_passes_the_one_slot_stop_in_a_dry_run_and_says_so() 
     look(&mut flow, &locked).unwrap();
     let screen = flow.screen();
     assert_eq!(screen.state, "unlock");
-    assert_eq!(screen.notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+    // Both notices, the one about unlocking first
+    assert_eq!(
+        screen.notice,
+        Some(format!("{NO_INSTALL_YET} {SLOT_CHECK_SKIPPED}"))
+    );
     let body = screen.body.join(" ");
     assert!(!body.contains("two bootloader copies match"), "{body}");
     assert!(body.contains("Its second bootloader copy was not checked."));

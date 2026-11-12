@@ -140,6 +140,15 @@ fn a_locked_phone_is_shown_the_command_and_sent_nothing() {
     );
     assert!(out.contains("\n           fastboot flashing unlock\n"));
     assert!(flat(&out).contains("does not send the unlock command"));
+    // This version installs nothing, and the screen says so right under its
+    // title, before the steps that erase the phone
+    let at = |what: &str| {
+        out.find(what)
+            .unwrap_or_else(|| panic!("no {what:?} in {out}"))
+    };
+    assert!(at("==> Unlock the bootloader") < at("    !!  This version of the installer cannot"));
+    assert!(at("    !!  This version of the installer cannot") < at("fastboot flashing unlock"));
+    assert!(flat(&out).contains("!! This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it."));
     // The phone was asked whether it would take the command, and said yes
     assert!(flat(&out).contains("The phone says that \"OEM unlocking\" is already switched on"));
     assert!(!flat(&out).contains("Developer options"));

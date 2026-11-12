@@ -70,6 +70,10 @@ pub const GOOGLE_PRIVACY_POLICY: &str = "https://policies.google.com/privacy";
 /// the one `flashing` command this crate sends is the question
 /// [`crate::fastboot::GET_UNLOCK_ABILITY`], which only reads.
 pub const UNLOCK_COMMAND: &str = "fastboot flashing unlock";
+/// Said on the unlock screen, before its steps, by a flow that ends at the
+/// dry run ([`Flow::ends_at_dry_run`]): the steps there erase the phone, and
+/// such a flow installs nothing afterwards.
+pub const NO_INSTALL_YET: &str = "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.";
 /// Shown on every screen once the maintainer's override has skipped the
 /// bootloader-slot check, so both front ends say it in the same words.
 pub const SLOT_CHECK_SKIPPED: &str = "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.";
@@ -675,7 +679,9 @@ pub struct Screen {
     pub stop: Option<&'static str>,
     pub title: String,
     /// Said before everything else on the screen, and made to stand out:
-    /// a check was skipped by the maintainer's override.
+    /// a check was skipped by the maintainer's override, or the screen shows
+    /// steps that erase the phone in a flow that installs nothing
+    /// ([`NO_INSTALL_YET`]).
     pub notice: Option<String>,
     pub body: Vec<String>,
     /// Someone else's words, drawn after the body and set apart as theirs.
@@ -871,6 +877,15 @@ impl Flow {
     /// The factory image, once it has been checked.
     pub fn factory_zip_verified(&self) -> Option<&VerifiedFactoryZip> {
         self.zip.as_ref()
+    }
+
+    /// Whether this flow ends at the dry run, with no step that writes to a
+    /// phone. In this version every flow does. A screen that shows the owner
+    /// something that can't be undone (the unlock steps) asks this and says
+    /// so ([`NO_INSTALL_YET`]); a version of the flow that can write answers
+    /// from its own state here, so that the sentence stays true.
+    pub fn ends_at_dry_run(&self) -> bool {
+        true
     }
 
     fn phone_fact(&self) -> PhoneFact {
@@ -1720,6 +1735,15 @@ impl Flow {
                 s.state = "unlock";
                 s.action = "read-phone";
                 s.title = "Unlock the bootloader".into();
+                // The steps below erase the phone. A flow that installs
+                // nothing afterwards says so first, where it can't be missed
+                let no_install = self.ends_at_dry_run();
+                if no_install {
+                    s.notice = Some(match s.notice.take() {
+                        Some(skipped) => format!("{NO_INSTALL_YET} {skipped}"),
+                        None => NO_INSTALL_YET.to_string(),
+                    });
+                }
                 s.body = vec![
                     format!("The {name} is in Fastboot Mode, and its bootloader is still locked."),
                     if self.slot_check_skipped {
@@ -1742,10 +1766,12 @@ impl Flow {
                     }
                     UnlockAbility::Unknown => Some(format!("If \"OEM unlocking\" is not switched on yet: press Power to start Android. {developer_options} Then put the phone back in Fastboot Mode: {keys}.")),
                 };
-                s.body.push(
+                s.body.push(if no_install {
+                    "The installer does not send the unlock command, and these steps are not for now. They are what a version that can install will ask of you, shown so that you know them. This version gives you no reason to take them.".into()
+                } else {
                     "The installer does not send the unlock command. You do, when you are ready:"
-                        .into(),
-                );
+                        .into()
+                });
                 s.steps = switch_on.into_iter().map(step).collect();
                 s.steps.extend([
                     ScreenStep {
