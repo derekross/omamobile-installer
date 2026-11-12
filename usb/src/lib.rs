@@ -72,10 +72,14 @@ impl UsbTransport {
     }
 }
 
-/// How long the phone may take to answer. A flash of one large sparse image
-/// is the slow case.
+/// How long the phone may take to answer. A flash of one sparse image is
+/// the slow case, and the core bounds it: no piece covers more than
+/// `sparse::MAX_PIECE_BLOCKS` blocks (256 MiB), which a phone writing at
+/// `sparse::MIN_WRITE_KIB_PER_SECOND` or faster finishes inside this wait.
+/// The number is the core's, so the two cannot drift apart.
 #[cfg(not(target_arch = "wasm32"))]
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(omamobile_installer_core::sparse::FLASH_WAIT_SECONDS);
 
 impl Transport for UsbTransport {
     async fn send(&mut self, data: &[u8]) -> Result<usize> {

@@ -61,7 +61,7 @@ use omamobile_installer_core::download::{
     FactoryDownload, FetchFailure, FetchNext, FetchRequest, FetchResponse,
 };
 use omamobile_installer_core::fastboot::{
-    PhoneId, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
+    PhoneId, PieceReport, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
 use omamobile_installer_core::flow::{
     AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen, WRITE_HELP,
@@ -489,6 +489,53 @@ fn show_sent<T: Transport>(session: &Session<T>, seen: &mut usize) {
     *seen = session.log().len();
 }
 
+/// One piece of userdata in words: what its flash covered on the phone, and
+/// how long the phone took to answer it.
+fn piece_line(number: u32, piece: &PieceReport) -> String {
+    let took = match piece.flash {
+        Some(took) => format!("answered in {:.3} s", took.as_secs_f64()),
+        None => "not answered".into(),
+    };
+    format!(
+        "piece {number}: {} blocks, {} KiB written on the phone, {} bytes sent, {took}",
+        piece.blocks,
+        piece.blocks as u64 * 4,
+        piece.bytes
+    )
+}
+
+/// What the run's log keeps of the userdata pieces: the one that covered
+/// the most blocks (the most work one flash asked of the phone), the flash
+/// the phone took longest over, and a piece that was sent and not answered.
+fn userdata_account(pieces: &[PieceReport]) -> Vec<String> {
+    let numbered = || pieces.iter().enumerate().map(|(i, p)| (i as u32 + 1, p));
+    let mut out = Vec::new();
+    // The first of equals, so the line names one piece
+    if let Some((n, piece)) = numbered().rev().max_by_key(|(_, p)| p.blocks) {
+        out.push(format!(
+            "userdata, the piece that covered the most blocks: {}",
+            piece_line(n, piece)
+        ));
+    }
+    if let Some((n, piece)) = numbered()
+        .rev()
+        .filter(|(_, p)| p.flash.is_some())
+        .max_by_key(|(_, p)| p.flash)
+    {
+        out.push(format!(
+            "userdata, the flash the phone took longest over: {}",
+            piece_line(n, piece)
+        ));
+    }
+    if let Some((n, piece)) = numbered().next_back().filter(|(_, p)| p.flash.is_none()) {
+        out.push(format!(
+            "userdata, sent and not confirmed: {}",
+            piece_line(n, piece)
+        ));
+    }
+    out
+}
+
 /// Send the release's images through a session the flow opened, when they
 /// are on disk: each is checked against the signed manifest first. In the
 /// dry run's session every write is held back; in the one `Flow::begin_write`
@@ -521,12 +568,24 @@ async fn walk_images<T: Transport>(
     }
     let root = hash_root(release, &root_path).map_err(|e| Error::Checksum(e.to_string()))?;
     let reader = File::open(&root_path).map_err(io)?;
-    let mut progress = |pieces: u32| {
+    if writing {
+        // The core has no clock: this one times each flash of userdata
+        let begun = std::time::Instant::now();
+        session.time_flashes_with(Box::new(move || begun.elapsed()));
+    }
+    let mut progress = |pieces: u32, piece: &PieceReport| {
         if writing {
-            println!("    flash:userdata (piece {pieces})");
+            println!("    flash:userdata ({})", piece_line(pieces, piece));
         }
     };
-    flash_userdata_with_progress(session, &root, reader, Some(64 << 20), &mut progress).await?;
+    let result =
+        flash_userdata_with_progress(session, &root, reader, Some(64 << 20), &mut progress).await;
+    if writing {
+        for line in userdata_account(session.pieces()) {
+            println!("    {line}");
+        }
+    }
+    result?;
     seen = session.log().len();
     let result = session.activate_and_reboot().await;
     if writing {

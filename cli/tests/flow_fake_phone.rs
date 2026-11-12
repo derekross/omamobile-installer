@@ -404,6 +404,30 @@ fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
     }
     assert_eq!(sent[22..], ["set_active:b", "reboot"]);
     assert!(out.contains("(partitions written: boot_b, dtbo_b, init_boot_b, userdata, vendor_boot_b, vendor_kernel_boot_b)"));
+    // Each piece of userdata as the run's log keeps it: the blocks its
+    // flash covered on the phone, and how long the phone took to answer
+    let pieces: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("flash:userdata (piece "))
+        .collect();
+    assert_eq!(pieces.len(), 6, "{out}");
+    let mut blocks = 0;
+    for (n, line) in pieces.iter().enumerate() {
+        let rest = line
+            .strip_prefix(&format!("flash:userdata (piece {}: ", n + 1))
+            .unwrap_or_else(|| panic!("{line}"));
+        let (covered, rest) = rest.split_once(" blocks, ").unwrap();
+        blocks += covered.parse::<u32>().unwrap();
+        assert!(rest.contains(" KiB written on the phone, "), "{line}");
+        assert!(rest.contains(" bytes sent, answered in "), "{line}");
+        assert!(rest.ends_with(" s)"), "{line}");
+    }
+    // 2 MiB of 4096-byte blocks, each covered once
+    assert_eq!(blocks, 512);
+    assert!(out.contains("userdata, the piece that covered the most blocks: piece "));
+    assert!(out.contains("userdata, the flash the phone took longest over: piece "));
+    assert!(!out.contains("sent and not confirmed"));
     // After the last write: what the owner is told
     let after = flat(&out[out.find("==> Omarchy Mobile is written").unwrap()..]);
     assert!(after.contains("It now starts Omarchy Mobile from slot B."));

@@ -3,7 +3,10 @@
 mod support;
 use omamobile_installer_core::hash::sha256_hex;
 use omamobile_installer_core::install::UserdataStream;
-use omamobile_installer_core::sparse::{SparseSplitter, BLOCK, MIN_SEGMENT};
+use omamobile_installer_core::sparse::{
+    cover, SparseSplitter, BLOCK, FLASH_WAIT_SECONDS, MAX_PIECE_BLOCKS, MIN_SEGMENT,
+    MIN_WRITE_KIB_PER_SECOND,
+};
 use omamobile_installer_core::zstd_push::ZstdPush;
 use omamobile_installer_core::Error;
 use support::bundle::{noise, root_image, zstd_store};
@@ -59,6 +62,112 @@ fn segments_fit_the_limit_and_rebuild_the_image() {
             assert!(segments.len() > 1);
         }
     }
+}
+
+/// A FILL chunk is sixteen bytes however many blocks it covers, so the size
+/// limit alone never ends a piece of repeated blocks: one small download
+/// could tell the phone to write the rest of the image behind one `flash:`.
+/// A piece also ends at `MAX_PIECE_BLOCKS` covered blocks.
+#[test]
+fn no_piece_covers_more_blocks_than_one_flash_may() {
+    // 258 MiB of one repeated word, 1 MiB that does not compress, 2 MiB of
+    // zeros: 261 MiB, pushed without ever holding the image
+    let word = [0x11u8, 0x22, 0x33, 0x44];
+    let (filled, noisy, zero) = (66048usize, 256usize, 512usize);
+    let total = filled + noisy + zero;
+    let fill_mib: Vec<u8> = word.iter().copied().cycle().take(1 << 20).collect();
+    let noise_mib = noise(9, noisy * BLOCK);
+    let zero_mib = vec![0u8; 1 << 20];
+    let limit = 64u64 << 20;
+    let mut s = SparseSplitter::new((total * BLOCK) as u64, limit).unwrap();
+    let mut pieces = Vec::new();
+    for _ in 0..filled / 256 {
+        s.push(&fill_mib, &mut pieces).unwrap();
+    }
+    s.push(&noise_mib, &mut pieces).unwrap();
+    for _ in 0..zero / 256 {
+        s.push(&zero_mib, &mut pieces).unwrap();
+    }
+    s.finish(&mut pieces).unwrap();
+
+    // Without the cap this is one piece of 1 MiB and a few bytes that
+    // covers all 66816 blocks
+    let covers: Vec<_> = pieces.iter().map(|p| cover(p).unwrap()).collect();
+    println!("{covers:?}");
+    assert_eq!(pieces.len(), 2, "{covers:?}");
+    for (piece, cover) in pieces.iter().zip(&covers) {
+        assert!(piece.len() as u64 <= limit);
+        assert_eq!(cover.total_blocks as usize, total);
+        assert!(
+            cover.written_blocks >= 1 && cover.written_blocks <= MAX_PIECE_BLOCKS,
+            "{cover:?}"
+        );
+    }
+    // The first ends exactly at the cap, as a few bytes; the second goes on
+    // from there. Every block is written once
+    assert_eq!(covers[0].written_blocks, MAX_PIECE_BLOCKS);
+    assert!(pieces[0].len() < 100);
+    assert_eq!(
+        covers
+            .iter()
+            .map(|c| c.written_blocks as usize)
+            .sum::<usize>(),
+        total
+    );
+    // And flashed one after the other they are the image
+    let mut target = vec![0xa5u8; total * BLOCK];
+    for piece in &pieces {
+        unsparse(piece, &mut target).unwrap();
+    }
+    let (a, rest) = target.split_at(filled * BLOCK);
+    let (b, c) = rest.split_at(noisy * BLOCK);
+    assert!(a.chunks(1 << 20).all(|mib| mib == &fill_mib[..]));
+    assert!(b == &noise_mib[..]);
+    assert!(c.iter().all(|byte| *byte == 0));
+
+    // The number the cap is tied to: the largest piece, written at the
+    // stated minimum speed, is answered inside the transport's wait
+    let largest_kib = MAX_PIECE_BLOCKS as u64 * (BLOCK as u64 / 1024);
+    assert_eq!((largest_kib, FLASH_WAIT_SECONDS), (256 << 10, 300));
+    assert!(largest_kib.div_ceil(MIN_WRITE_KIB_PER_SECOND) <= FLASH_WAIT_SECONDS);
+    assert_eq!(MIN_WRITE_KIB_PER_SECOND, 874);
+}
+
+/// `cover` reads a piece back as the session does before it sends one, and
+/// takes nothing but what this splitter writes.
+#[test]
+fn a_piece_is_read_back_chunk_by_chunk_or_refused() {
+    let image = root_image();
+    let pieces = split(&image, 256 << 10, 1 << 20);
+    let mut written = 0;
+    for piece in &pieces {
+        let c = cover(piece).unwrap();
+        assert_eq!(c.total_blocks as usize, image.len() / BLOCK);
+        written += c.written_blocks as usize;
+    }
+    assert_eq!(written, image.len() / BLOCK);
+
+    let good = pieces[1].clone();
+    let refused = |what: &str, change: &dyn Fn(&mut Vec<u8>)| {
+        let mut piece = good.clone();
+        change(&mut piece);
+        assert!(matches!(cover(&piece), Err(Error::Sparse(_))), "{what}");
+    };
+    refused("cut short", &|p| p.truncate(p.len() - 1));
+    refused("cut inside its header", &|p| p.truncate(20));
+    refused("bytes after its end", &|p| p.push(0));
+    refused("another magic", &|p| p[0] ^= 1);
+    refused("another block size", &|p| {
+        p[12..16].copy_from_slice(&512u32.to_le_bytes())
+    });
+    refused("one chunk more than it has", &|p| p[20] += 1);
+    refused("a total its chunks do not reach", &|p| p[16] ^= 1);
+    // The first chunk is the skip to where this piece's data starts
+    refused("a chunk type it does not write (CRC32)", &|p| {
+        p[28..30].copy_from_slice(&0xcac4u16.to_le_bytes())
+    });
+    refused("a skip that claims data", &|p| p[36] += 4);
+    refused("a skip of another length", &|p| p[32] ^= 1);
 }
 
 #[test]

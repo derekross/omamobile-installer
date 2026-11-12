@@ -10,7 +10,7 @@
 //! record it); a stream without one is refused, because every sparse image
 //! states the whole image's block count up front.
 use crate::bundle::VerifiedRootImage;
-use crate::fastboot::{Session, Transport};
+use crate::fastboot::{PieceReport, Session, Transport};
 use crate::sparse::SparseSplitter;
 use crate::zstd_push::{frame_info, ZstdPush};
 use crate::{Error, Result};
@@ -119,18 +119,20 @@ pub async fn flash_userdata_from_reader<T: Transport>(
     reader: impl Read,
     segment_cap: Option<u64>,
 ) -> Result<u64> {
-    flash_userdata_with_progress(session, proof, reader, segment_cap, &mut |_| {}).await
+    flash_userdata_with_progress(session, proof, reader, segment_cap, &mut |_, _| {}).await
 }
 
 /// As [`flash_userdata_from_reader`]; `progress` is called after each sparse
-/// image the session took, with how many it has taken so far, so a front end
-/// can show that a long write is moving.
+/// image the session took, with how many it has taken so far and what that
+/// one was ([`PieceReport`]: its size, the blocks its flash covered, how
+/// long the flash took), so a front end can show that a long write is
+/// moving, and how fast.
 pub async fn flash_userdata_with_progress<T: Transport>(
     session: &mut Session<T>,
     proof: &VerifiedRootImage,
     mut reader: impl Read,
     segment_cap: Option<u64>,
-    progress: &mut dyn FnMut(u32),
+    progress: &mut dyn FnMut(u32, &PieceReport),
 ) -> Result<u64> {
     let limit = segment_cap.map_or(session.max_download_size(), |c| {
         c.min(session.max_download_size())
@@ -155,14 +157,18 @@ pub async fn flash_userdata_with_progress<T: Transport>(
         while let Some(segment) = stream.next_segment()? {
             session.flash_userdata_segment(&segment).await?;
             pieces += 1;
-            progress(pieces);
+            if let Some(piece) = session.pieces().last() {
+                progress(pieces, piece);
+            }
         }
     }
     let len = stream.end()?;
     while let Some(segment) = stream.next_segment()? {
         session.flash_userdata_segment(&segment).await?;
         pieces += 1;
-        progress(pieces);
+        if let Some(piece) = session.pieces().last() {
+            progress(pieces, piece);
+        }
     }
     session.finish_userdata().await?;
     Ok(len)

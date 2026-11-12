@@ -15,6 +15,15 @@
 //! written, not skipped, so nothing stale stays on `userdata` inside the
 //! image's extent.
 //!
+//! **A piece is bounded in what it makes the phone write, not only in its
+//! own size.** A FILL chunk is sixteen bytes however many blocks it covers,
+//! so by size alone one small download could tell the phone to write the
+//! rest of the image: gigabytes behind a single `flash:`, with the host
+//! waiting on one answer. So a piece also ends once its RAW and FILL
+//! chunks cover [`MAX_PIECE_BLOCKS`] blocks, and the next one goes on from
+//! there. [`cover`] reads a finished piece back, for the session, which
+//! refuses one that covers more whoever cut it.
+//!
 //! Memory: one segment (at most the limit given) and one block.
 use crate::{Error, Result};
 
@@ -27,6 +36,88 @@ const FILL: u16 = 0xcac2;
 const DONT_CARE: u16 = 0xcac3;
 /// Room for a header, both skips and one raw block.
 pub const MIN_SEGMENT: u64 = (FILE_HDR + 3 * CHUNK_HDR + BLOCK) as u64;
+/// The most blocks one piece's RAW and FILL chunks may cover: 256 MiB of
+/// the partition, so that every `flash:` is bounded in the work it asks of
+/// the phone. The number is tied to how long a transport waits for an
+/// answer ([`FLASH_WAIT_SECONDS`]): a phone that writes at
+/// [`MIN_WRITE_KIB_PER_SECOND`] or faster answers inside the wait.
+pub const MAX_PIECE_BLOCKS: u32 = 65536;
+/// How long the USB transport waits for one answer: `omamobile-installer-usb`
+/// takes its wait from this constant, so the two cannot drift apart.
+pub const FLASH_WAIT_SECONDS: u64 = 300;
+/// The slowest write for which the largest piece is still answered inside
+/// the wait: 256 MiB in 300 s, rounded up. Flash storage in a phone writes
+/// on the order of a hundred times faster.
+pub const MIN_WRITE_KIB_PER_SECOND: u64 =
+    (MAX_PIECE_BLOCKS as u64 * (BLOCK as u64 / 1024)).div_ceil(FLASH_WAIT_SECONDS);
+
+/// What one sparse image covers of the image it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cover {
+    /// The whole image's size in blocks, as the header states it.
+    pub total_blocks: u32,
+    /// The blocks its RAW and FILL chunks write: the work one `flash:` of
+    /// it asks of the phone.
+    pub written_blocks: u32,
+}
+
+fn le16(b: &[u8]) -> u16 {
+    u16::from_le_bytes([b[0], b[1]])
+}
+fn le32(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// Read a sparse image as this module writes them, and say what it covers.
+/// Anything else is refused: another block size or header size, a chunk
+/// type that is not RAW, FILL or DONT_CARE, a chunk whose size is not its
+/// type's, chunks that do not add up to the stated total, bytes left over.
+pub fn cover(image: &[u8]) -> Result<Cover> {
+    let bad = |why: &str| Error::Sparse(format!("not a sparse image this installer cuts: {why}"));
+    if image.len() < FILE_HDR || le32(image) != MAGIC {
+        return Err(bad("no sparse header"));
+    }
+    if le16(&image[4..]) != 1
+        || le16(&image[8..]) as usize != FILE_HDR
+        || le16(&image[10..]) as usize != CHUNK_HDR
+        || le32(&image[12..]) as usize != BLOCK
+    {
+        return Err(bad("another version, header size or block size"));
+    }
+    let total_blocks = le32(&image[16..]);
+    let chunks = le32(&image[20..]);
+    let (mut at, mut seen, mut written) = (FILE_HDR, 0u64, 0u64);
+    for _ in 0..chunks {
+        let Some(header) = image.get(at..at + CHUNK_HDR) else {
+            return Err(bad("a chunk header past its end"));
+        };
+        let blocks = le32(&header[4..]) as u64;
+        let data = match le16(header) {
+            RAW => blocks * BLOCK as u64,
+            FILL => 4,
+            DONT_CARE => 0,
+            _ => return Err(bad("a chunk of a type it does not write")),
+        };
+        if le32(&header[8..]) as u64 != CHUNK_HDR as u64 + data {
+            return Err(bad("a chunk whose size is not its type's"));
+        }
+        if le16(header) != DONT_CARE {
+            written += blocks;
+        }
+        seen += blocks;
+        at = usize::try_from(at as u64 + CHUNK_HDR as u64 + data)
+            .ok()
+            .filter(|end| *end <= image.len())
+            .ok_or_else(|| bad("a chunk past its end"))?;
+    }
+    if at != image.len() || seen != total_blocks as u64 {
+        return Err(bad("its chunks do not add up to the image"));
+    }
+    Ok(Cover {
+        total_blocks,
+        written_blocks: written as u32,
+    })
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Open {
@@ -47,6 +138,8 @@ pub struct SparseSplitter {
     chunks: u32,
     /// RAW and FILL chunks in this segment.
     data_chunks: u32,
+    /// Blocks those chunks cover: at most [`MAX_PIECE_BLOCKS`].
+    seg_blocks: u32,
     open: Open,
     open_blocks: u32,
 }
@@ -86,6 +179,7 @@ impl SparseSplitter {
             seg: Vec::new(),
             chunks: 0,
             data_chunks: 0,
+            seg_blocks: 0,
             open: Open::None,
             open_blocks: 0,
         };
@@ -98,6 +192,7 @@ impl SparseSplitter {
         self.seg.resize(FILE_HDR, 0);
         self.chunks = 0;
         self.data_chunks = 0;
+        self.seg_blocks = 0;
         self.open = Open::None;
         self.open_blocks = 0;
         if self.pos > 0 {
@@ -165,8 +260,10 @@ impl SparseSplitter {
             (false, true) => CHUNK_HDR + 4,
             (false, false) => CHUNK_HDR + BLOCK,
         };
-        // Always keep room for the closing skip
-        if self.seg.len() + need + CHUNK_HDR > self.limit {
+        // Always keep room for the closing skip. And a piece ends once it
+        // covers as many blocks as one flash may: a FILL chunk grows by
+        // no bytes, so the size alone would never end it
+        if self.seg.len() + need + CHUNK_HDR > self.limit || self.seg_blocks >= MAX_PIECE_BLOCKS {
             self.finish_segment(out);
             self.start_segment();
             return self.add_block(block, out);
@@ -188,6 +285,7 @@ impl SparseSplitter {
             self.seg.extend_from_slice(block);
         }
         self.open_blocks += 1;
+        self.seg_blocks += 1;
         self.pos += 1;
         Ok(())
     }

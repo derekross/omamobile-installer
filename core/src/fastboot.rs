@@ -140,6 +140,21 @@ pub enum WriteReach {
     Rebooted,
 }
 
+/// One sparse image of the root image, as a session took it: what its
+/// `flash:` asked of the phone, and how long the phone took to answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PieceReport {
+    /// The bytes downloaded: the sparse image's own size.
+    pub bytes: u64,
+    /// The blocks of `userdata` (4096 bytes each) its `flash:` writes: at
+    /// most [`sparse::MAX_PIECE_BLOCKS`].
+    pub blocks: u32,
+    /// From `flash:userdata` sent to its `OKAY`, by the clock the front end
+    /// lent ([`Session::time_flashes_with`]). `None`: no clock, a dry run
+    /// (nothing was sent), or the answer never came.
+    pub flash: Option<core::time::Duration>,
+}
+
 /// What a walk of the root image through a session found: the raw image's
 /// size, `userdata`'s size on the phone, and how many sparse images it took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,6 +572,11 @@ pub struct Session<T: Transport> {
     /// the first write ([`Self::preflight_userdata`]).
     userdata_preflight: Option<u64>,
     userdata_walk: Option<UserdataWalk>,
+    /// Each sparse image of the root image this session took, in order.
+    pieces: Vec<PieceReport>,
+    /// The front end's clock, for how long each `flash:userdata` took. The
+    /// core has none of its own.
+    clock: Option<Box<dyn Fn() -> core::time::Duration>>,
     reach: WriteReach,
 }
 
@@ -754,6 +774,8 @@ impl<T: Transport> Session<T> {
             boot_partition_sizes,
             userdata_preflight: None,
             userdata_walk: None,
+            pieces: Vec::new(),
+            clock: None,
             reach: WriteReach::Nothing,
         })
     }
@@ -777,6 +799,19 @@ impl<T: Transport> Session<T> {
     /// How far this session's writes got. In a dry run: nothing, always.
     pub fn reach(&self) -> WriteReach {
         self.reach
+    }
+    /// Each sparse image of the root image handed to this session so far:
+    /// its size, the blocks its `flash:` covers, and how long that flash
+    /// took. The last one is the piece in doubt when a write stopped: its
+    /// `flash` is `None` until the phone confirms it.
+    pub fn pieces(&self) -> &[PieceReport] {
+        &self.pieces
+    }
+    /// Lend the session a clock (time since any fixed moment), so that it
+    /// can say how long the phone took over each `flash:userdata`. The core
+    /// reads no clock of its own.
+    pub fn time_flashes_with(&mut self, clock: Box<dyn Fn() -> core::time::Duration>) {
+        self.clock = Some(clock);
     }
 
     async fn userdata_size(&mut self) -> Result<u64> {
@@ -883,7 +918,13 @@ impl<T: Transport> Session<T> {
 
     /// The one place a write is sent: `partition` can only be a name the
     /// verified manifest's rules produced.
-    async fn write(&mut self, partition: &Partition, data: &[u8]) -> Result<()> {
+    /// `Ok(Some(_))`: how long the phone took over the `flash:`, when the
+    /// front end lent a clock and the write was sent.
+    async fn write(
+        &mut self,
+        partition: &Partition,
+        data: &[u8],
+    ) -> Result<Option<core::time::Duration>> {
         if data.len() as u64 > self.facts.max_download_size {
             return Err(Error::Refused(format!(
                 "{} bytes is over the phone's max-download-size",
@@ -897,7 +938,7 @@ impl<T: Transport> Session<T> {
                 data.len(),
                 partition.name()
             ));
-            return Ok(());
+            return Ok(None);
         }
         self.may_write()?;
         self.client.download(data).await?;
@@ -919,9 +960,13 @@ impl<T: Transport> Session<T> {
             WriteReach::BootImages { .. } => WriteReach::Userdata { pieces: 0 },
             other => other,
         };
+        let sent = self.clock.as_ref().map(|now| now());
         self.client
             .simple(&format!("flash:{}", partition.name()))
             .await?;
+        let took = sent
+            .zip(self.clock.as_ref().map(|now| now()))
+            .map(|(sent, answered)| answered.saturating_sub(sent));
         self.reach = match self.reach {
             WriteReach::BootImages { done, of, .. } => WriteReach::BootImages {
                 done: done + 1,
@@ -931,7 +976,7 @@ impl<T: Transport> Session<T> {
             WriteReach::Userdata { pieces } => WriteReach::Userdata { pieces: pieces + 1 },
             other => other,
         };
-        Ok(())
+        Ok(took)
     }
 
     /// Write the next boot image of the plan to its slot B partition.
@@ -953,7 +998,7 @@ impl<T: Transport> Session<T> {
         }
         let partition = self.release.manifest().boot_writes[next].partition.clone();
         match self.write(&partition, image.bytes).await {
-            Ok(()) => {
+            Ok(_) => {
                 self.state = State::Boot(next + 1);
                 Ok(())
             }
@@ -1014,20 +1059,38 @@ impl<T: Transport> Session<T> {
         else {
             return Err(Error::Refused("no userdata write is open".into()));
         };
-        // A sparse image of exactly this root image, nothing else
-        let header_ok = segment.len() >= 28
-            && segment[0..4] == 0xed26_ff3a_u32.to_le_bytes()
-            && u32::from_le_bytes(segment[12..16].try_into().unwrap()) as u64
-                * u32::from_le_bytes(segment[16..20].try_into().unwrap()) as u64
-                == image_len;
-        if !header_ok {
-            return self.fail(Error::Refused(
-                "not a sparse image of the root image".into(),
-            ));
+        // A sparse image of exactly this root image, nothing else, read
+        // chunk by chunk
+        let cover = match sparse::cover(segment) {
+            Ok(cover) if cover.total_blocks as u64 * sparse::BLOCK as u64 == image_len => cover,
+            _ => {
+                return self.fail(Error::Refused(
+                    "not a sparse image of the root image".into(),
+                ))
+            }
+        };
+        // Bounded in what it makes the phone write, whoever cut it: one
+        // flash never covers more than the phone can be waited for
+        if cover.written_blocks == 0 || cover.written_blocks > sparse::MAX_PIECE_BLOCKS {
+            return self.fail(Error::Refused(format!(
+                "a piece of the root image that writes {} blocks: one flash covers at least 1 and at most {}",
+                cover.written_blocks,
+                sparse::MAX_PIECE_BLOCKS
+            )));
         }
         let partition = self.release.manifest().root_image.partition.clone();
+        // Recorded before it is sent: if the answer never comes, this is
+        // the piece in doubt
+        self.pieces.push(PieceReport {
+            bytes: segment.len() as u64,
+            blocks: cover.written_blocks,
+            flash: None,
+        });
         match self.write(&partition, segment).await {
-            Ok(()) => {
+            Ok(took) => {
+                if let Some(piece) = self.pieces.last_mut() {
+                    piece.flash = took;
+                }
                 self.state = State::Userdata {
                     image_len,
                     segments: segments + 1,
