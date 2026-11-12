@@ -365,7 +365,12 @@ A rerun is a new flow: it verifies the release, judges the phone and asks for th
 - **No hints after the restart** about the radio backup and firmware: those tools need SSH access to the phone, which comes with the answers.
 - **A second switch.** install-phone writes unless told `--dry-run`. The tool here needs `--write` and has no default.
 
-## 12. Open: the owner's answers in the root image
+## 12. The owner's answers: decided, the install link (E)
+
+**Decided by the maintainer on 2026-11-12: option E.** The answers reach the phone over the install link at its first start, the channel the install plan already chose for Google's files (its D1 and M2). The installer never edits an image: what it flashes stays byte for byte what the release signed, and options A to D below are not taken. Until the install link exists, on the phone and here, `--write` stays what it is today: a proof that the write itself works, for an attended test, and not an install anyone can use. `tools/install-phone` remains the way to install a phone.
+
+What follows is the analysis that led there, kept as written.
+
 
 install-phone puts the answers on the phone before the flash: it unpacks the root image to a local copy, writes `/etc/omamobile/firstboot.conf` (mode 0600), `/root/.ssh/authorized_keys` and `/etc/omamobile/boot-update.conf` (`AUTO_WRITE=yes`) into it with `debugfs -w`, checks the copy with `e2fsck`, turns it into a sparse image and flashes that. It also appends the SSH key to the initramfs inside the ramdisk image (`vendor_kernel_boot`) and flashes that copy. The phone's `omamobile-firstboot` creates the user from `firstboot.conf` and deletes it; without the file it does nothing.
 
