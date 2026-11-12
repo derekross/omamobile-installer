@@ -72,6 +72,7 @@ use omamobile_installer_core::text::plain;
 use omamobile_installer_core::{build_index, Error};
 use omamobile_installer_usb::UsbTransport;
 use pollster::block_on;
+use std::cell::{Cell, RefCell};
 use std::fs::{self, File};
 use std::io::{self, BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -175,7 +176,7 @@ fn find_root(dir: &Path, name: &str) -> Option<PathBuf> {
 /// a name.
 fn hash_root(
     release: &VerifiedRelease,
-    file: &mut File,
+    file: &mut impl Read,
 ) -> Res<omamobile_installer_core::bundle::VerifiedRootImage> {
     let mut check = release.root_image_check();
     let mut buf = vec![0u8; 1 << 20];
@@ -422,6 +423,38 @@ fn show(screen: &Screen) {
     }
 }
 
+/// What a long step says on the way, and how it is ended early. The
+/// terminal prints, and ends nothing early.
+trait Watch {
+    /// A line for a person at a terminal.
+    fn note(&mut self, _text: &str) {}
+    /// Bytes done and bytes in all. `what`: `download`, `check` or `dry-run`.
+    fn progress(&mut self, what: &'static str, done: u64, total: u64);
+    /// Asked between the pieces of a step: `false` ends it here.
+    fn go_on(&mut self, _what: &'static str) -> bool {
+        true
+    }
+}
+
+/// The terminal: a download's bytes at each tenth, and nothing ends early.
+#[derive(Default)]
+struct Terminal {
+    tenth: Option<u64>,
+}
+
+impl Watch for Terminal {
+    fn note(&mut self, text: &str) {
+        println!("    {text}");
+    }
+    fn progress(&mut self, what: &'static str, done: u64, total: u64) {
+        let tenth = done * 10 / total.max(1);
+        if what == "download" && self.tenth != Some(tenth) {
+            self.tenth = Some(tenth);
+            println!("    {done} of {total} bytes");
+        }
+    }
+}
+
 fn local_timezone() -> String {
     fs::read_link("/etc/localtime")
         .ok()
@@ -548,6 +581,7 @@ async fn walk_images<T: Transport>(
     session: &mut Session<T>,
     release: &VerifiedRelease,
     dir: &Path,
+    watch: &mut dyn Watch,
 ) -> Result<bool, Error> {
     let writing = !session.is_dry_run();
     let mut seen = session.log().len();
@@ -562,9 +596,22 @@ async fn walk_images<T: Transport>(
     // Every file is checked before the first write, the root image among
     // them: a file that is not the release's is found while the phone is
     // still as it was, not after slot B's boot partitions are written.
+    // The bytes to get through: every file twice, once to check it and
+    // once to send it (or, in a dry run, to walk it through the session)
+    let root_size = fs::metadata(&root_path).map_err(io)?.len();
+    let total = 2 * (m.boot_writes.iter().map(|w| w.size).sum::<u64>() + root_size);
+    let what = "dry-run";
+    let watch = RefCell::new(watch);
+    let done = Cell::new(0u64);
+    let add = |bytes: u64| {
+        done.set(done.get() + bytes);
+        watch.borrow_mut().progress(what, done.get(), total);
+    };
+    add(0);
     for w in &m.boot_writes {
         let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
         release.verify_boot_image(w, &bytes)?;
+        add(bytes.len() as u64);
     }
     // The root image is opened once. It is hashed from this handle, and
     // the same handle is rewound and streamed, so the file that is sent is
@@ -573,7 +620,8 @@ async fn walk_images<T: Transport>(
     // caught by the session, which hashes what it is sent again and
     // refuses to make slot B active for anything else.
     let mut root_file = File::open(&root_path).map_err(io)?;
-    let root = hash_root(release, &mut root_file).map_err(|e| Error::Checksum(e.to_string()))?;
+    let root = hash_root(release, &mut Counted(&mut root_file, &add))
+        .map_err(|e| Error::Checksum(e.to_string()))?;
     root_file.seek(SeekFrom::Start(0)).map_err(io)?;
     // Each boot image is read and checked again as it is written: the
     // bytes that are sent are the bytes that were just checked
@@ -586,8 +634,9 @@ async fn walk_images<T: Transport>(
             show_sent(session, &mut seen);
         }
         result?;
+        add(bytes.len() as u64);
     }
-    let reader = &mut root_file;
+    let reader = Counted(&mut root_file, &add);
     if writing {
         // The core has no clock: this one times each flash of userdata
         let begun = std::time::Instant::now();
@@ -613,6 +662,17 @@ async fn walk_images<T: Transport>(
     }
     result?;
     Ok(true)
+}
+
+/// A file of the release as a session reads it, counted for the progress.
+struct Counted<'a, R>(R, &'a dyn Fn(u64));
+
+impl<R: Read> Read for Counted<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.0.read(buf)?;
+        (self.1)(n as u64);
+        Ok(n)
+    }
 }
 
 // ---- Google's factory image ----------------------------------------------
@@ -664,6 +724,22 @@ fn agent(https_only: bool, proxy: Option<ureq::Proxy>) -> ureq::Agent {
 impl Fetcher {
     fn google(proxy: Option<ureq::Proxy>) -> Self {
         Fetcher::Google(agent(true, proxy))
+    }
+
+    /// For a pretend run, which never reaches Google: a stand-in on this
+    /// computer answers in its place, or nothing does.
+    #[cfg(feature = "fake-phone")]
+    fn pretend(fake_google: Option<&str>, proxy: Option<ureq::Proxy>) -> Res<Self> {
+        let Some(at) = fake_google else {
+            return Ok(Fetcher::Nowhere);
+        };
+        let at: std::net::SocketAddr = at
+            .parse()
+            .map_err(|_| "--fake-google takes an address like 127.0.0.1:8080")?;
+        if !at.ip().is_loopback() {
+            return Err("--fake-google takes an address on this computer only".into());
+        }
+        Ok(Fetcher::StandIn(agent(false, proxy), at))
     }
 
     /// How long a body may stay silent before the try is ended.
@@ -779,10 +855,14 @@ impl Pieces {
 
 /// Carry out what one try at the download asks: the kept bytes first, then
 /// the requests, the body into `file`. Every decision is `download`'s.
+/// `watch` is told how far it is, and may end the transfer between pieces,
+/// also one that stands still: the core then finds fewer bytes than the
+/// file has, as when a transfer broke off.
 fn fetch(
     download: &mut FactoryDownload,
     fetcher: &Fetcher,
     path: &Path,
+    watch: &mut dyn Watch,
 ) -> Result<(), FetchFailure> {
     let storage = |e: io::Error| FetchFailure::Storage(format!("{}: {e}", path.display()));
     let mut file = fs::OpenOptions::new()
@@ -839,11 +919,15 @@ fn fetch(
                 file.seek(SeekFrom::Start(at)).map_err(storage)?;
                 let idle = fetcher.body_idle();
                 let body = Pieces::of(response.into_body().into_reader());
-                let mut shown = None;
-                loop {
-                    let piece = match body.next(idle) {
+                // Waited for in short turns, so that `watch` can end a
+                // transfer that stands still before the silence runs out
+                let turn = idle.min(Duration::from_millis(200));
+                let mut heard = Instant::now();
+                while watch.go_on("download") {
+                    let piece = match body.next(turn) {
                         Piece::Bytes(piece) => piece,
                         Piece::End => break,
+                        Piece::Silent if heard.elapsed() < idle => continue,
                         // What arrived so far is in the file, for the next try
                         Piece::Silent => {
                             return Err(FetchFailure::Stalled {
@@ -852,17 +936,14 @@ fn fetch(
                         }
                         Piece::Broke(why) => return Err(FetchFailure::Network(why)),
                     };
+                    heard = Instant::now();
                     // The core takes no byte past the file's size
                     if !download.body(&piece) {
                         break;
                     }
                     file.write_all(&piece).map_err(storage)?;
                     let (done, total) = download.progress();
-                    let tenth = done * 10 / total.max(1);
-                    if shown != Some(tenth) {
-                        shown = Some(tenth);
-                        println!("    {done} of {total} bytes");
-                    }
+                    watch.progress("download", done, total);
                 }
                 return file.flush().map_err(storage);
             }
@@ -878,6 +959,7 @@ fn download_factory_zip(
     proxied: bool,
     work_dir: Option<&Path>,
     name: &str,
+    watch: &mut dyn Watch,
 ) -> Res<()> {
     let dir = match work_dir {
         Some(dir) => dir.to_path_buf(),
@@ -892,16 +974,16 @@ fn download_factory_zip(
     let path = if whole.is_file() { &whole } else { &part };
     let have = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut download = flow.factory_download(have)?;
-    println!(
-        "    downloading {name} into {}{}",
+    watch.note(&format!(
+        "downloading {name} into {}{}",
         dir.display(),
         if proxied {
             ", through the proxy named with --proxy"
         } else {
             ""
         }
-    );
-    let failure = fetch(&mut download, fetcher, path).err();
+    ));
+    let failure = fetch(&mut download, fetcher, path, watch).err();
     match flow.factory_download_done(download, failure)? {
         DownloadEnd::Verified => {
             if path != &whole {
@@ -928,32 +1010,45 @@ fn download_factory_zip(
     Ok(())
 }
 
-/// Hand the flow a file the owner saved, read a piece at a time.
-fn take_factory_zip(flow: &mut Flow, path: &Path) -> Res<()> {
+/// Hand the flow a file the owner saved, read a piece at a time. `false`:
+/// there is no such file, and the flow was handed nothing. A check that
+/// `watch` ends early is dropped, and the flow's step stays as it was.
+fn take_factory_zip(flow: &mut Flow, path: &Path, watch: &mut dyn Watch) -> Res<bool> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let size = match fs::metadata(path) {
         Ok(meta) if meta.is_file() => meta.len(),
-        _ => {
-            println!("    There is no file {}", path.display());
-            return Ok(());
-        }
+        _ => return Ok(false),
     };
     if let Some(mut check) = flow.factory_zip(name, size)? {
-        println!("    checking {name}");
+        watch.note(&format!("checking {name}"));
         // Streamed: a megabyte at a time, never the whole file
         let mut file = File::open(path)?;
         let mut buf = vec![0u8; 1 << 20];
         loop {
+            if !watch.go_on("check") {
+                return Ok(true);
+            }
             let n = file.read(&mut buf)?;
             if n == 0 {
                 break;
             }
             check.update(&buf[..n]);
+            let (done, total) = check.progress();
+            watch.progress("check", done, total);
         }
         flow.factory_zip_done(check)?;
+    }
+    Ok(true)
+}
+
+/// As the terminal does it: a file that is not there is said, and the step
+/// stays open.
+fn take_typed_zip(flow: &mut Flow, path: &Path) -> Res<()> {
+    if !take_factory_zip(flow, path, &mut Terminal::default())? {
+        println!("    There is no file {}", path.display());
     }
     Ok(())
 }
@@ -1026,7 +1121,7 @@ fn run_flow<T: Transport>(
                         "Press Enter to try the download again, or type where you saved the file yourself: ",
                     )?;
                     if !own.is_empty() {
-                        take_factory_zip(&mut flow, Path::new(&own))?;
+                        take_typed_zip(&mut flow, Path::new(&own))?;
                         continue;
                     }
                 }
@@ -1038,6 +1133,7 @@ fn run_flow<T: Transport>(
                     factory.proxied,
                     factory.work_dir.as_deref(),
                     name.ok_or("the flow names no file to download")?,
+                    &mut Terminal::default(),
                 )?;
             }
             "take-file" => {
@@ -1045,7 +1141,7 @@ fn run_flow<T: Transport>(
                     Some(path) => path,
                     None => PathBuf::from(typed.ask("Where did you save the file? ")?),
                 };
-                take_factory_zip(&mut flow, &path)?;
+                take_typed_zip(&mut flow, &path)?;
             }
             "answers" => flow.answers(&ask_answers(&mut typed)?)?,
             "dry-run" => {
@@ -1056,7 +1152,12 @@ fn run_flow<T: Transport>(
                 };
                 let release = flow.release().ok_or("the flow has no release")?.clone();
                 if let Some(mut session) = block_on(flow.dry_run(transport))? {
-                    match block_on(walk_images(&mut session, &release, &bundle.dir)) {
+                    match block_on(walk_images(
+                        &mut session,
+                        &release,
+                        &bundle.dir,
+                        &mut Terminal::default(),
+                    )) {
                         Ok(_) => {
                             flow.dry_run_done(session)?;
                         }
@@ -1079,7 +1180,12 @@ fn run_flow<T: Transport>(
                 let release = flow.release().ok_or("the flow has no release")?.clone();
                 // The one session that can write is the flow's
                 if let Some(mut session) = block_on(flow.begin_write(transport))? {
-                    match block_on(walk_images(&mut session, &release, &bundle.dir)) {
+                    match block_on(walk_images(
+                        &mut session,
+                        &release,
+                        &bundle.dir,
+                        &mut Terminal::default(),
+                    )) {
                         Ok(true) => {
                             flow.write_done(session)?;
                         }
@@ -1121,20 +1227,7 @@ fn cmd_fake(
     proxy: Option<ureq::Proxy>,
 ) -> Res<bool> {
     use fake::{FakePhone, SERIAL};
-    // A pretend run never reaches Google: a stand-in on this computer
-    // answers in its place, or nothing does
-    factory.fetcher = match fake_google {
-        Some(at) => {
-            let at: std::net::SocketAddr = at
-                .parse()
-                .map_err(|_| "--fake-google takes an address like 127.0.0.1:8080")?;
-            if !at.ip().is_loopback() {
-                return Err("--fake-google takes an address on this computer only".into());
-            }
-            Fetcher::StandIn(agent(false, proxy), at)
-        }
-        None => Fetcher::Nowhere,
-    };
+    factory.fetcher = Fetcher::pretend(fake_google, proxy)?;
     let phone = FakePhone::scenario(scenario).ok_or_else(|| {
         format!(
             "no pretend phone '{scenario}'; there are: {}",
