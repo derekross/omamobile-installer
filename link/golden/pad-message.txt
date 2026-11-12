@@ -1,0 +1,13 @@
+frame: pad-message
+a message with the pad byte: flag bit 0 set, one zero byte after the payload
+direction: host to phone
+kind: 1 (message)
+flags: 1
+seq: 4
+len: 136
+offset: 0
+payload sha256: d0cf4d7590c8c6b852e8f1eece8fdad1c0fd68b67ec88015dd2f85951cbc4e13
+pad byte: yes
+frame bytes: 193
+frame sha256: 48864398227fe4b23e5270ea361dc904c28be79f9d80e63b06d73ee2ec0598a6
+payload: {"t":"factory-begin","id":5,"size":1,"sha256":"303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f","build":"b","name":"n"}

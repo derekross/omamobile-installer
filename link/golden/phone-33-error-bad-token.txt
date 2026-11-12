@@ -1,0 +1,13 @@
+frame: phone-33-error-bad-token
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 32
+len: 89
+offset: 0
+payload sha256: cd3dbefbf87d47a7e6276ded4466fe29caaaad849a2bedfe73af9a0fb92d6b97
+pad byte: no
+frame bytes: 145
+frame sha256: 086899afd312c3cdf2be05f069db8cde1923b7c09ed73ad69fcd03ad25d83a45
+payload: {"t":"error","re":21,"code":"bad-token","message":"wrong token","stage":"firstboot-done"}

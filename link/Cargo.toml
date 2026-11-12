@@ -1,0 +1,24 @@
+[package]
+name = "omamobile-link"
+description = "The install link's protocol: frames, messages and both sides' state machines, with no I/O (Omarchy Mobile's INSTALL-LINK-PLAN, protocol 1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The in-memory stand-ins for both shells and the loopback that joins the two
+# state machines, with its faults. For tests, here and in the crates that
+# build on this one; a shipping build leaves it off.
+sim = []
+
+[dependencies]
+# The only dependency. SHA-256 is the frame digest, the token's stored form
+# and the serial proof; the workspace already uses this version.
+sha2 = "0.11"
+
+[dev-dependencies]
+# The tests need the stand-ins; a plain `cargo test` must run them.
+omamobile-link = { path = ".", features = ["sim"] }
+# A second JSON reader to check this crate's own against.
+serde_json = "1"

@@ -1,7 +1,8 @@
 # The gate for every push and pull request: no identifiers, formatted, the
-# core's tests and the command-line tool's flow against the fake phone, and
-# the web page built both ways. Nothing here touches a USB device: the tests
-# use a fake transport, and no step lists or opens USB devices.
+# core's tests and the install link's protocol in memory, the command-line
+# tool's flow against the fake phone, and the web page built both ways.
+# Nothing here touches a USB device: the tests use a fake transport, and no
+# step lists or opens USB devices.
 name: Checks
 on:
   push:
@@ -32,6 +33,10 @@ jobs:
         run: cargo clippy --locked
       - name: Tests (the core, against the fake phone; the install flow and the build index among them)
         run: cargo test --locked
+      - name: The install link's protocol builds for the web page, without its test stand-ins
+        run: cargo check --locked -p omamobile-link --target wasm32-unknown-unknown
+      - name: The install link's protocol builds for the phone (aarch64 Linux), without its test stand-ins
+        run: cargo check --locked -p omamobile-link --target aarch64-unknown-linux-gnu
       - name: Tests (the command-line tool driving the flow against the pretend phone)
         run: cargo test --locked -p omamobile-installer-cli --features fake-phone
       # web/build.sh needs wasm-bindgen-cli at exactly the wasm-bindgen
