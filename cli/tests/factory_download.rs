@@ -15,6 +15,8 @@ const ZIP_PATH: &str = "/dl/android/aosp/cheetah-test.260101.001-factory-31c2322
 const ANSWERS: &str = "alex\n4812\n4812\n\nEurope/Paris\n\n";
 const TERMS: &str = "Google's terms for the factory image";
 const MISMATCH: &str = "The downloaded file is not the one this release lists";
+/// How long the stand-in holds a stalled connection open, in seconds.
+const STALL_HELD: u64 = 45;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/selftest")
@@ -40,6 +42,9 @@ struct Reply {
     headers: Vec<(&'static str, String)>,
     length: Option<u64>,
     body: Vec<u8>,
+    /// After the body: say nothing more and keep the connection open, as a
+    /// transfer that stalls.
+    stall: bool,
 }
 
 impl Reply {
@@ -49,6 +54,7 @@ impl Reply {
             headers: vec![],
             length: Some(body.len() as u64),
             body: body.to_vec(),
+            stall: false,
         }
     }
     fn status(status: u16) -> Self {
@@ -57,6 +63,7 @@ impl Reply {
             headers: vec![],
             length: Some(0),
             body: vec![],
+            stall: false,
         }
     }
     fn redirect(to: &str) -> Self {
@@ -83,6 +90,7 @@ impl Reply {
             )],
             length: Some((file.len() - from) as u64),
             body: file[from..].to_vec(),
+            stall: false,
         }
     }
 }
@@ -143,6 +151,13 @@ impl StandIn {
                 let _ = stream.write_all(out.as_bytes());
                 let _ = stream.write_all(&reply.body);
                 let _ = stream.flush();
+                if reply.stall {
+                    // Held open, silent, far longer than the tool waits
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(STALL_HELD));
+                        drop(stream);
+                    });
+                }
             }
         });
         StandIn { at, asked }
@@ -201,12 +216,29 @@ fn flow(
     run(&args, typed)
 }
 
+/// The variables an HTTP client may take a proxy from.
+const PROXY_VARS: [&str; 6] = [
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+];
+
 fn run(args: &[&str], typed: &str) -> (i32, String, String) {
+    run_with(args, typed, &[])
+}
+
+/// As `run`, with these variables set for the tool and no other proxy
+/// variable of this computer's.
+fn run_with(args: &[&str], typed: &str, env: &[(&str, &str)]) -> (i32, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_omamobile-install"));
-    // No proxy of this computer's between the tool and the stand-in
-    for var in ["http_proxy", "https_proxy", "all_proxy"] {
-        command.env_remove(var).env_remove(var.to_uppercase());
+    for var in PROXY_VARS {
+        command.env_remove(var);
     }
+    command.env_remove("no_proxy").env_remove("NO_PROXY");
+    command.envs(env.iter().copied());
     let mut child = command
         .args(args)
         .stdin(Stdio::piped())
@@ -214,12 +246,12 @@ fn run(args: &[&str], typed: &str) -> (i32, String, String) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(typed.as_bytes())
-        .unwrap();
+    // A tool that refuses its arguments exits without reading its input,
+    // and writing to it then fails: that is not this test's failure
+    match child.stdin.take().unwrap().write_all(typed.as_bytes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => panic!("{e}"),
+        _ => {}
+    }
     let out = child.wait_with_output().unwrap();
     (
         out.status.code().unwrap(),
@@ -447,6 +479,67 @@ fn a_download_that_broke_off_goes_on_in_a_later_run_and_in_the_same_one() {
 }
 
 #[test]
+fn a_download_that_stalls_ends_the_try_keeps_the_part_and_can_be_tried_again() {
+    let file = zip();
+    let half = file.len() / 2;
+    // The whole length said, half of it sent, and then silence with the
+    // connection held open. Later answers know Range
+    let stalling = |file: Vec<u8>| {
+        StandIn::start(move |asked, nth| {
+            if nth == 0 {
+                Reply {
+                    body: file[..half].to_vec(),
+                    stall: true,
+                    ..Reply::whole(&file)
+                }
+            } else {
+                Reply::ranged(&file, asked)
+            }
+        })
+    };
+    let said = format!("! The download from Google's server stopped before it was complete: {half} of {} bytes had arrived (Google's server sent nothing for 2 seconds). You can try again.", file.len());
+
+    // The input ends where the tool asks whether to try again: the tool is
+    // back long before the server lets go of the connection
+    let work = work("stalled");
+    let google = stalling(file.clone());
+    let started = std::time::Instant::now();
+    let (code, out, err) = flow(&work, Some(&google), &[], "yes\nyes\n");
+    let took = started.elapsed().as_secs();
+    assert!(
+        took < STALL_HELD / 2,
+        "the tool waited {took} s on a silent server"
+    );
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(flat(&out).contains(&said), "{out}");
+    assert!(out.contains(
+        "Press Enter to try the download again, or type where you saved the file yourself: "
+    ));
+    assert_eq!(*titles(&out).last().unwrap(), "Google's factory image");
+    // What arrived is kept, as a part, and it is a true start of the file
+    assert_eq!(kept(&work), [(format!("{ZIP}.part"), half as u64)]);
+    assert_eq!(
+        std::fs::read(work.join("factory").join(format!("{ZIP}.part"))).unwrap(),
+        file[..half]
+    );
+
+    // In one run: Enter at the question goes on from the part
+    let work = self::work("stalled-same-run");
+    let google = stalling(file.clone());
+    let typed = format!("yes\nyes\n\n{ANSWERS}");
+    let started = std::time::Instant::now();
+    let (code, out, err) = flow(&work, Some(&google), &[], &typed);
+    assert!(started.elapsed().as_secs() < STALL_HELD / 2);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(flat(&out).contains(&said), "{out}");
+    let asked = google.asked();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1].range, Some(format!("bytes={half}-")));
+    assert_eq!(kept(&work), [(ZIP.to_string(), file.len() as u64)]);
+    assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
+}
+
+#[test]
 fn a_resumed_file_is_hashed_from_its_first_byte() {
     // A part left by an earlier run that is not the file's beginning: the
     // rest that arrives is right, the whole is not
@@ -478,11 +571,14 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
     wrong[file.len() / 2] ^= 1;
     let mut longer = file.clone();
     longer.extend_from_slice(&[0u8; 4096]);
-    let cases: [(&str, Reply, &str); 4] = [
+    let deleted = "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.";
+    let nothing_taken = "The installer took nothing of what the server offered. Starting the installer again tries the download again.";
+    let cases: [(&str, Reply, &str, &str); 4] = [
         (
             "another-sha256",
             Reply::whole(&wrong),
             "the file is not what the release's signed list of Google's builds says: its SHA-256 is another than the one the list records for build TEST.260101.001.",
+            deleted,
         ),
         (
             // No length said, and more bytes than the file has
@@ -492,19 +588,22 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
                 ..Reply::whole(&longer)
             },
             "Google's server sent more for cheetah-test.260101.001-factory-31c2322a.zip than the file has, so what it sent is not what the release's signed list of Google's builds says",
+            deleted,
         ),
         (
             "another-size-said",
             Reply::whole(&longer),
             "Google's server offered a file of 53248 bytes as cheetah-test.260101.001-factory-31c2322a.zip, and that is not what the release's signed list of Google's builds says: the list records 49152 bytes",
+            nothing_taken,
         ),
         (
             "a-smaller-size-said",
             Reply::whole(&file[..1000]),
             "Google's server offered a file of 1000 bytes",
+            nothing_taken,
         ),
     ];
-    for (name, reply, says) in cases {
+    for (name, reply, says, then) in cases {
         let work = work(name);
         let reply = Mutex::new(Some(reply));
         let google = StandIn::start(move |_, _| reply.lock().unwrap().take().unwrap());
@@ -514,7 +613,7 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
         assert_eq!(*titles(&out).last().unwrap(), MISMATCH, "{name}");
         let text = flat(&out);
         assert!(text.contains(says), "{name}: {out}");
-        assert!(text.contains("The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer."));
+        assert!(text.contains(then), "{name}: {out}");
         assert!(text.contains("It has written nothing to it."));
         assert!(text.contains("You can start the installer again at any time."));
         // Nothing of it is left, and no later step was shown
@@ -522,6 +621,211 @@ fn a_file_that_is_not_the_listed_one_stops_the_tool_and_is_deleted() {
         assert!(!titles(&out).contains(&"About you and the phone"));
         assert_eq!(google.asked().len(), 1);
         assert!(out.contains("0 others; partitions written: 0"));
+    }
+}
+
+#[test]
+fn another_size_said_by_the_server_leaves_a_good_part_on_disk() {
+    let file = zip();
+    let mut longer = file.clone();
+    longer.push(0);
+    // A true start of the file, left by an earlier run
+    let with_part = |name: &str| {
+        let work = work(name);
+        std::fs::create_dir_all(work.join("factory")).unwrap();
+        std::fs::write(
+            work.join("factory").join(format!("{ZIP}.part")),
+            &file[..20_000],
+        )
+        .unwrap();
+        work
+    };
+    let cases: [(&str, Reply, u64); 3] = [
+        // The whole file again, one byte too long
+        ("part-kept-200-longer", Reply::whole(&longer), 49153),
+        // A short page with status 200 in the file's place
+        ("part-kept-200-page", Reply::whole(&[b'x'; 35]), 35),
+        // The rest, of a file one byte too long
+        (
+            "part-kept-206-total",
+            Reply {
+                status: 206,
+                headers: vec![("Content-Range", "bytes 20000-49152/49153".into())],
+                ..Reply::whole(&longer[20_000..])
+            },
+            49153,
+        ),
+    ];
+    for (name, reply, said) in cases {
+        let work = with_part(name);
+        let reply = Mutex::new(Some(reply));
+        let good = file.clone();
+        // The first answer names another size; later ones are a good server's
+        let google = StandIn::start(move |asked, _| match reply.lock().unwrap().take() {
+            Some(reply) => reply,
+            None => Reply::ranged(&good, asked),
+        });
+        let typed = format!("yes\nyes\n{ANSWERS}");
+        let (code, out, err) = flow(&work, Some(&google), &[], &typed);
+        // It is not the listed file: the install stops, as before
+        assert_eq!(code, 2, "{name}: {out}\n{err}");
+        assert_eq!(*titles(&out).last().unwrap(), MISMATCH, "{name}");
+        let text = flat(&out);
+        assert!(
+            text.contains(&format!("Google's server offered a file of {said} bytes")),
+            "{name}: {out}"
+        );
+        assert!(text.contains("The installer took nothing of what the server offered. The 20000 bytes an earlier try downloaded stay on this computer: the server's answer says nothing about them, and they are checked from the first byte, together with the rest, before anything of the file is used."), "{name}: {out}");
+        assert!(
+            text.contains("Starting the installer again goes on from those bytes."),
+            "{name}: {out}"
+        );
+        assert!(!text.contains("deleted"), "{name}: {out}");
+        assert_eq!(google.asked()[0].range.as_deref(), Some("bytes=20000-"));
+        // The part is there, byte for byte
+        assert_eq!(kept(&work), [(format!("{ZIP}.part"), 20_000)], "{name}");
+        assert_eq!(
+            std::fs::read(work.join("factory").join(format!("{ZIP}.part"))).unwrap(),
+            file[..20_000],
+            "{name}"
+        );
+
+        // The next run goes on from it, and the whole file passes its check
+        let (code, out, err) = flow(&work, Some(&google), &[], &typed);
+        assert_eq!(code, 0, "{name}: {out}\n{err}");
+        let asked = google.asked();
+        assert_eq!(asked.len(), 2, "{name}: {asked:?}");
+        assert_eq!(asked[1].range.as_deref(), Some("bytes=20000-"));
+        assert_eq!(kept(&work), [(ZIP.to_string(), file.len() as u64)]);
+        assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
+    }
+}
+
+/// Something that listens where a proxy would, counts who connects and
+/// keeps the first line each one sends. It answers nothing.
+struct Listening {
+    at: SocketAddr,
+    heard: Arc<Mutex<Vec<String>>>,
+}
+
+impl Listening {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = listener.local_addr().unwrap();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let log = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let (mut line, mut byte) = (Vec::new(), [0u8; 1]);
+                while !line.ends_with(b"\r\n") && line.len() < 512 {
+                    match stream.read(&mut byte) {
+                        Ok(1) => line.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&line).trim().to_string());
+            }
+        });
+        Listening { at, heard }
+    }
+    fn heard(&self) -> Vec<String> {
+        self.heard.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn a_proxy_named_in_the_environment_is_not_used_and_one_named_with_proxy_is() {
+    let file = zip();
+    let dir = fixture();
+    let dir = dir.to_str().unwrap();
+    let typed = format!("yes\nyes\n{ANSWERS}");
+    let proxy = Listening::start();
+    let through = format!("http://{}", proxy.at);
+
+    // Each variable alone, then all of them at once: the request goes
+    // straight to the stand-in, and nothing connects to the proxy
+    let mut sets: Vec<Vec<(&str, &str)>> =
+        PROXY_VARS.iter().map(|v| vec![(*v, &*through)]).collect();
+    sets.push(PROXY_VARS.iter().map(|v| (*v, &*through)).collect());
+    for (n, env) in sets.iter().enumerate() {
+        let work = work(&format!("proxy-in-environment-{n}"));
+        let body = file.clone();
+        let google = StandIn::start(move |_, _| Reply::whole(&body));
+        let at = google.at.to_string();
+        let args = [
+            "flow",
+            dir,
+            "--fake-phone",
+            "ready",
+            "--work-dir",
+            work.to_str().unwrap(),
+            "--fake-google",
+            &at,
+        ];
+        let (code, out, err) = run_with(&args, &typed, env);
+        assert_eq!(code, 0, "{env:?}: {out}\n{err}");
+        assert_eq!(google.asked().len(), 1, "{env:?}");
+        assert_eq!(proxy.heard(), Vec::<String>::new(), "{env:?}");
+        assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
+        assert!(!flat(&out).contains("through the proxy"), "{out}");
+    }
+
+    // Named on the command line, by the owner: used, and said
+    let work = work("proxy-named");
+    let body = file.clone();
+    let google = StandIn::start(move |_, _| Reply::whole(&body));
+    let at = google.at.to_string();
+    let args = [
+        "flow",
+        dir,
+        "--fake-phone",
+        "ready",
+        "--work-dir",
+        work.to_str().unwrap(),
+        "--fake-google",
+        &at,
+        "--proxy",
+        &through,
+    ];
+    // The input ends where the tool asks whether to try again
+    let (code, out, err) = run_with(&args, "yes\nyes\n", &[]);
+    assert_eq!(code, 1, "{out}\n{err}");
+    let heard = proxy.heard();
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    // The proxy is asked for the stand-in, which is itself asked nothing
+    assert!(heard[0].contains(&at), "{heard:?}");
+    assert_eq!(google.asked().len(), 0);
+    assert!(
+        flat(&out).contains("through the proxy named with --proxy"),
+        "{out}"
+    );
+    // Its address is not printed back: it may hold a password
+    assert!(!out.contains(&through) && !err.contains(&through));
+    assert_eq!(kept(&work), []);
+
+    // Only an HTTP proxy, with a host; refused from the arguments alone
+    for bad in [
+        "",
+        "proxy.example",
+        "socks5://127.0.0.1:1080",
+        "ftp://127.0.0.1:21",
+        "http://",
+    ] {
+        let (code, out, err) = run_with(
+            &["flow", dir, "--fake-phone", "ready", "--proxy", bad],
+            "yes\nyes\n",
+            &[],
+        );
+        assert_eq!(code, 1, "{bad}");
+        assert!(
+            err.contains("--proxy takes an address like http://HOST:PORT"),
+            "{bad}: {err}"
+        );
+        assert!(out.is_empty(), "{bad}: {out}");
     }
 }
 

@@ -21,12 +21,23 @@
 //! `set_active:b` and `reboot`; and one question outside the session,
 //! [`unlock_ability`], which sends `flashing get_unlock_ability` and changes
 //! nothing on the phone. That list is closed, and checked again at the one
-//! place a command leaves (`allowed`): there is no code for `erase`,
-//! `format`, `oem`, any other `flashing` command (`flashing unlock` among
-//! them), another slot or a caller-chosen partition name. Bytes
-//! to write come only as [`VerifiedImage`] or under a [`VerifiedRootImage`].
-//! Before every write the phone's serial number and product are read again
-//! and must still be the ones pinned at `connect`.
+//! place a command leaves (`Client::allowed`): a `flash:` leaves only for a
+//! partition on the session's own list, which `connect` builds from the
+//! verified release (the descriptor's `BOOT_IMAGES` with `_b`, and
+//! `userdata`), and the questions outside a session have an empty list.
+//! There is no code for `erase`, `format`, `oem`, any other `flashing`
+//! command (`flashing unlock` among them), another slot or a caller-chosen
+//! partition name. Bytes to write come only as [`VerifiedImage`] or under a
+//! [`VerifiedRootImage`]. Before every write the phone's serial number and
+//! product are read again and must still be the ones pinned at `connect`.
+//!
+//! The gate does not lean on the layer above it. A partition must also be
+//! on the gate's own fixed list (slot B's boot images and `userdata`), so a
+//! name the [`Partition`] type should never have let through is refused
+//! there too. A client with an empty list (the questions outside a session,
+//! and every dry-run session) can send nothing that writes or stages a
+//! write: no `flash:`, no `download:`, no `set_active:b`, no `reboot`. And
+//! a `download:` carries exactly eight hex digits.
 use crate::bundle::{VerifiedImage, VerifiedRelease, VerifiedRootImage};
 use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
@@ -51,17 +62,49 @@ const MAX_INFO_PACKETS: usize = 100_000;
 /// Android's Developer options). Sent by [`unlock_ability`] and nothing else.
 pub const GET_UNLOCK_ABILITY: &str = "flashing get_unlock_ability";
 
+/// The gate's own list of what may ever be flashed, apart from any
+/// session's: slot B's boot images and `userdata`, by name. It does not rest
+/// on [`Partition`]: a name that got past the manifest's rules is refused
+/// here all the same.
+fn on_the_fixed_list(partition: &str) -> bool {
+    partition == "userdata"
+        || partition
+            .strip_suffix("_b")
+            .is_some_and(|image| crate::manifest::SLOT_B_IMAGES.contains(&image))
+}
+
+/// `download:` and the size as exactly eight hex digits, as this crate
+/// writes it.
+fn is_download(command: &str) -> bool {
+    command
+        .strip_prefix("download:")
+        .is_some_and(|size| size.len() == 8 && size.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Every command this crate may put on the wire, and nothing more. The
 /// `flashing` entry is the whole command, compared exactly: `flashing unlock`,
 /// `flashing lock`, `flashing unlock_critical` and every `oem` command are
 /// not on the list, and neither is anything else that isn't named here.
-fn allowed(command: &str) -> bool {
-    command == GET_UNLOCK_ABILITY
-        || command == "set_active:b"
-        || command == "reboot"
-        || ["getvar:", "download:", "flash:"]
-            .iter()
-            .any(|prefix| command.starts_with(prefix))
+/// `flash:` is allowed only for a partition in `flashable`, compared whole.
+///
+/// `flashable` is the list of the client the command leaves through. It is
+/// empty for a client that only asks (the look at the phone, the unlock
+/// question) and for a dry-run session's, and for those nothing that writes
+/// or stages a write passes at all: no `flash:`, no `download:`, no
+/// `set_active:b`, no `reboot`. For a session that may write, a `flash:`
+/// passes only for a partition that is on the session's list and on the
+/// gate's own fixed one ([`on_the_fixed_list`]), so the gate and the
+/// [`Partition`] type each hold without the other.
+fn allowed(command: &str, flashable: &[String]) -> bool {
+    if let Some(partition) = command.strip_prefix("flash:") {
+        return flashable.iter().any(|p| p == partition) && on_the_fixed_list(partition);
+    }
+    if command == GET_UNLOCK_ABILITY || command.starts_with("getvar:") {
+        return true;
+    }
+    // What stages a write or changes the phone: only where a flash can leave
+    !flashable.is_empty()
+        && (command == "set_active:b" || command == "reboot" || is_download(command))
 }
 
 /// A USB (or fake) link to a phone in fastboot mode: one bulk OUT and one
@@ -164,10 +207,7 @@ fn unlock_ability_line(line: &str) -> Option<bool> {
 /// and the caller goes on without the answer. Because a phone that never
 /// answers could answer late, send this as the last question on a transport.
 pub async fn unlock_ability<T: Transport>(transport: &mut T) -> UnlockAbility {
-    let mut client = Client {
-        transport,
-        log: Vec::new(),
-    };
+    let mut client = Client::reading(transport);
     let mut lines = Vec::new();
     match client.command(GET_UNLOCK_ABILITY, &mut lines).await {
         Ok(Reply::Okay(text)) => lines.push(text),
@@ -184,10 +224,7 @@ pub async fn unlock_ability<T: Transport>(transport: &mut T) -> UnlockAbility {
 /// Ask a phone in fastboot mode what it is. Sends `getvar:` commands and
 /// nothing else, so it is safe on a locked phone and before any decision.
 pub async fn probe<T: Transport>(transport: &mut T) -> Result<PhoneReport> {
-    let mut client = Client {
-        transport,
-        log: Vec::new(),
-    };
+    let mut client = Client::reading(transport);
     let id = PhoneId::of_serial(&client.getvar("serialno").await?).ok_or_else(|| {
         Error::Phone("the phone tells no serial number, so an install can't be tied to it".into())
     })?;
@@ -235,6 +272,30 @@ enum Reply {
 struct Client<T> {
     transport: T,
     log: Vec<String>,
+    /// The partitions a `flash:` may name. Empty outside a [`Session`].
+    flashable: Vec<String>,
+}
+
+impl<T> Client<T> {
+    /// A client that can ask and can't flash.
+    fn reading(transport: T) -> Self {
+        Client {
+            transport,
+            log: Vec::new(),
+            flashable: Vec::new(),
+        }
+    }
+
+    /// A session's client. One that holds every write back (a dry run)
+    /// gets no list, like a client that only asks: the session never forms
+    /// a write, and the gate would not pass one.
+    fn for_session(transport: T, flashable: Vec<String>, dry_run: bool) -> Self {
+        Client {
+            transport,
+            log: Vec::new(),
+            flashable: if dry_run { Vec::new() } else { flashable },
+        }
+    }
 }
 
 impl<T: Transport> Client<T> {
@@ -247,7 +308,9 @@ impl<T: Transport> Client<T> {
                     packet.len()
                 )));
             }
-            let text = String::from_utf8_lossy(&packet[4..]).into_owned();
+            // What a phone says ends up in sentences a front end prints:
+            // nothing a terminal acts on is kept of it, from here on
+            let text = crate::text::plain(&String::from_utf8_lossy(&packet[4..]));
             match &packet[..4] {
                 b"OKAY" => return Ok(Reply::Okay(text)),
                 b"FAIL" => {
@@ -274,7 +337,7 @@ impl<T: Transport> Client<T> {
     async fn command(&mut self, command: &str, info: &mut Vec<String>) -> Result<Reply> {
         debug_assert!(command.len() <= 64, "the original protocol's command limit");
         // The one place a command leaves: nothing off the list is sent
-        if !allowed(command) {
+        if !allowed(command, &self.flashable) {
             return Err(Error::Refused(format!(
                 "'{command}' is not a command this installer sends"
             )));
@@ -354,7 +417,10 @@ fn parse_size(text: &str) -> Option<u64> {
 }
 
 /// What the person running the install has said about the phone.
-#[derive(Debug, Clone, Default)]
+///
+/// The default is a dry run ([`PhoneOptions::default`]): a session that
+/// writes is one whose maker wrote `dry_run: false`.
+#[derive(Debug, Clone)]
 pub struct PhoneOptions {
     /// Slot B is the current slot and holds Omarchy Mobile. Without it a
     /// phone running from slot B is refused: stock Android runs there after
@@ -364,7 +430,7 @@ pub struct PhoneOptions {
     /// owner checked on the other slot. It must equal the current slot's.
     pub bootloader_slots_confirmed: Option<String>,
     /// Do every check, send no write: each is recorded in the log as
-    /// `would: ...` instead.
+    /// `would: ...` instead. On by default.
     pub dry_run: bool,
     /// The maintainer's override, for a dry run only: go on when the
     /// bootloader reports only the current slot's version, without knowing
@@ -372,6 +438,19 @@ pub struct PhoneOptions {
     /// Without `dry_run` the session is refused before anything is sent
     /// ([`Error::OverrideOutsideDryRun`]).
     pub maintainer_skip_bootloader_slot_check: bool,
+}
+
+impl Default for PhoneOptions {
+    /// A dry run, with nothing said about the phone. Options that write are
+    /// never what a caller gets without asking for them.
+    fn default() -> Self {
+        PhoneOptions {
+            reinstall: false,
+            bootloader_slots_confirmed: None,
+            dry_run: true,
+            maintainer_skip_bootloader_slot_check: false,
+        }
+    }
 }
 
 /// What the read-only checks found, for the confirmation screen.
@@ -449,10 +528,16 @@ impl<T: Transport> Session<T> {
             return Err(Error::OverrideOutsideDryRun);
         }
         let m: &Manifest = release.manifest();
-        let mut client = Client {
-            transport,
-            log: Vec::new(),
-        };
+        // The closed list of what this session may flash: the verified
+        // release's writes, which are the descriptor's BOOT_IMAGES with _b,
+        // and userdata. Nothing a person typed or a phone said is on it.
+        let mut flashable: Vec<String> = m
+            .boot_writes
+            .iter()
+            .map(|w| w.partition.name().to_string())
+            .collect();
+        flashable.push(m.root_image.partition.name().to_string());
+        let mut client = Client::for_session(transport, flashable, options.dry_run);
         let serial = client.getvar("serialno").await?;
         if PhoneId::of_serial(&serial).as_ref() != Some(expected) {
             return Err(Error::Refused(
@@ -832,10 +917,21 @@ mod tests {
         }
     }
 
+    /// A session's list for the Pixel 7 Pro's descriptor.
+    const OURS: [&str; 6] = [
+        "boot_b",
+        "init_boot_b",
+        "vendor_boot_b",
+        "vendor_kernel_boot_b",
+        "dtbo_b",
+        "userdata",
+    ];
+
     fn try_command(command: &str) -> (Result<String>, Vec<String>) {
         let mut client = Client {
             transport: Recorder::default(),
             log: Vec::new(),
+            flashable: OURS.iter().map(|p| p.to_string()).collect(),
         };
         let result = block_on(client.simple(command));
         assert_eq!(client.log, client.transport.sent);
@@ -898,11 +994,238 @@ mod tests {
             ("continue", false),
             ("upload", false),
             ("", false),
+            // A download says its size as eight hex digits, and nothing else
+            ("download:", false),
+            ("download:zzzzzzzz", false),
+            ("download:0000001", false),
+            ("download:000000100", false),
+            ("download:ffffffffff", false),
+            ("download:00000010 ", false),
+            ("download:0000001G", false),
+            ("download:+0000010", false),
+            ("DOWNLOAD:00000010", false),
+            ("download:0000ABCD", true),
+            ("reboot ", false),
+            ("REBOOT", false),
         ] {
             let (result, sent) = try_command(command);
             assert_eq!(result.is_ok(), ok, "{command:?}");
             assert_eq!(sent.len(), usize::from(ok), "{command:?}");
         }
+    }
+
+    #[test]
+    fn a_flash_leaves_only_for_a_partition_on_the_sessions_list() {
+        for ours in OURS {
+            let (result, sent) = try_command(&format!("flash:{ours}"));
+            assert!(result.is_ok(), "{ours}");
+            assert_eq!(sent, [format!("flash:{ours}")]);
+        }
+        for refused in [
+            // Slot A, and the same names without a slot
+            "boot_a",
+            "init_boot_a",
+            "vendor_boot_a",
+            "vendor_kernel_boot_a",
+            "dtbo_a",
+            "boot",
+            "init_boot",
+            "vendor_boot",
+            "vendor_kernel_boot",
+            "dtbo",
+            // What an install never touches, with and without a slot
+            "bootloader",
+            "bootloader_a",
+            "bootloader_b",
+            "radio",
+            "radio_a",
+            "radio_b",
+            "vbmeta",
+            "vbmeta_a",
+            "vbmeta_b",
+            "vbmeta_system_b",
+            "vbmeta_vendor_b",
+            "devinfo",
+            "persist",
+            "efs",
+            "efs_backup",
+            "modem",
+            "modem_a",
+            "modem_b",
+            "modem_userdata",
+            "misc",
+            "super",
+            "abl_b",
+            "bl1_b",
+            "bl2_b",
+            "bl31_b",
+            "pbl_b",
+            // Made up, and near misses of our own names
+            "omamobile_made_up",
+            "made_up_b",
+            "userdata_b",
+            "userdata_a",
+            "boot_b ",
+            " boot_b",
+            "boot_b\0",
+            "boot_b:raw",
+            "BOOT_B",
+            "boot_b,boot_a",
+            "",
+        ] {
+            let (result, sent) = try_command(&format!("flash:{refused}"));
+            assert!(
+                matches!(&result, Err(Error::Refused(why)) if why.contains("not a command this installer sends")),
+                "{refused:?}: {result:?}"
+            );
+            assert!(sent.is_empty(), "flash:{refused:?} reached the transport");
+        }
+        // A client that only asks (the look at the phone, the unlock
+        // question) has no list: it can flash nothing at all
+        for ours in OURS {
+            let mut client = Client::reading(Recorder::default());
+            assert!(block_on(client.simple(&format!("flash:{ours}"))).is_err());
+            assert!(client.transport.sent.is_empty());
+        }
+    }
+
+    /// Every command that changes a phone or stages a change, for [`OURS`].
+    fn every_write() -> Vec<String> {
+        let mut writes: Vec<String> = OURS.iter().map(|p| format!("flash:{p}")).collect();
+        writes.extend(["download:00000010", "set_active:b", "reboot"].map(String::from));
+        writes
+    }
+
+    #[test]
+    fn the_gate_holds_without_the_partition_type() {
+        // A list that names what no session may write, as it would look if
+        // the manifest's rules or the `Partition` type had let it through:
+        // the gate has its own fixed list, and refuses each all the same
+        let wrong = [
+            "persist",
+            "efs",
+            "efs_backup",
+            "devinfo",
+            "modem_a",
+            "modem_b",
+            "modem_userdata",
+            "boot_a",
+            "vbmeta_b",
+            "bootloader_b",
+            "radio_b",
+            "userdata_b",
+            "",
+        ];
+        for name in wrong {
+            assert!(!on_the_fixed_list(name), "{name:?}");
+            let mut client = Client {
+                transport: Recorder::default(),
+                log: Vec::new(),
+                flashable: wrong.iter().map(|p| p.to_string()).collect(),
+            };
+            let result = block_on(client.simple(&format!("flash:{name}")));
+            assert!(matches!(result, Err(Error::Refused(_))), "{name:?}");
+            assert!(client.transport.sent.is_empty(), "flash:{name:?} was sent");
+        }
+        // The fixed list is slot B's boot images and userdata, whole
+        for ours in OURS {
+            assert!(on_the_fixed_list(ours), "{ours}");
+        }
+        assert_eq!(
+            crate::manifest::SLOT_B_IMAGES.len() + 1,
+            OURS.len(),
+            "a new image name must be added to this test's list too"
+        );
+    }
+
+    #[test]
+    fn a_client_that_only_asks_sends_no_command_that_writes() {
+        // The look at the phone and the unlock question
+        for command in every_write() {
+            let mut client = Client::reading(Recorder::default());
+            let result = block_on(client.simple(&command));
+            assert!(
+                matches!(&result, Err(Error::Refused(why)) if why.contains("not a command this installer sends")),
+                "{command:?}: {result:?}"
+            );
+            assert!(client.transport.sent.is_empty(), "{command:?} was sent");
+            assert!(client.log.is_empty());
+        }
+        let mut client = Client::reading(Recorder::default());
+        assert!(block_on(client.simple("getvar:product")).is_ok());
+        assert!(block_on(client.simple(GET_UNLOCK_ABILITY)).is_ok());
+        assert_eq!(
+            client.transport.sent,
+            ["getvar:product", GET_UNLOCK_ABILITY]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_sessions_client_sends_no_command_that_writes() {
+        let list = || OURS.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        // Held back by the session before they are ever formed; and if one
+        // were formed all the same, the gate refuses it
+        for command in every_write() {
+            let mut client = Client::for_session(Recorder::default(), list(), true);
+            assert!(client.flashable.is_empty());
+            let result = block_on(client.simple(&command));
+            assert!(matches!(result, Err(Error::Refused(_))), "{command:?}");
+            assert!(client.transport.sent.is_empty(), "{command:?} was sent");
+        }
+        // The same list in a session that may write
+        for command in every_write() {
+            let mut client = Client::for_session(Recorder::default(), list(), false);
+            assert!(block_on(client.simple(&command)).is_ok(), "{command:?}");
+            assert_eq!(client.transport.sent, [command]);
+        }
+        // Either can ask
+        let mut client = Client::for_session(Recorder::default(), list(), true);
+        assert!(block_on(client.simple("getvar:all")).is_ok());
+    }
+
+    #[test]
+    fn the_default_options_are_a_dry_run() {
+        let options = PhoneOptions::default();
+        assert!(options.dry_run);
+        assert!(!options.reinstall && !options.maintainer_skip_bootloader_slot_check);
+        assert_eq!(options.bootloader_slots_confirmed, None);
+    }
+
+    /// A phone that answers every command with the packets it was given.
+    struct Says(Vec<Vec<u8>>);
+    impl Transport for Says {
+        async fn send(&mut self, data: &[u8]) -> Result<usize> {
+            Ok(data.len())
+        }
+        async fn recv(&mut self) -> Result<Vec<u8>> {
+            Ok(self.0.remove(0))
+        }
+    }
+
+    #[test]
+    fn every_kind_of_answer_is_made_fit_to_print_where_it_is_read() {
+        // ESC sequences, a carriage return, a NUL, and a byte that is not UTF-8
+        let hostile = b"\x1b[2J\x1b]0;t\x07\rok\0\xff";
+        let shown = "\\u{1b}[2J\\u{1b}]0;t\\u{7} ok\\u{0}\u{fffd}";
+        let packet = |kind: &[u8]| [kind, &hostile[..]].concat();
+        // OKAY: a getvar's value
+        let mut client = Client::reading(Says(vec![packet(b"OKAY")]));
+        assert_eq!(block_on(client.getvar("product")).unwrap(), shown);
+        // FAIL: the phone's message, in the error a front end prints
+        let mut client = Client::reading(Says(vec![packet(b"FAIL")]));
+        let err = block_on(client.getvar("product")).unwrap_err();
+        assert!(
+            matches!(&err, Error::DeviceFail { message, .. } if message == shown),
+            "{err:?}"
+        );
+        assert!(!err.to_string().chars().any(char::is_control));
+        // INFO and TEXT: the lines of getvar:all
+        let mut client = Client::reading(Says(vec![
+            packet(b"INFO"),
+            packet(b"TEXT"),
+            b"OKAY".to_vec(),
+        ]));
+        assert_eq!(block_on(client.getvar_all()).unwrap(), [shown, shown]);
     }
 
     #[test]

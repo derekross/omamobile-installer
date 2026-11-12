@@ -18,6 +18,8 @@
 //!
 //! - [`download`]: Google's factory image, fetched by a front end from the
 //!   address in the signed build index and decided here, answer by answer.
+//! - [`text`]: what a phone, a server or a file name says, made fit to print
+//!   before it is kept, compared or put on a screen.
 //!
 //! Nothing here does I/O on its own: bytes come in from the caller, and the
 //! only ways out are the transport trait and, for Google's factory image, a
@@ -35,6 +37,7 @@ pub mod install;
 pub mod manifest;
 pub mod signature;
 pub mod sparse;
+pub mod text;
 pub mod zstd_push;
 
 pub use error::Error;

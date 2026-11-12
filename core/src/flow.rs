@@ -12,6 +12,8 @@
 //!   -> Phone          read_phone / no_phone
 //!   -> Unlock         read_phone again, after the owner unlocked
 //!   -> GoogleTerms    accept_google_terms / decline_google_terms
+//!                     (left out when the owner has the file, or the front
+//!                     end says it can't fetch from Google)
 //!   -> FactoryImage   factory_download, the fetch, factory_download_done; or
 //!                     factory_zip, then the bytes, then factory_zip_done
 //!   -> Answers        answers
@@ -66,10 +68,20 @@ pub const GOOGLE_TERMS: [&str; 2] = [
 pub const GOOGLE_TERMS_THIRD_PARTY: &str = "Google's page also says that the download and use \"may also be subject to certain third-party terms of service, which can be found in Settings > About phone > Legal information\".";
 pub const GOOGLE_TERMS_OF_SERVICE: &str = "https://policies.google.com/terms";
 pub const GOOGLE_PRIVACY_POLICY: &str = "https://policies.google.com/privacy";
+/// Said on the factory-image step of a front end that cannot fetch from
+/// Google's server ([`FlowOptions::cannot_fetch_from_google`]), in place of
+/// the terms step: why the owner fetches the file by hand there. Measured on
+/// 2026-11-12: `dl.google.com` sends no `Access-Control-Allow-Origin`
+/// header, so a browser lets no page read the file.
+pub const CANNOT_FETCH_FROM_GOOGLE: &str = "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.";
 /// The command the owner runs to unlock the bootloader. Shown, never sent:
 /// the one `flashing` command this crate sends is the question
 /// [`crate::fastboot::GET_UNLOCK_ABILITY`], which only reads.
 pub const UNLOCK_COMMAND: &str = "fastboot flashing unlock";
+/// Said on the unlock screen, before its steps, by a flow that ends at the
+/// dry run ([`Flow::ends_at_dry_run`]): the steps there erase the phone, and
+/// such a flow installs nothing afterwards.
+pub const NO_INSTALL_YET: &str = "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.";
 /// Shown on every screen once the maintainer's override has skipped the
 /// bootloader-slot check, so both front ends say it in the same words.
 pub const SLOT_CHECK_SKIPPED: &str = "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.";
@@ -95,6 +107,15 @@ pub struct FlowOptions {
     /// so the step that shows Google's terms is left out: they were Google's
     /// to ask on its page.
     pub owner_has_factory_zip: bool,
+    /// The front end can't fetch the factory image from Google's server at
+    /// all, and says so here, once, at the start: a web page, which a
+    /// browser does not let read a file from `dl.google.com` (the server
+    /// sends no `Access-Control-Allow-Origin`; measured on 2026-11-12). The
+    /// flow then leaves the terms step out, as it does for an owner who has
+    /// the file: there are no terms to ask for a download that can't be
+    /// made. It goes straight to the owner's own download and says why
+    /// ([`CANNOT_FETCH_FROM_GOOGLE`]), and gives out no download.
+    pub cannot_fetch_from_google: bool,
 }
 
 /// The owner accepted Google's terms on the terms step: for which build,
@@ -144,6 +165,9 @@ pub enum ImageSource {
 pub enum OwnerFileWhy {
     /// They said up front that they have it ([`FlowOptions::owner_has_factory_zip`]).
     SaidSo,
+    /// The front end can't fetch from Google's server
+    /// ([`FlowOptions::cannot_fetch_from_google`]).
+    CannotFetch,
     /// They did not accept Google's terms in the installer.
     TermsDeclined,
     /// They accepted, and the installer could not download the file.
@@ -170,9 +194,13 @@ pub enum DownloadTrouble {
 pub enum DownloadEnd {
     /// The file is complete and is the one the signed index describes.
     Verified,
-    /// Not complete. What arrived may be kept, to go on from.
+    /// Not complete, or nothing of this try was taken. What is on this
+    /// computer of the file may be kept, to go on from.
     Kept,
-    /// Not the file. Delete every byte that was kept of it.
+    /// What is on this computer can't be the file: it is complete with
+    /// another SHA-256, or more arrived than the file has. Delete every byte
+    /// that was kept of it. Never the answer to a size the server only
+    /// announced: that says nothing about bytes kept earlier.
     Discard,
 }
 
@@ -675,7 +703,9 @@ pub struct Screen {
     pub stop: Option<&'static str>,
     pub title: String,
     /// Said before everything else on the screen, and made to stand out:
-    /// a check was skipped by the maintainer's override.
+    /// a check was skipped by the maintainer's override, or the screen shows
+    /// steps that erase the phone in a flow that installs nothing
+    /// ([`NO_INSTALL_YET`]).
     pub notice: Option<String>,
     pub body: Vec<String>,
     /// Someone else's words, drawn after the body and set apart as theirs.
@@ -873,6 +903,15 @@ impl Flow {
         self.zip.as_ref()
     }
 
+    /// Whether this flow ends at the dry run, with no step that writes to a
+    /// phone. In this version every flow does. A screen that shows the owner
+    /// something that can't be undone (the unlock steps) asks this and says
+    /// so ([`NO_INSTALL_YET`]); a version of the flow that can write answers
+    /// from its own state here, so that the sentence stays true.
+    pub fn ends_at_dry_run(&self) -> bool {
+        true
+    }
+
     fn phone_fact(&self) -> PhoneFact {
         match (self.asked, self.unlock_shown) {
             (false, _) => PhoneFact::NotAsked,
@@ -1008,6 +1047,17 @@ impl Flow {
                     build: *build,
                     same_pair,
                     source: ImageSource::OwnerFile(OwnerFileWhy::SaidSo),
+                    refused: None,
+                    trouble: None,
+                };
+            }
+            // The front end can't download it: no terms are asked for a
+            // download that can't be made
+            Judged::Ready { build, same_pair } if self.options.cannot_fetch_from_google => {
+                self.step = Step::FactoryImage {
+                    build: *build,
+                    same_pair,
+                    source: ImageSource::OwnerFile(OwnerFileWhy::CannotFetch),
                     refused: None,
                     trouble: None,
                 };
@@ -1331,6 +1381,8 @@ impl Flow {
         }
         *refused = None;
         let (got, want) = download.progress();
+        // What an earlier try left that this one went on from
+        let had = download.resume_from();
         let ending = match (download.ending().cloned(), failure) {
             (Some(ending), _) => ending,
             (None, Some(FetchFailure::NoAnswer)) => Ending::Unavailable(Unavailable::NoAnswer),
@@ -1339,6 +1391,18 @@ impl Flow {
                     got,
                     want,
                     detail: Some(detail),
+                });
+                return Ok(DownloadEnd::Kept);
+            }
+            // A server that went quiet: ended by the front end, and open
+            // to another try like any transfer that broke off
+            (None, Some(FetchFailure::Stalled { seconds })) => {
+                *trouble = Some(DownloadTrouble::Interrupted {
+                    got,
+                    want,
+                    detail: Some(format!(
+                        "Google's server sent nothing for {seconds} seconds"
+                    )),
                 });
                 return Ok(DownloadEnd::Kept);
             }
@@ -1385,17 +1449,37 @@ impl Flow {
                     Mismatch::AnnouncedSize { got } => format!("Google's server offered a file of {got} bytes as {zip}, and that is not what {list} says: the list records {size} bytes for build {id}."),
                     Mismatch::TooManyBytes => format!("Google's server sent more for {zip} than the file has, so what it sent is not what {list} says: the list records {size} bytes for build {id}, and the installer took no more than that."),
                 };
+                let tell = format!("If it stops here again, Google's file and this release's list do not agree: please tell us at {ISSUES}");
+                // Bytes on this computer are deleted only when they can't be
+                // part of the right file: the file is complete with another
+                // SHA-256, or more arrived than it has. A size the server
+                // said before sending anything is no such proof: nothing of
+                // that answer was taken, and what an earlier try kept is
+                // still hashed from its first byte before it is used.
+                let (end, second, third) = match &why {
+                    Mismatch::AnnouncedSize { .. } if had > 0 => (
+                        DownloadEnd::Kept,
+                        format!("The installer took nothing of what the server offered. The {had} bytes an earlier try downloaded stay on this computer: the server's answer says nothing about them, and they are checked from the first byte, together with the rest, before anything of the file is used."),
+                        format!("Starting the installer again goes on from those bytes. {tell}"),
+                    ),
+                    Mismatch::AnnouncedSize { .. } => (
+                        DownloadEnd::Kept,
+                        "The installer took nothing of what the server offered.".to_string(),
+                        format!("Starting the installer again tries the download again. {tell}"),
+                    ),
+                    Mismatch::Sha256 | Mismatch::TooManyBytes => (
+                        DownloadEnd::Discard,
+                        "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.".to_string(),
+                        format!("Starting the installer again downloads the file afresh. {tell}"),
+                    ),
+                };
                 self.stop(
                     StopKind::FactoryDownloadMismatch { build: id, why },
                     Retry::Whenever,
                     "The downloaded file is not the one this release lists",
-                    vec![
-                        first,
-                        "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.".into(),
-                        format!("Starting the installer again downloads the file afresh. If it stops here again, Google's file and this release's list do not agree: please tell us at {ISSUES}"),
-                    ],
+                    vec![first, second, third],
                 );
-                Ok(DownloadEnd::Discard)
+                Ok(end)
             }
         }
     }
@@ -1720,6 +1804,15 @@ impl Flow {
                 s.state = "unlock";
                 s.action = "read-phone";
                 s.title = "Unlock the bootloader".into();
+                // The steps below erase the phone. A flow that installs
+                // nothing afterwards says so first, where it can't be missed
+                let no_install = self.ends_at_dry_run();
+                if no_install {
+                    s.notice = Some(match s.notice.take() {
+                        Some(skipped) => format!("{NO_INSTALL_YET} {skipped}"),
+                        None => NO_INSTALL_YET.to_string(),
+                    });
+                }
                 s.body = vec![
                     format!("The {name} is in Fastboot Mode, and its bootloader is still locked."),
                     if self.slot_check_skipped {
@@ -1742,10 +1835,12 @@ impl Flow {
                     }
                     UnlockAbility::Unknown => Some(format!("If \"OEM unlocking\" is not switched on yet: press Power to start Android. {developer_options} Then put the phone back in Fastboot Mode: {keys}.")),
                 };
-                s.body.push(
+                s.body.push(if no_install {
+                    "The installer does not send the unlock command, and these steps are not for now. They are what a version that can install will ask of you, shown so that you know them. This version gives you no reason to take them.".into()
+                } else {
                     "The installer does not send the unlock command. You do, when you are ready:"
-                        .into(),
-                );
+                        .into()
+                });
                 s.steps = switch_on.into_iter().map(step).collect();
                 s.steps.extend([
                     ScreenStep {
@@ -1826,6 +1921,7 @@ impl Flow {
                         s.action = "take-file";
                         s.body.push(match why {
                             OwnerFileWhy::SaidSo => "The installer downloads nothing in this run: it checks the file you saved from Google's page.".to_string(),
+                            OwnerFileWhy::CannotFetch => CANNOT_FETCH_FROM_GOOGLE.to_string(),
                             OwnerFileWhy::TermsDeclined => "You did not accept Google's terms in the installer, so it downloads nothing. You download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.".to_string(),
                             OwnerFileWhy::Unavailable(u) => format!(
                                 "The installer could not download the image from Google's server: {} That says nothing against the file. You can still go on: download the image from Google's page yourself, and the installer checks the file you saved.",
@@ -1934,7 +2030,49 @@ impl Flow {
                 s.footer = stop.footer();
             }
         }
+        s.fit_to_print();
         s
+    }
+}
+
+impl Screen {
+    /// The last thing done to a screen: every string of it through
+    /// [`crate::text::plain`]. A phone's answers were made plain where they
+    /// were read; this is for everything else a screen is built from (the
+    /// name of a file the owner picked, what an HTTP client said of a
+    /// server's answer, the release's own names), and for the phone's again.
+    fn fit_to_print(&mut self) {
+        use crate::text::plain;
+        let each = |list: &mut Vec<String>| list.iter_mut().for_each(|s| *s = plain(s));
+        self.title = plain(&self.title);
+        for text in [&mut self.notice, &mut self.link, &mut self.problem]
+            .into_iter()
+            .flatten()
+        {
+            *text = plain(text);
+        }
+        each(&mut self.body);
+        each(&mut self.plan);
+        each(&mut self.footer);
+        if let Some(quote) = &mut self.quote {
+            quote.intro = plain(&quote.intro);
+            each(&mut quote.lines);
+            each(&mut quote.after);
+            for link in &mut quote.links {
+                link.label = plain(&link.label);
+                link.url = plain(&link.url);
+            }
+        }
+        for step in &mut self.steps {
+            step.text = plain(&step.text);
+            if let Some(command) = &mut step.command {
+                *command = plain(command);
+            }
+        }
+        if let Some(file) = &mut self.file {
+            file.name = plain(&file.name);
+            file.build = plain(&file.build);
+        }
     }
 }
 

@@ -10,7 +10,10 @@
 # gets an empty /dev and no /sys/bus/usb.
 #
 # Nothing is fetched from Google either: the downloads of the factory image
-# go to a stand-in that web/serve.py runs on this computer.
+# go to a stand-in that web/serve.py runs on this computer. And the browser
+# itself is held to this computer: it can resolve no host but 127.0.0.1, and
+# its own background services (updates, sync, reports) are switched off, so
+# neither the page nor the browser reaches Google or anyone else.
 #
 #   web/selftest.sh            build (web/build.sh selftest), serve, run
 #   CHROMIUM=/path/to/chrome web/selftest.sh
@@ -42,11 +45,19 @@ if command -v bwrap >/dev/null && bwrap --dev-bind / / --dev /dev true 2>/dev/nu
 fi
 "${hide[@]}" "$browser" --headless=new --no-first-run --disable-gpu --no-sandbox \
   --disable-blink-features=WebUSB --user-data-dir="$work/profile" \
+  --host-resolver-rules='MAP * ~NOTFOUND, EXCLUDE 127.0.0.1' \
+  --disable-background-networking --disable-component-update --disable-sync \
+  --disable-domain-reliability --no-default-browser-check --no-pings \
   "http://127.0.0.1:$port/?selftest" >"$work/browser.log" 2>&1 &
 chrome=$!
 for _ in $(seq 600); do grep -q "^selftest-result" "$work/server.log" && break; sleep 0.1; done
 result=$(sed -n 's/^selftest-result //p' "$work/server.log" | head -1)
-[[ -n $result ]] || { echo "selftest: the page sent no result in 60 s; see $work" >&2; exit 1; }
+[[ -n $result ]] || {
+  echo "selftest: the page sent no result in 60 s; see $work" >&2
+  # Most often the browser, not the page: say what it said
+  tail -n 20 "$work/browser.log" >&2 || true
+  exit 1
+}
 python3 -c 'import json, sys
 r = json.loads(sys.argv[1])
 for k, v in r.items():

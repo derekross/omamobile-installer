@@ -10,7 +10,8 @@ use omamobile_installer_core::download::{
 };
 use omamobile_installer_core::flow::{
     DownloadEnd, DownloadTrouble, Flow, FlowOptions, ImageSource, OwnerFileWhy, PhoneFact, Retry,
-    Step, Stop, StopKind, GOOGLE_PRIVACY_POLICY, GOOGLE_TERMS, GOOGLE_TERMS_OF_SERVICE,
+    Step, Stop, StopKind, CANNOT_FETCH_FROM_GOOGLE, GOOGLE_PRIVACY_POLICY, GOOGLE_TERMS,
+    GOOGLE_TERMS_OF_SERVICE,
 };
 use omamobile_installer_core::Error;
 use pollster::block_on;
@@ -260,6 +261,93 @@ fn declining_the_terms_leaves_the_owners_own_download_and_the_installer_fetches_
         .contains("The installer downloads nothing in this run"));
     assert!(matches!(flow.factory_download(0), Err(Error::Refused(_))));
     only_getvar(&phone);
+}
+
+#[test]
+fn a_front_end_that_cannot_fetch_from_google_is_not_asked_for_googles_terms() {
+    // What the owner reads in place of the terms step
+    assert_eq!(CANNOT_FETCH_FROM_GOOGLE, "A web page is not allowed to read files from Google's server, so this page cannot download the image for you. The installer's command-line tool can download it for you. Here you download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.");
+    let bundle = TestBundle::new();
+    let id = omamobile_installer_core::fastboot::PhoneId::of_serial(SERIAL).unwrap();
+    let begin = || {
+        let mut flow = Flow::begin(
+            &bundle.files(),
+            bundle.index(),
+            &bundle.trusted(),
+            // Said once, at the start, by the front end
+            FlowOptions {
+                cannot_fetch_from_google: true,
+                ..Default::default()
+            },
+        );
+        flow.acknowledge_warning().unwrap();
+        flow
+    };
+    let phone = phone();
+    let mut flow = begin();
+    block_on(flow.read_phone(&mut phone.clone(), &id)).unwrap();
+    // Straight to the owner's own download: no terms for a download that
+    // can't be made
+    assert_eq!(
+        source(&flow),
+        ImageSource::OwnerFile(OwnerFileWhy::CannotFetch)
+    );
+    let screen = flow.screen();
+    assert_eq!(
+        (screen.state, screen.action),
+        ("factory-image", "take-file")
+    );
+    assert_eq!(screen.quote, None);
+    assert!(
+        screen.body.contains(&CANNOT_FETCH_FROM_GOOGLE.to_string()),
+        "{:?}",
+        screen.body
+    );
+    // Nothing on the screen offers a download or hedges about why
+    let text = serde_json::to_string(&screen).unwrap();
+    assert!(!text.contains("got no answer"), "{text}");
+    assert!(!text.contains("downloads the image"), "{text}");
+    assert_eq!(screen.steps.len(), 3);
+    assert!(screen.steps[0].text.contains("accept Google's terms there"));
+    assert_eq!(screen.link.as_deref(), Some(PAGE));
+    // The terms were never asked, can't be answered, and nothing is fetched
+    assert!(flow.google_terms_accepted().is_none());
+    assert!(flow.accept_google_terms(NOW).is_err());
+    assert!(flow.decline_google_terms().is_err());
+    assert!(matches!(
+        flow.factory_download(0),
+        Err(Error::Refused(why)) if why.contains("nothing is downloaded")
+    ));
+    assert!(flow.google_terms_accepted().is_none());
+    // The file the owner saved is checked as ever
+    let mut check = flow
+        .factory_zip(&bundle.factory_zip_name, bundle.factory_zip.len() as u64)
+        .unwrap()
+        .unwrap();
+    check.update(&bundle.factory_zip);
+    flow.factory_zip_done(check).unwrap();
+    assert_eq!(flow.step(), &Step::Answers);
+    only_getvar(&phone);
+
+    // A locked phone comes the same way, after its owner unlocked it
+    let locked = FakePhone::scenario("locked").unwrap();
+    let mut flow = begin();
+    block_on(flow.read_phone(&mut locked.clone(), &id)).unwrap();
+    assert_eq!(flow.screen().state, "unlock");
+    locked.edit(|s| {
+        s.vars.insert("unlocked".into(), "yes".into());
+    });
+    block_on(flow.read_phone(&mut locked.clone(), &id)).unwrap();
+    assert_eq!(
+        source(&flow),
+        ImageSource::OwnerFile(OwnerFileWhy::CannotFetch)
+    );
+
+    // A front end that can fetch (the default) is shown the terms as before
+    let flow = at_terms(&bundle, &phone);
+    assert!(!serde_json::to_string(&flow.screen())
+        .unwrap()
+        .contains("A web page is not allowed"));
 }
 
 #[test]
@@ -534,6 +622,13 @@ fn a_redirect_is_followed_on_dl_google_com_only_and_checked_each_time() {
     only_getvar(&phone);
 }
 
+fn why_of(stop: &Stop) -> Mismatch {
+    match &stop.kind {
+        StopKind::FactoryDownloadMismatch { why, .. } => why.clone(),
+        other => panic!("another stop: {other:?}"),
+    }
+}
+
 /// The stop for a download that is not the listed file: typed, said in the
 /// words the task of the stop is, and with nothing reassuring past the facts.
 fn mismatch_stop(flow: &Flow, why: Mismatch, says: &str) {
@@ -553,8 +648,15 @@ fn mismatch_stop(flow: &Flow, why: Mismatch, says: &str) {
     let message = stop.message.join(" ");
     assert!(message.contains(says), "{message}");
     assert!(message.contains("not what the release's signed list of Google's builds says"));
-    assert!(message.contains("The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer."));
-    assert!(message.contains("Starting the installer again downloads the file afresh."));
+    if matches!(why_of(stop), Mismatch::AnnouncedSize { .. }) {
+        // Nothing was taken, so nothing is said to be deleted
+        assert!(message.contains("The installer took nothing of what the server offered."));
+        assert!(!message.contains("deleted"), "{message}");
+        assert!(!message.contains("afresh"), "{message}");
+    } else {
+        assert!(message.contains("The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer."));
+        assert!(message.contains("Starting the installer again downloads the file afresh."));
+    }
     assert!(message.contains("https://github.com/derekross/omarchy-mobile/issues"));
     assert_eq!(
         (stop.retry, stop.phone),
@@ -580,15 +682,20 @@ fn the_size_is_the_indexs_before_the_transfer_and_during_it() {
         assert_eq!(download.response(&ok(announced)).unwrap(), FetchNext::End);
         assert!(!download.body(zip));
         assert_eq!(download.progress(), (0, size));
+        // Nothing was taken and nothing was kept: there is nothing to delete
         assert_eq!(
             flow.factory_download_done(download, None).unwrap(),
-            DownloadEnd::Discard
+            DownloadEnd::Kept
         );
         mismatch_stop(
             &flow,
             Mismatch::AnnouncedSize { got: announced },
             &format!("Google's server offered a file of {announced} bytes"),
         );
+        assert!(stop(&flow)
+            .message
+            .join(" ")
+            .contains("Starting the installer again tries the download again."));
         // Stopped: nothing more is accepted
         assert!(flow.factory_download(0).is_err());
         assert!(flow.factory_zip(&bundle.factory_zip_name, size).is_err());
@@ -895,8 +1002,10 @@ fn an_interrupted_download_goes_on_from_what_was_kept_and_is_hashed_from_the_fir
                     ImageSource::OwnerFile(OwnerFileWhy::Unavailable(why))
                 );
             }
+            // Another size said: the install stops, and the bytes an
+            // earlier try kept are not deleted for it
             Ok(why) => {
-                assert_eq!(end, DownloadEnd::Discard);
+                assert_eq!(end, DownloadEnd::Kept);
                 mismatch_stop(&flow, why, "Google's server offered a file of");
             }
         }
@@ -939,6 +1048,207 @@ fn an_interrupted_download_goes_on_from_what_was_kept_and_is_hashed_from_the_fir
     );
     mismatch_stop(&flow, Mismatch::Sha256, "its SHA-256 is another");
     only_getvar(&phone);
+}
+
+/// The rule for what an earlier try left on disk: it is deleted only when
+/// it cannot be part of the right file. What a server says it is about to
+/// send is no such proof.
+#[test]
+fn another_size_said_by_the_server_does_not_delete_what_an_earlier_try_kept() {
+    let bundle = TestBundle::new();
+    let phone = phone();
+    let zip = &bundle.factory_zip;
+    let size = zip.len() as u64;
+    let kept = &zip[..20_000];
+    let rest_one_too_many = format!("bytes 20000-{size}/{}", size + 1);
+    let answers = [
+        // The whole file, one byte too long
+        ok(size + 1),
+        // A short page with status 200 in the file's place
+        ok(35),
+        // The rest, of a file one byte too long
+        FetchResponse {
+            status: 206,
+            content_range: Some(&rest_one_too_many),
+            ..Default::default()
+        },
+    ];
+    for answer in &answers {
+        let mut flow = accepted(&bundle, &phone);
+        let mut download = flow.factory_download(20_000).unwrap();
+        download.kept(kept).unwrap();
+        assert_eq!(download.response(answer).unwrap(), FetchNext::End);
+        // No byte of that answer's body is taken
+        assert!(!download.body(&zip[20_000..]));
+        assert_eq!(download.progress(), (20_000, size));
+        // Kept, not Discard: the front end leaves the bytes where they are
+        assert_eq!(
+            flow.factory_download_done(download, None).unwrap(),
+            DownloadEnd::Kept,
+            "{answer:?}"
+        );
+        // It is still not the listed file, and the install still stops
+        let stop = stop(&flow);
+        assert_eq!(stop.id(), "factory-download-mismatch");
+        assert!(matches!(why_of(stop), Mismatch::AnnouncedSize { .. }));
+        let message = stop.message.join(" ");
+        assert!(message.contains("The installer took nothing of what the server offered. The 20000 bytes an earlier try downloaded stay on this computer: the server's answer says nothing about them, and they are checked from the first byte, together with the rest, before anything of the file is used."), "{message}");
+        assert!(
+            message.contains("Starting the installer again goes on from those bytes."),
+            "{message}"
+        );
+        assert!(!message.contains("deleted"), "{message}");
+
+        // The next run goes on from them, and the whole file passes
+        let mut flow = accepted(&bundle, &phone);
+        let mut download = flow.factory_download(20_000).unwrap();
+        download.kept(kept).unwrap();
+        let range = format!("bytes 20000-{}/{size}", size - 1);
+        let rest = FetchResponse {
+            status: 206,
+            content_range: Some(&range),
+            ..Default::default()
+        };
+        assert_eq!(
+            download.response(&rest).unwrap(),
+            FetchNext::Body { at: 20_000 }
+        );
+        assert!(feed(&mut download, &zip[20_000..]));
+        assert_eq!(
+            flow.factory_download_done(download, None).unwrap(),
+            DownloadEnd::Verified
+        );
+    }
+
+    // What can't belong to the right file is still deleted. More bytes than
+    // the file has: not used, and the front end starts the file afresh
+    let mut flow = accepted(&bundle, &phone);
+    let download = flow.factory_download(size + 1).unwrap();
+    assert_eq!(download.resume_from(), 0);
+    // Complete, with another SHA-256
+    let mut wrong = zip.clone();
+    wrong[9] ^= 1;
+    let mut download = flow.factory_download(size).unwrap();
+    download.kept(&wrong).unwrap();
+    assert_eq!(
+        flow.factory_download_done(download, None).unwrap(),
+        DownloadEnd::Discard
+    );
+    // Kept bytes followed by more than the file has
+    let mut flow = accepted(&bundle, &phone);
+    let mut download = flow.factory_download(20_000).unwrap();
+    download.kept(kept).unwrap();
+    let range = format!("bytes 20000-{}/{size}", size - 1);
+    let rest = FetchResponse {
+        status: 206,
+        content_range: Some(&range),
+        ..Default::default()
+    };
+    download.response(&rest).unwrap();
+    assert!(feed(&mut download, &zip[20_000..]));
+    assert!(!download.body(&[0u8; 1]));
+    assert_eq!(
+        flow.factory_download_done(download, None).unwrap(),
+        DownloadEnd::Discard
+    );
+    only_getvar(&phone);
+}
+
+#[test]
+fn a_download_that_stalls_is_an_interrupted_one_that_keeps_its_bytes_and_can_be_tried_again() {
+    let bundle = TestBundle::new();
+    let phone = phone();
+    let zip = &bundle.factory_zip;
+    let size = zip.len() as u64;
+    let mut flow = accepted(&bundle, &phone);
+    let mut download = flow.factory_download(0).unwrap();
+    download.response(&ok(size)).unwrap();
+    assert!(feed(&mut download, &zip[..10_000]));
+    // The front end waited a minute for the next byte, and gave up
+    assert_eq!(
+        flow.factory_download_done(download, Some(FetchFailure::Stalled { seconds: 60 }))
+            .unwrap(),
+        DownloadEnd::Kept
+    );
+    assert_eq!(
+        trouble(&flow),
+        Some(DownloadTrouble::Interrupted {
+            got: 10_000,
+            want: size,
+            detail: Some("Google's server sent nothing for 60 seconds".into()),
+        })
+    );
+    // Not a stop and not a fallback: the download is still on offer
+    assert_eq!(source(&flow), ImageSource::Download);
+    let screen = flow.screen();
+    assert_eq!((screen.state, screen.action), ("factory-image", "download"));
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(format!("The download from Google's server stopped before it was complete: 10000 of {size} bytes had arrived (Google's server sent nothing for 60 seconds). You can try again.").as_str())
+    );
+    // The next try goes on from what was kept, hashed from the first byte
+    let mut download = flow.factory_download(10_000).unwrap();
+    download.kept(&zip[..10_000]).unwrap();
+    assert_eq!(
+        download.request().unwrap().range().as_deref(),
+        Some("bytes=10000-")
+    );
+    let range = format!("bytes 10000-{}/{size}", size - 1);
+    let answer = FetchResponse {
+        status: 206,
+        content_range: Some(&range),
+        ..Default::default()
+    };
+    assert_eq!(
+        download.response(&answer).unwrap(),
+        FetchNext::Body { at: 10_000 }
+    );
+    assert!(feed(&mut download, &zip[10_000..]));
+    assert_eq!(
+        flow.factory_download_done(download, None).unwrap(),
+        DownloadEnd::Verified
+    );
+    assert_eq!(flow.step(), &Step::Answers);
+
+    // Silence before the first byte of the body is the same, with nothing kept
+    let mut flow = accepted(&bundle, &phone);
+    let mut download = flow.factory_download(0).unwrap();
+    download.response(&ok(size)).unwrap();
+    assert_eq!(
+        flow.factory_download_done(download, Some(FetchFailure::Stalled { seconds: 60 }))
+            .unwrap(),
+        DownloadEnd::Kept
+    );
+    assert!(flow.screen().problem.unwrap().contains(&format!(
+        "0 of {size} bytes had arrived (Google's server sent nothing for 60 seconds)"
+    )));
+    only_getvar(&phone);
+}
+
+#[test]
+fn what_a_server_or_an_http_client_says_is_made_fit_to_print() {
+    let bundle = TestBundle::new();
+    let phone = phone();
+    let size = bundle.factory_zip.len() as u64;
+    // An ESC sequence, a carriage return, a NUL and a bell, as a server
+    // could put them in a header that an HTTP client then quotes
+    let hostile = "bad header \u{1b}[2J\u{1b}]0;gone\u{7}\rall is well\0";
+    for failure in [
+        FetchFailure::Network(hostile.into()),
+        FetchFailure::Storage(hostile.into()),
+    ] {
+        let mut flow = accepted(&bundle, &phone);
+        let mut download = flow.factory_download(0).unwrap();
+        download.response(&ok(size)).unwrap();
+        flow.factory_download_done(download, Some(failure)).unwrap();
+        let screen = flow.screen();
+        let problem = screen.problem.unwrap();
+        assert!(!problem.chars().any(char::is_control), "{problem:?}");
+        assert!(
+            problem.contains("bad header \\u{1b}[2J\\u{1b}]0;gone\\u{7} all is well\\u{0}"),
+            "{problem}"
+        );
+    }
 }
 
 #[test]

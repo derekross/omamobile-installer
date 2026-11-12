@@ -6,7 +6,7 @@
 //!                                                no phone: the sparse images a flash would send
 //!   omamobile-install devices                    USB: phones in fastboot mode
 //!   omamobile-install install BUNDLE_DIR --serial SERIAL --dry-run [--reinstall]
-//!                             [--factory-zip FILE] [--work-dir DIR]
+//!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the install flow up to the dry run, read-only
 //!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--reinstall] [--factory-zip FILE]
 //!                             [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
@@ -32,6 +32,10 @@
 //! in a file the owner already saved from Google's page: nothing is
 //! downloaded then.
 //!
+//! The download uses no proxy unless the owner names one with `--proxy`: a
+//! proxy named in the environment (`http_proxy`, `https_proxy`, `all_proxy`)
+//! is not used.
+//!
 //! `flow` never reaches Google: its downloads go to the stand-in server
 //! named with `--fake-google`, on this computer, or nowhere.
 //!
@@ -52,6 +56,7 @@ use omamobile_installer_core::flow::{
 };
 use omamobile_installer_core::install::{flash_userdata_from_reader, UserdataStream};
 use omamobile_installer_core::signature::TrustedKeys;
+use omamobile_installer_core::text::plain;
 use omamobile_installer_core::{build_index, Error};
 use omamobile_installer_usb::UsbTransport;
 use pollster::block_on;
@@ -243,12 +248,14 @@ async fn cmd_devices() -> Res<()> {
     let mut n = 0;
     for info in nusb::list_devices().await?.filter(is_fastboot) {
         n += 1;
+        // Both strings are the device's own: nothing of them that a
+        // terminal acts on is printed
         println!(
             "{:04x}:{:04x} {} serial {}",
             info.vendor_id(),
             info.product_id(),
-            info.product_string().unwrap_or("?"),
-            info.serial_number().unwrap_or("?")
+            plain(info.product_string().unwrap_or("?")),
+            plain(info.serial_number().unwrap_or("?"))
         );
     }
     println!("{n} phone(s) in fastboot mode");
@@ -503,8 +510,25 @@ enum Fetcher {
     Nowhere,
 }
 
-fn agent(https_only: bool) -> ureq::Agent {
+/// How long the tool waits for the next bytes of Google's file before it
+/// ends a try. The connect and response timeouts below cover the time
+/// before the body; ureq's own body timeout is for the whole transfer,
+/// which no number fits for a file of several gigabytes on any connection.
+const BODY_IDLE: Duration = Duration::from_secs(60);
+/// The same for the stand-in of a pretend run, which is on this computer.
+#[cfg(feature = "fake-phone")]
+const STAND_IN_BODY_IDLE: Duration = Duration::from_secs(2);
+
+/// The HTTP client. `proxy`: the one the owner named with `--proxy`, or
+/// none. A proxy named in the environment (`http_proxy`, `https_proxy`,
+/// `all_proxy`, in either case) is never used: the client would take one
+/// from there by default, and whoever sets such a variable for a shell
+/// would learn, unasked, that this computer fetches a Pixel factory image.
+fn agent(https_only: bool, proxy: Option<ureq::Proxy>) -> ureq::Agent {
     ureq::Agent::config_builder()
+        // Said even when it is None: that is what switches the
+        // environment's proxy off
+        .proxy(proxy)
         // The core is shown every redirect and every status, and decides
         .max_redirects(0)
         .max_redirects_will_error(false)
@@ -518,8 +542,17 @@ fn agent(https_only: bool) -> ureq::Agent {
 }
 
 impl Fetcher {
-    fn google() -> Self {
-        Fetcher::Google(agent(true))
+    fn google(proxy: Option<ureq::Proxy>) -> Self {
+        Fetcher::Google(agent(true, proxy))
+    }
+
+    /// How long a body may stay silent before the try is ended.
+    fn body_idle(&self) -> Duration {
+        match self {
+            Fetcher::Google(_) => BODY_IDLE,
+            #[cfg(feature = "fake-phone")]
+            _ => STAND_IN_BODY_IDLE,
+        }
     }
 
     /// One GET, as the core asked for it. Redirects are not followed here.
@@ -550,6 +583,18 @@ impl Fetcher {
     }
 }
 
+/// `--proxy`'s value: an HTTP proxy the download goes through, as
+/// `http://HOST:PORT` (with `USER:PASSWORD@` before the host if it asks for
+/// one). The value is never printed back.
+fn parse_proxy(value: Option<&str>) -> Res<ureq::Proxy> {
+    let bad = "--proxy takes an address like http://HOST:PORT";
+    let value = value.ok_or(bad)?;
+    match value.strip_prefix("http://") {
+        Some(rest) if !rest.is_empty() => Ok(ureq::Proxy::new(value).map_err(|_| bad)?),
+        _ => Err(bad.into()),
+    }
+}
+
 /// The user's cache directory, for what a download leaves between runs.
 fn default_work_dir() -> Option<PathBuf> {
     let var = |name: &str| {
@@ -561,6 +606,55 @@ fn default_work_dir() -> Option<PathBuf> {
         .or_else(|| var("LOCALAPPDATA"))
         .or_else(|| var("HOME").map(|home| home.join(".cache")))
         .map(|dir| dir.join("omamobile-installer"))
+}
+
+/// What became of a wait for the next piece of a body.
+enum Piece {
+    Bytes(Vec<u8>),
+    /// The body is over.
+    End,
+    /// Nothing arrived in time.
+    Silent,
+    Broke(String),
+}
+
+/// A response's body, read on a thread of its own, so that the wait for
+/// each piece can be given up: a server that stops sending without closing
+/// the connection would otherwise hold a blocking read, and the tool, for
+/// good. After a silence the thread is left behind, blocked on a connection
+/// nobody listens to; it touches no file and ends with the connection or
+/// the tool.
+struct Pieces(std::sync::mpsc::Receiver<io::Result<Vec<u8>>>);
+
+impl Pieces {
+    fn of(mut body: impl Read + Send + 'static) -> Self {
+        // A couple of pieces ahead at most: the reader waits for the file
+        let (pieces, taken) = std::sync::mpsc::sync_channel(2);
+        std::thread::spawn(move || loop {
+            let mut buf = vec![0u8; 64 << 10];
+            let piece = body.read(&mut buf).map(|n| {
+                buf.truncate(n);
+                buf
+            });
+            let over = !matches!(&piece, Ok(bytes) if !bytes.is_empty());
+            if pieces.send(piece).is_err() || over {
+                break;
+            }
+        });
+        Pieces(taken)
+    }
+
+    /// The next piece, waiting at most `idle` for it.
+    fn next(&self, idle: Duration) -> Piece {
+        use std::sync::mpsc::RecvTimeoutError;
+        match self.0.recv_timeout(idle) {
+            Ok(Ok(bytes)) if bytes.is_empty() => Piece::End,
+            Ok(Ok(bytes)) => Piece::Bytes(bytes),
+            Ok(Err(e)) => Piece::Broke(e.to_string()),
+            Err(RecvTimeoutError::Timeout) => Piece::Silent,
+            Err(RecvTimeoutError::Disconnected) => Piece::End,
+        }
+    }
 }
 
 /// Carry out what one try at the download asks: the kept bytes first, then
@@ -623,17 +717,26 @@ fn fetch(
             FetchNext::Body { at } => {
                 file.set_len(at).map_err(storage)?;
                 file.seek(SeekFrom::Start(at)).map_err(storage)?;
-                let mut body = response.into_body().into_reader();
+                let idle = fetcher.body_idle();
+                let body = Pieces::of(response.into_body().into_reader());
                 let mut shown = None;
                 loop {
-                    let n = body
-                        .read(&mut buf)
-                        .map_err(|e| FetchFailure::Network(e.to_string()))?;
+                    let piece = match body.next(idle) {
+                        Piece::Bytes(piece) => piece,
+                        Piece::End => break,
+                        // What arrived so far is in the file, for the next try
+                        Piece::Silent => {
+                            return Err(FetchFailure::Stalled {
+                                seconds: idle.as_secs(),
+                            })
+                        }
+                        Piece::Broke(why) => return Err(FetchFailure::Network(why)),
+                    };
                     // The core takes no byte past the file's size
-                    if n == 0 || !download.body(&buf[..n]) {
+                    if !download.body(&piece) {
                         break;
                     }
-                    file.write_all(&buf[..n]).map_err(storage)?;
+                    file.write_all(&piece).map_err(storage)?;
                     let (done, total) = download.progress();
                     let tenth = done * 10 / total.max(1);
                     if shown != Some(tenth) {
@@ -652,6 +755,7 @@ fn fetch(
 fn download_factory_zip(
     flow: &mut Flow,
     fetcher: &Fetcher,
+    proxied: bool,
     work_dir: Option<&Path>,
     name: &str,
 ) -> Res<()> {
@@ -668,7 +772,15 @@ fn download_factory_zip(
     let path = if whole.is_file() { &whole } else { &part };
     let have = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut download = flow.factory_download(have)?;
-    println!("    downloading {name} into {}", dir.display());
+    println!(
+        "    downloading {name} into {}{}",
+        dir.display(),
+        if proxied {
+            ", through the proxy named with --proxy"
+        } else {
+            ""
+        }
+    );
     let failure = fetch(&mut download, fetcher, path).err();
     match flow.factory_download_done(download, failure)? {
         DownloadEnd::Verified => {
@@ -733,6 +845,8 @@ struct FactoryImage {
     /// Where a download is kept (`--work-dir`).
     work_dir: Option<PathBuf>,
     fetcher: Fetcher,
+    /// The owner named a proxy for the download (`--proxy`).
+    proxied: bool,
 }
 
 /// Drive the core's flow to its end. `connect` finds the phone and opens
@@ -801,6 +915,7 @@ fn run_flow<T: Transport>(
                 download_factory_zip(
                     &mut flow,
                     &factory.fetcher,
+                    factory.proxied,
                     factory.work_dir.as_deref(),
                     name.ok_or("the flow names no file to download")?,
                 )?;
@@ -851,6 +966,7 @@ fn cmd_fake(
     options: FlowOptions,
     mut factory: FactoryImage,
     fake_google: Option<&str>,
+    proxy: Option<ureq::Proxy>,
 ) -> Res<bool> {
     use fake::{FakePhone, SERIAL};
     // A pretend run never reaches Google: a stand-in on this computer
@@ -863,7 +979,7 @@ fn cmd_fake(
             if !at.ip().is_loopback() {
                 return Err("--fake-google takes an address on this computer only".into());
             }
-            Fetcher::StandIn(agent(false), at)
+            Fetcher::StandIn(agent(false, proxy), at)
         }
         None => Fetcher::Nowhere,
     };
@@ -902,11 +1018,18 @@ fn cmd_fake(
 }
 
 #[cfg(not(feature = "fake-phone"))]
-fn cmd_fake(_: &Path, _: &str, _: FlowOptions, _: FactoryImage, _: Option<&str>) -> Res<bool> {
+fn cmd_fake(
+    _: &Path,
+    _: &str,
+    _: FlowOptions,
+    _: FactoryImage,
+    _: Option<&str>,
+    _: Option<ureq::Proxy>,
+) -> Res<bool> {
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT]";
 
 fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
     // Decode a small .zst repeatedly: the same loop as the browser self-test
@@ -943,11 +1066,7 @@ fn run() -> Res<bool> {
         [command @ ("install" | "flow"), dir, rest @ ..] => {
             let (mut serial, mut fake, mut dry_run) = (None, None, false);
             let (mut options, mut fake_google) = (FlowOptions::default(), None);
-            let mut factory = FactoryImage {
-                own_file: None,
-                work_dir: None,
-                fetcher: Fetcher::google(),
-            };
+            let (mut own_file, mut work_dir, mut proxy) = (None, None, None);
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 match *arg {
@@ -956,12 +1075,20 @@ fn run() -> Res<bool> {
                     "--dry-run" => dry_run = true,
                     "--reinstall" => options.reinstall = true,
                     SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
-                    "--factory-zip" => factory.own_file = it.next().map(PathBuf::from),
-                    "--work-dir" => factory.work_dir = it.next().map(PathBuf::from),
+                    "--factory-zip" => own_file = it.next().map(PathBuf::from),
+                    "--work-dir" => work_dir = it.next().map(PathBuf::from),
+                    // The one way a proxy is used: named here, by the owner
+                    "--proxy" => proxy = Some(parse_proxy(it.next().copied())?),
                     "--fake-google" => fake_google = it.next().copied(),
                     other => return Err(format!("unknown argument {other}").into()),
                 }
             }
+            let factory = FactoryImage {
+                own_file,
+                work_dir,
+                proxied: proxy.is_some(),
+                fetcher: Fetcher::google(proxy.clone()),
+            };
             let dir = Path::new(dir);
             // `flow` is always a dry run on a pretend phone. `install` is
             // one only when told so, and the override is for nothing else:
@@ -971,7 +1098,7 @@ fn run() -> Res<bool> {
             }
             return match (*command, serial, fake) {
                 ("flow", None, Some(scenario)) => {
-                    cmd_fake(dir, scenario, options, factory, fake_google)
+                    cmd_fake(dir, scenario, options, factory, fake_google, proxy)
                 }
                 ("flow", ..) => {
                     Err("flow runs against a pretend phone only: --fake-phone STATE".into())

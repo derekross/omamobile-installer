@@ -1,0 +1,167 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# What a build that ships must not hold: a way to write to a phone, and the
+# pretend phone with the test key it trusts.
+#
+#   tools/check-shipping            the sources. Builds nothing, runs nothing
+#   tools/check-shipping --built [--control FAKE_PHONE_TOOL]
+#                                   also what was built: target/release/omamobile-install
+#                                   (cargo build --release --locked, no features) and web/dist
+#                                   (web/build.sh, no argument)
+#
+# Neither mode runs the command-line tool or opens a USB device. The built
+# tool is read as bytes. The page's module is loaded in node, which has no
+# USB, and asked whether it can write.
+#
+# --control names a tool built with the `fake-phone` feature (the tests
+# leave one at target/debug/omamobile-install): the strings looked for in
+# the shipping tool must be found in that one, or the look proves nothing.
+#
+# This is the state of the main branch: both front ends end at a dry run.
+# When a front end is given a write path, by the maintainer's decision, the
+# checks here for that front end are changed with it, on purpose and in the
+# same pull request; they are not to be loosened to let something through.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+export LC_ALL=C
+control=
+built=0
+while (( $# )); do
+  case $1 in
+    --built) built=1 ;;
+    --control) control=${2:?--control takes a file}; shift ;;
+    *) echo "usage: tools/check-shipping [--built [--control FAKE_PHONE_TOOL]]" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+fail=0
+ok() { printf 'ok - %s\n' "$1"; }
+bad() { printf 'not ok - %s\n' "$1"; shift; (( $# )) && printf '%s\n' "$@"; fail=1; }
+# none WHAT PCRE FILE...: no line of the files matches
+none() {
+  local what=$1 pattern=$2 found; shift 2
+  found=$(grep -nHP -- "$pattern" "$@" /dev/null || true)
+  if [[ -n $found ]]; then bad "$what" "$found"; else ok "$what"; fi
+}
+# once WHAT FIXED FILE: exactly one line of the file holds the string
+once() {
+  local n; n=$(grep -cF -- "$2" "$3" || true)
+  if [[ $n == 1 ]]; then ok "$1"; else bad "$1" "$3 holds '$2' $n times, not once"; fi
+}
+
+# ---- The sources ----------------------------------------------------------
+
+# The one switch that makes the page's older, direct session write
+feature='enable-''writes'
+none "nothing builds the web page with its write switch" "$feature" \
+  web/build.sh web/selftest.sh web/serve.py .cargo/config.toml .github/workflows/*.yml
+none "the write switch is not a default feature" "^default *=.*$feature" web/Cargo.toml cli/Cargo.toml core/Cargo.toml usb/Cargo.toml
+once "the page's direct session is a dry run unless built with that switch" \
+  "dry_run: !cfg!(feature = \"$feature\")," web/src/lib.rs
+
+# The command-line tool: its only session is the one the core's flow opens,
+# and that one is a dry run by a literal in the core
+none "the command-line tool opens no session of its own and names no session options" \
+  'Session::connect|connect_pinned|PhoneOptions|dry_run *: *false' cli/src/*.rs
+once "the flow's session is opened as a dry run" "dry_run: true," core/src/flow.rs
+none "the flow opens no writing session" 'dry_run *: *false' core/src/flow.rs
+
+# The page: a writing session only in its self-test function, which exists
+# only in a self-test build and is typed to the pretend phone
+writers=$(awk '
+  /^(pub )?(async )?fn [a-z_]+/ { at = $0 }
+  /dry_run *: *false/ { print FILENAME ":" FNR ": in: " at }
+' web/src/lib.rs)
+if [[ $(printf '%s\n' "$writers" | grep -c .) == 1 && $writers == *"pub async fn selftest()"* ]]; then
+  ok "the page's module opens a writing session only in its self-test, against the pretend phone"
+else
+  bad "the page's module opens a writing session outside its self-test" "$writers"
+fi
+selftest_gate=$(grep -B2 -n '^pub async fn selftest()' web/src/lib.rs | grep -c '#\[cfg(feature = "selftest")\]' || true)
+[[ $selftest_gate == 1 ]] && ok "that self-test is built only with the selftest feature" ||
+  bad "the page's self-test function is not behind the selftest feature"
+none "the page's script calls nothing of the direct session" \
+  'core\.connect\(|\.flash_boot\(|\.userdata_(start|feed|end)\(|\.finish\(|new core\.Install\b' web/static/*.js
+
+# The pretend phone: compiled in only behind its feature, in each front end
+for pair in "cli/src/main.rs|fake-phone" "web/src/lib.rs|selftest"; do
+  file=${pair%%|*} feature_name=${pair#*|}
+  gated=$(grep -B2 -n '^mod fake;' "$file" | grep -c "#\[cfg(feature = \"$feature_name\")\]" || true)
+  mods=$(grep -c '^mod fake;' "$file" || true)
+  if [[ $mods == 1 && $gated == 1 ]]; then ok "$file builds the pretend phone only with the $feature_name feature"
+  else bad "$file builds the pretend phone without its feature ($mods mod fake, $gated behind $feature_name)"; fi
+done
+none "no feature that brings the pretend phone or the test key is a default" \
+  '^default *=.*(fake-phone|selftest)' cli/Cargo.toml web/Cargo.toml
+
+# ---- What was built -------------------------------------------------------
+
+if (( built )); then
+  # What only a build with the pretend phone holds: its serial numbers, its
+  # bootloader version, the test key's file, and the line it starts with
+  marks=("FAKESERIAL0001" "ANOTHERPHONE0002" "fake-1.0" "test-key.gpg" "A pretend phone (")
+  holds() { grep -qaF -- "$2" "$1"; }
+
+  tool=target/release/omamobile-install
+  if [[ ! -f $tool ]]; then
+    bad "there is no $tool to read (cargo build --release --locked)"
+  else
+    found=()
+    for mark in "${marks[@]}"; do if holds "$tool" "$mark"; then found+=("$mark"); fi; done
+    if (( ${#found[@]} )); then bad "the shipping tool holds the pretend phone" "${found[@]}"
+    else ok "the shipping tool holds nothing of the pretend phone or the test key"; fi
+    # The refusals a shipping tool answers with are in it
+    for says in "this build has no pretend phone" "this version installs only with --dry-run"; do
+      if holds "$tool" "$says"; then ok "the shipping tool holds the refusal '$says'"
+      else bad "the shipping tool does not hold the refusal '$says'"; fi
+    done
+  fi
+  if [[ -n $control ]]; then
+    missing=()
+    [[ -f $control ]] || missing=("no such file")
+    for mark in "${marks[@]}"; do if [[ -f $control ]] && ! holds "$control" "$mark"; then missing+=("$mark"); fi; done
+    if (( ${#missing[@]} )); then bad "the control, $control, is not a tool with the pretend phone, so the look above proves nothing" "${missing[@]}"
+    else ok "the control, a tool built with the pretend phone, holds every one of those strings"; fi
+  fi
+
+  pkg=web/dist/pkg
+  glue=$pkg/omamobile_installer_web.js
+  wasm=$pkg/omamobile_installer_web_bg.wasm
+  if [[ ! -f $glue || ! -f $wasm || ! -f web/dist/index.html ]]; then
+    bad "there is no shipping page in web/dist to read (web/build.sh)"
+  else
+    found=()
+    for mark in "${marks[@]}"; do if holds "$wasm" "$mark"; then found+=("$mark"); fi; done
+    if (( ${#found[@]} )); then bad "the shipping page's module holds the pretend phone" "${found[@]}"
+    else ok "the shipping page's module holds nothing of the pretend phone or the test key"; fi
+    none "the shipping page's glue has no pretend phone, no self-test and no override" \
+      'fake_phone|selftest|slot_override|maintainer' "$glue"
+    if grep -qF 'cannot write to a phone' web/dist/index.html; then ok "the shipping page says it cannot write to a phone"
+    else bad "the shipping page does not say that it cannot write to a phone"; fi
+    if ! command -v node >/dev/null; then
+      bad "node is needed to load the page's module and ask whether it can write"
+    else
+      # Loaded in node, which has no USB; the module is asked, not driven
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      cp "$glue" "$scratch/glue.mjs"
+      cat >"$scratch/ask.mjs" <<'JS'
+import { readFileSync } from "node:fs";
+const glue = await import("./glue.mjs");
+glue.initSync({ module: readFileSync(process.argv[2]) });
+const names = Object.keys(glue).sort();
+const extra = names.filter((n) => /fake|selftest|pretend/i.test(n));
+const statics = Object.getOwnPropertyNames(glue.InstallFlow).filter((n) => /selftest|fake/i.test(n));
+console.log(JSON.stringify({ writes: glue.writes_enabled(), extra, statics, names }));
+JS
+      answer=$(node "$scratch/ask.mjs" "$PWD/$wasm" 2>&1) || true
+      if [[ $answer == '{"writes":false,"extra":[],"statics":[],'* ]]; then
+        ok "the shipping page's module, loaded and asked, says it cannot write, and exports no pretend phone and no self-test"
+      else
+        bad "the shipping page's module, loaded and asked, did not say that it cannot write and has no pretend phone" "$answer"
+      fi
+    fi
+  fi
+fi
+exit "$fail"

@@ -30,6 +30,14 @@
 //! - **The SHA-256 is over the whole file,** from its first byte, also when
 //!   the download went on from bytes kept earlier: those are fed in first and
 //!   hashed like the rest.
+//! - **Bytes kept on disk are deleted only when they can't be part of the
+//!   right file:** there are more of them than the file has, the file is
+//!   complete and its SHA-256 is another, or more bytes arrived after them
+//!   than the file has. An answer that only *announces* another size (a
+//!   `Content-Length`, a `Content-Range` total) ends the try before a byte
+//!   of its body is read and still stops the install, but it says nothing
+//!   about what an earlier try kept, so that stays for the next run, where
+//!   it is hashed from its first byte like any kept bytes.
 use crate::build_index::is_download_url;
 use crate::hash::StreamHasher;
 use crate::{Error, Result};
@@ -102,6 +110,11 @@ pub enum FetchFailure {
     NoAnswer,
     /// The connection could not be made, or broke.
     Network(String),
+    /// The transfer went quiet: no byte of the body arrived for this many
+    /// seconds, and the front end ended the try. A front end that fetches
+    /// must have such a limit, or a server that stops sending holds it for
+    /// good. What had arrived is kept, as after any transfer that broke off.
+    Stalled { seconds: u64 },
     /// The bytes could not be kept on this computer.
     Storage(String),
 }
