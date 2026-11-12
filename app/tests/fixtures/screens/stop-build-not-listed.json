@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "build-not-listed",
+  "retry": "after-fix",
   "title": "This phone's Android version isn't one this release knows",
   "notice": null,
   "body": [

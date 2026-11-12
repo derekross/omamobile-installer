@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "warning-declined",
+  "retry": "whenever",
   "title": "Not accepted",
   "notice": null,
   "body": [

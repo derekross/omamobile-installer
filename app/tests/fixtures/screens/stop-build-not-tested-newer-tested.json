@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "build-not-tested",
+  "retry": "after-fix",
   "title": "This phone's Android build hasn't been tested with Omarchy Mobile",
   "notice": null,
   "body": [

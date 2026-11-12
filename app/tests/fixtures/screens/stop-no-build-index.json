@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "no-build-index",
+  "retry": "stops-again",
   "title": "This release can't be installed with this installer",
   "notice": null,
   "body": [

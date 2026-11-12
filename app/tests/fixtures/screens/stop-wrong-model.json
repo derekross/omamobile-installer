@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "wrong-model",
+  "retry": "after-fix",
   "title": "This is another phone model",
   "notice": null,
   "body": [

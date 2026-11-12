@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "locked-at-dry-run",
+  "retry": "after-fix",
   "title": "The phone's bootloader is locked",
   "notice": null,
   "body": [

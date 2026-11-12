@@ -72,7 +72,7 @@ QString Backend::findTool(const QString &appDirectory) {
 }
 
 QString Backend::checkScreen(const QJsonObject &screen) {
-    static const char *const keys[] = {"state", "stop", "title", "notice", "body", "quote", "steps",
+    static const char *const keys[] = {"state", "stop", "retry", "title", "notice", "body", "quote", "steps",
                                        "link", "file", "problem", "plan", "footer", "action"};
     for (const char *key : keys)
         if (!screen.contains(QLatin1String(key)))
@@ -80,7 +80,7 @@ QString Backend::checkScreen(const QJsonObject &screen) {
     for (const char *key : {"state", "title", "action"})
         if (!isText(screen.value(QLatin1String(key))))
             return QStringLiteral("\"%1\" is not text").arg(QLatin1String(key));
-    for (const char *key : {"stop", "notice", "link", "problem"})
+    for (const char *key : {"stop", "retry", "notice", "link", "problem"})
         if (!isTextOrNull(screen.value(QLatin1String(key))))
             return QStringLiteral("\"%1\" is neither text nor null").arg(QLatin1String(key));
     for (const char *key : {"body", "plan", "footer"})

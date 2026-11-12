@@ -1,6 +1,7 @@
 {
   "state": "stopped",
   "stop": "build-changed",
+  "retry": "after-fix",
   "title": "The phone's firmware changed",
   "notice": null,
   "body": [

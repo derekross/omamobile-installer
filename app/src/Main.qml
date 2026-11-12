@@ -79,6 +79,10 @@ ApplicationWindow {
         case "accept-terms": return qsTr("I will download it myself")
         case "download": return backend.pending === "download" ? qsTr("Cancel") : qsTr("Choose a file I saved…")
         }
+        // Offered where the core says a new run can get past the stop, and
+        // nowhere else: the app does not read the stop's sentences.
+        if (backend.canStartAgain)
+            return qsTr("Start again")
         return backend.hasScreen && !knownAction ? qsTr("Close") : ""
     }
     readonly property string progressLabel: {
@@ -115,6 +119,8 @@ ApplicationWindow {
             backend.cancelDownload()
         else if (action === "download")
             backend.pickFile()
+        else if (backend.canStartAgain)
+            backend.restart()
     }
 
     // Closing asks first while a step is running: a download or a look at
