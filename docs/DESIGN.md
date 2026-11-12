@@ -33,6 +33,7 @@ Made by the maintainer on 2026-11-12:
 
 8. **One `flashing` command is allowed, and it only reads: `flashing get_unlock_ability`.** A locked phone that passes every stop is asked whether it would take the unlock command, and the unlock step says what it answered: "OEM unlocking" is already switched on, or it still has to be switched on in Developer options. A phone that doesn't answer, or answers something else than a plain yes or no, gets the steps for both cases, as before, and the install goes on. Nothing else of the `flashing` or `oem` families is sent, and decision 3 stands: the installer never sends the unlock command (§3, "The unlock question").
 9. **The maintainer can let a dry run go on past a phone that reports one bootloader slot's version.** The override is for the maintainer's own first dry runs on such a phone (the Pixel 7 Pro). It is hidden, it works in a dry run only, it passes that one stop and no other, and every screen from then on says that the check was skipped and that the run is not evidence that an install would be allowed. Decision 5 stands for everyone else, and for every install (§6, "The maintainer's override").
+10. **A build that is listed, not tested, with no newer build tested, is "not tested yet".** The owner is told that nothing they can install today changes that, and what they can do: wait, or ask in the issue tracker. They are not told to update Android. It still stops: decision 2 does not change. When a newer build was tested, "update Android to that build" stays (§4).
 
 ## 3. The states
 
@@ -83,7 +84,7 @@ Each is a `StopKind` with a short id (`Screen.stop`), a title and a message.
 | `bootloader-slots-differ` | Both reported, and different | stops again |
 | `baseband-unknown` | No `version-baseband` | stops again |
 | `build-not-listed` | No build has both the phone's versions | after an Android update |
-| `build-not-tested` | The build is listed, not marked tested | after an update, if a newer build was tested; else stops again |
+| `build-not-tested` | The build is listed, not marked tested | after an Android update, if a newer build was tested; else stops again ("not tested yet") |
 | `locked-at-dry-run` | The bootloader is locked again at the dry run | after unlocking |
 | `build-changed` | Other versions at the dry run than the factory image was chosen for | at any time |
 | `dry-run-refused` | A check only the session makes (a partition's size, `max-download-size`), or the link was lost | stops again; after reconnecting |
@@ -97,7 +98,7 @@ The M1 reviews of the shell installer found stops that reassured wrongly: "Nothi
 - **The closing lines are derived, never fixed.** `Stop::footer()` is built from two facts: `PhoneFact` (no phone was asked; a phone was only asked what it is; the same after the unlock steps were shown, with "if you unlocked its bootloader, that erased the phone"; two phones, each only asked) and `Retry` (at any time; once the message's fix is done; stops here again).
 - **A stop that a retry can't pass says so,** and its message says what has to change or who to ask. The slot stop hands out no way around it.
 - **Advice comes with where it leads.** "Update Android" is followed by: Android then runs from slot B, and the installer will stop for that.
-- **No advice that can't work.** An untested build with no newer tested build in the index is not told to update Android.
+- **No advice that can't work.** An untested build with no newer tested build in the index is "not tested yet" (decision 10, 2026-11-12): the stop's title says so, and its message says that nothing the owner can install today changes that, that an Android update does not help, and what they can do, which is to wait until the build has been tested or ask in the issue tracker. It is not told to update Android, and it still stops. "Newer" is the index's own order, newest first: a tested build listed before the phone's. When there is one, the stop names it and says to update Android to it, with where that leads.
 - **When this flow gains writes, `PhoneFact` gains their cases** (a write began and did not finish; written), and every stop then says which. That is the type to extend, not the text.
 
 ## 5. The build index

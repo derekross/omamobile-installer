@@ -1102,8 +1102,8 @@ fn a_phone_whose_pair_is_not_listed_or_not_tested_stops() {
     look(&mut flow, &phone).unwrap();
     assert_eq!(stop(&flow).id(), "build-not-listed");
 
-    // Listed, not tested, and nothing newer was tested: updating can't help,
-    // and the stop doesn't say it can
+    // Listed, not tested, and nothing newer was tested: "not tested yet".
+    // Updating Android can't help, and the stop doesn't tell the owner to
     let phone = self::phone("untested-build");
     let mut flow = flow_at(&bundle, &phone, "phone");
     look(&mut flow, &phone).unwrap();
@@ -1116,11 +1116,75 @@ fn a_phone_whose_pair_is_not_listed_or_not_tested_stops() {
         }
     );
     assert_eq!(s.retry, Retry::StopsAgain);
+    assert_eq!(
+        s.title,
+        "This phone's Android build has not been tested with Omarchy Mobile yet"
+    );
     let text = s.message.join(" ");
-    assert!(text.contains("updating Android does not help"));
-    assert!(!text.contains("System update"));
+    assert!(text
+        .contains("build TEST.260301.001. That build has not been tested with Omarchy Mobile yet"));
+    assert!(text.contains("Nothing you can install today changes that"));
+    assert!(text.contains("an Android update does not help"));
+    // What the owner can do: wait, or the issue tracker
+    assert!(text.contains("What you can do is wait"));
+    assert!(text.contains("https://github.com/derekross/omarchy-mobile/issues"));
+    // No advice to update, in any of the words the other stops use for it
+    for advice in [
+        "System update",
+        "install it",
+        "If Android offers",
+        "Update Android",
+        "update Android",
+        "start the installer again",
+    ] {
+        assert!(!text.contains(advice), "{advice}: {text}");
+    }
+    assert!(s.footer().join(" ").contains("will stop here again"));
     footer_is_honest(&s);
     only_getvar(&phone);
+    // It still stops: no later step is open, and no build was chosen
+    assert!(flow.factory_zip(&bundle.factory_zip_name, 1).is_err());
+    assert!(flow.factory_zip_verified().is_none());
+    // The same when the untested build is the only one in the list
+    let alone = TestBundle::with_index(|i| {
+        i["builds"].as_array_mut().unwrap().truncate(1);
+    });
+    let phone = self::phone("untested-build");
+    let mut flow = flow_at(&alone, &phone, "phone");
+    look(&mut flow, &phone).unwrap();
+    let s = stop(&flow).clone();
+    assert_eq!((s.id(), s.retry), ("build-not-tested", Retry::StopsAgain));
+    assert!(s.title.ends_with("not been tested with Omarchy Mobile yet"));
+    assert!(!s.message.join(" ").contains("System update"));
+    // And when the only tested builds are older than the phone's
+    let phone = self::phone("ready");
+    phone.edit(|s| {
+        for (k, v) in [
+            ("version-bootloader", "fake-1.1"),
+            ("version-bootloader-a", "fake-1.1"),
+            ("version-bootloader-b", "fake-1.1"),
+            ("version-baseband", "fake-radio-1.1"),
+        ] {
+            s.vars.insert(k.into(), v.into());
+        }
+    });
+    let older_tested = TestBundle::with_index(|i| {
+        let b = &mut i["builds"][1];
+        b["tested"] = json!(false);
+        b.as_object_mut().unwrap().remove("tested_with");
+    });
+    let mut flow = flow_at(&older_tested, &phone, "phone");
+    look(&mut flow, &phone).unwrap();
+    let s = stop(&flow).clone();
+    assert_eq!(
+        s.kind,
+        StopKind::BuildNotTested {
+            build: "TEST.260201.001".into(),
+            newer_tested: None
+        }
+    );
+    assert!(s.title.ends_with("not been tested with Omarchy Mobile yet"));
+    assert!(!s.message.join(" ").contains("System update"));
 
     // Listed, not tested, and a newer build was: that one is named
     let phone = self::phone("untested-old-build");
@@ -1135,8 +1199,19 @@ fn a_phone_whose_pair_is_not_listed_or_not_tested_stops() {
         }
     );
     assert_eq!(s.retry, Retry::AfterFix);
+    assert_eq!(
+        s.title,
+        "This phone's Android build hasn't been tested with Omarchy Mobile"
+    );
+    assert!(s.message.join(" ").contains(
+        "a newer build that was tested: TEST.260101.001. If Android offers an update to it, install it"
+    ));
     assert!(s.message.join(" ").contains("System update"));
     assert!(s.message.join(" ").contains("Android runs from slot B"));
+    assert!(!s
+        .message
+        .join(" ")
+        .contains("Nothing you can install today"));
     footer_is_honest(&s);
 
     // A phone that tells no baseband can't be looked up

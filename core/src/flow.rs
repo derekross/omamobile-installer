@@ -1016,29 +1016,38 @@ impl Flow {
                 );
                 return Judged::Stopped;
             }
-            Err(Some((build, newer))) => {
-                let mut message = vec![format!(
-                    "This phone's bootloader and baseband match Google's build {build}, but no Omarchy Mobile release has been tested with that build's firmware, so the installer does not use it."
-                )];
-                match &newer {
-                    Some(newer) => {
-                        message.push(format!("The list has a newer build that was tested: {newer}. If Android offers an update to it, install it (Settings > System > System update) and start the installer again."));
-                        message.push(after_update.into());
-                    }
-                    None => message.push(format!("No newer build in the list was tested either, so updating Android does not help. Build {build} has to be tested first: ask at {ISSUES}")),
-                }
+            // A newer build was tested: an Android update leads somewhere
+            Err(Some((build, Some(newer)))) => {
                 self.stop(
                     StopKind::BuildNotTested {
-                        build,
-                        newer_tested: newer.clone(),
+                        build: build.clone(),
+                        newer_tested: Some(newer.clone()),
                     },
-                    if newer.is_some() {
-                        Retry::AfterFix
-                    } else {
-                        Retry::StopsAgain
-                    },
+                    Retry::AfterFix,
                     "This phone's Android build hasn't been tested with Omarchy Mobile",
-                    message,
+                    vec![
+                        format!("This phone's bootloader and baseband match Google's build {build}, but no Omarchy Mobile release has been tested with that build's firmware, so the installer does not use it."),
+                        format!("The list has a newer build that was tested: {newer}. If Android offers an update to it, install it (Settings > System > System update) and start the installer again."),
+                        after_update.into(),
+                    ],
+                );
+                return Judged::Stopped;
+            }
+            // Nothing newer was tested: the owner is told to wait, never to
+            // update Android, which could not help
+            Err(Some((build, None))) => {
+                self.stop(
+                    StopKind::BuildNotTested {
+                        build: build.clone(),
+                        newer_tested: None,
+                    },
+                    Retry::StopsAgain,
+                    "This phone's Android build has not been tested with Omarchy Mobile yet",
+                    vec![
+                        format!("This phone's bootloader and baseband match Google's build {build}. That build has not been tested with Omarchy Mobile yet, and the installer uses a build only after a release was tested with it."),
+                        "Nothing you can install today changes that. No newer build in the release's list was tested either, so an Android update does not help.".into(),
+                        format!("What you can do is wait: once build {build} has been tested, a later release of Omarchy Mobile lists it as tested, and the installer then goes on with this phone as it is. To ask about it, or to see whether someone already has, use the project's issue tracker: {ISSUES}"),
+                    ],
                 );
                 return Judged::Stopped;
             }

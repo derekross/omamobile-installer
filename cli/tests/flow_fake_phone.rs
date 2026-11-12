@@ -252,8 +252,13 @@ fn each_stop_ends_the_tool_with_the_cores_words() {
         ),
         (
             "untested-build",
-            "This phone's Android build hasn't been tested with Omarchy Mobile",
+            "This phone's Android build has not been tested with Omarchy Mobile yet",
             "will stop here again",
+        ),
+        (
+            "untested-old-build",
+            "This phone's Android build hasn't been tested with Omarchy Mobile",
+            "once that is done",
         ),
     ] {
         let (code, out, err) = flow(scenario, &[], "yes\n");
@@ -266,6 +271,16 @@ fn each_stop_ends_the_tool_with_the_cores_words() {
         );
         assert!(out.contains(ONLY_GETVAR), "{scenario}: {out}");
     }
+    // Not tested, and nothing newer that is: told to wait, not to update
+    let (_, out, _) = flow("untested-build", &[], "yes\n");
+    let out = flat(&out);
+    assert!(out.contains("Nothing you can install today changes that."));
+    assert!(out.contains("What you can do is wait"));
+    assert!(out.contains("https://github.com/derekross/omarchy-mobile/issues"));
+    assert!(!out.contains("System update") && !out.contains("install it"));
+    // Not tested, and a newer build is: updating Android to it is the advice
+    let (_, out, _) = flow("untested-old-build", &[], "yes\n");
+    assert!(flat(&out).contains("If Android offers an update to it, install it"));
     // slot B is where a reinstall lives
     let zip = factory_zip();
     let typed = format!("yes\n{ANSWERS}");

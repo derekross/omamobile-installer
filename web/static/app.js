@@ -409,6 +409,18 @@ async function selftest() {
   await click("accept");
   await click("look");
   check("the slot stop hands out no way around and says a retry stops again", text().includes("will stop here again") && !text().includes("--") && !text().includes("override") && !notice() && sent().not_reads.length === 0);
+  await begin("untested-old-build");
+  await click("accept");
+  await click("look");
+  check("not tested, and a newer build is: update Android to it", text().includes("If Android offers an update to it, install it") && text().includes("once that is done"), text());
+  await begin("untested-build");
+  await click("accept");
+  await click("look");
+  check(
+    "not tested, and nothing newer is: told to wait, not to update Android",
+    $("screen").querySelector("h2").textContent.endsWith("has not been tested with Omarchy Mobile yet") && text().includes("Nothing you can install today changes that") && text().includes("What you can do is wait") && text().includes("/issues") && !text().includes("System update") && text().includes("will stop here again"),
+    text(),
+  );
 
   // 4b. The maintainer's override for the bootloader-slot stop: the page has
   // no control for it, and when it is set the core's notice is on every screen
