@@ -435,6 +435,106 @@ fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
     assert!(!out.contains("4812") && !out.contains("FAKESERIAL"));
 }
 
+/// A copy of the test release in a directory of this test's own, so that a
+/// test can change one of its files.
+fn release_copy(name: &str) -> PathBuf {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("flow-fake-phone-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    copy(&fixture(), &dir);
+    dir
+}
+
+/// The dry run checks every file of the release, and the owner confirms
+/// what it found. If a file is another one by the time the writes begin,
+/// the tool must find that out before it writes anything: not after slot
+/// B's boot partitions are already written, which is where the root image
+/// used to be hashed, and not from a second opening of the file's name.
+#[test]
+fn a_release_file_that_changed_after_the_confirmation_is_found_before_the_first_write() {
+    use std::io::Read;
+    let zip = factory_zip();
+    // The root image, and the last of the boot images
+    for (n, victim) in ["root.img.zst", "images/dtbo.img"].iter().enumerate() {
+        let dir = release_copy(&format!("changed-{n}"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_omamobile-install"))
+            .args(["flow", dir.to_str().unwrap(), "--fake-phone", "ready"])
+            .args(["--write", "--factory-zip", zip.to_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        // Everything up to the confirmation: the dry run reads the files
+        // as the release signed them, and passes
+        stdin.write_all(typed_install("").as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !String::from_utf8_lossy(&out).contains("Codename: ") {
+            let n = stdout.read(&mut buf).unwrap();
+            assert!(
+                n > 0,
+                "the tool ended before the confirmation:\n{}",
+                String::from_utf8_lossy(&out)
+            );
+            out.extend_from_slice(&buf[..n]);
+        }
+        // While the tool waits for the codename, one bit of the file
+        // changes in place: the same name, the same size
+        let path = dir.join(victim);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        stdin.write_all(b"cheetah\n").unwrap();
+        drop(stdin);
+        stdout.read_to_end(&mut out).unwrap();
+        let code = child.wait().unwrap().code().unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        assert_ne!(code, 0, "{victim}:\n{out}");
+        let shown = titles(&out);
+        assert_eq!(
+            shown[shown.len() - 3..],
+            [
+                "This is what the installer will write",
+                "Writing to the phone",
+                "The install stopped before anything was written"
+            ],
+            "{victim}:\n{out}"
+        );
+        assert!(
+            flat(&out).contains("doesn't match the signed manifest"),
+            "{victim}:\n{out}"
+        );
+        // Not one command that changes a phone, or stages a change, left
+        assert!(out.contains(ONLY_GETVAR), "{victim}:\n{out}");
+        let after = &out[out.find("Codename: ").unwrap()..];
+        assert!(
+            !after
+                .lines()
+                .map(str::trim)
+                .any(|l| l.starts_with("flash:") || l.starts_with("download:")),
+            "{victim}:\n{out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 const SLOTS_MATCH: &str = "--bootloader-slots-match";
 const ON_YOUR_WORD: &str = "!! This phone tells the version of only one of its two bootloader copies. The installer has not read the other copy's version and cannot: it goes on because this run was started with the statement that someone read it from the phone and that it is the same version. If that is not so, the phone may not start from slot B.";
 

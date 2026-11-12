@@ -111,7 +111,13 @@ impl UserdataStream {
 }
 
 /// Stream a compressed root image from a reader to `userdata`. The reader
-/// must give the bytes `proof` was made from (the verified, cached download).
+/// must give the bytes `proof` was made from (the verified, cached download),
+/// and that is checked, not trusted: every byte read here goes to the
+/// session's hash as well as to the splitter
+/// ([`Session::userdata_streamed`]), and the session refuses to finish
+/// `userdata`, so never makes slot B active, unless what was streamed is
+/// the image the signed manifest lists. `proof` is what lets the first
+/// write happen at all; the second hash is what binds the stream to it.
 /// `segment_cap` bounds memory below the phone's `max-download-size`.
 pub async fn flash_userdata_from_reader<T: Transport>(
     session: &mut Session<T>,
@@ -147,6 +153,8 @@ pub async fn flash_userdata_with_progress<T: Transport>(
         if n == 0 {
             break;
         }
+        // The same bytes to the hash and to the splitter
+        session.userdata_streamed(&buf[..n]);
         stream.feed(&buf[..n])?;
         if !begun {
             if let Some(len) = stream.image_len() {

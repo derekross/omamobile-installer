@@ -12,6 +12,7 @@ use omamobile_installer_core::flow::{
     Flow, FlowOptions, PhoneFact, Step, Stop, StopKind, NO_INSTALL_YET, NO_USABLE_PHONE_YET,
     SLOTS_ON_THE_OWNERS_WORD,
 };
+use omamobile_installer_core::install::flash_userdata_from_reader;
 use omamobile_installer_core::Error;
 use pollster::block_on;
 use serde_json::json;
@@ -1358,6 +1359,116 @@ fn a_phone_that_refuses_a_write_stops_the_install_and_says_how_far_it_got() {
 }
 
 // ---- Rule 9: what the owner is shown before the confirmation --------------
+
+/// The root image is hashed before the first write and then read again to
+/// be sent. If what is read the second time is not what was hashed (the
+/// file changed on disk, or another file is behind the name), the session
+/// finds out from its own hash of what it was sent, and slot B is never
+/// made active for it.
+#[test]
+fn a_root_image_that_is_not_the_one_that_was_checked_never_makes_slot_b_active() {
+    let bundle = TestBundle::new();
+    // The proof, from the release's own bytes
+    let proof = |release: &omamobile_installer_core::bundle::VerifiedRelease| {
+        let mut check = release.root_image_check();
+        check.update(&bundle.root_zst);
+        check.finish().unwrap()
+    };
+    // What is streamed afterwards: a well-formed image of the same size,
+    // one bit away, which no check of sizes or of the sparse format can tell
+    let mut other_raw = bundle.root_raw.clone();
+    other_raw[200 * 4096 + 17] ^= 1;
+    let other_zst = support::bundle::zstd_store(&other_raw, true);
+    assert_eq!(other_zst.len(), bundle.root_zst.len());
+
+    let phone = ready();
+    let mut flow = flow_at(&bundle, &phone, "write");
+    let release = flow.release().unwrap().clone();
+    let root = proof(&release);
+    let mut session = block_on(flow.begin_write(phone.clone())).unwrap().unwrap();
+    let err = block_on(async {
+        for write in &release.manifest().boot_writes {
+            let image = release
+                .verify_boot_image(write, bundle.image(&write.image))
+                .unwrap();
+            session.flash_boot(&image).await.unwrap();
+        }
+        flash_userdata_from_reader(&mut session, &root, &other_zst[..], None).await
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::Checksum(why) if why.contains("is not the one that was checked before the first write") && why.contains("slot B is not made active")),
+        "{err}"
+    );
+    // The session is over: slot B can't be made active through it
+    assert!(matches!(
+        block_on(session.activate_and_reboot()),
+        Err(Error::Refused(_))
+    ));
+    assert!(!session.is_done());
+    assert!(!phone
+        .log()
+        .iter()
+        .any(|c| c.starts_with("set_active") || c == "reboot"));
+    assert_eq!(phone.0.borrow().active_slot, "a");
+    assert!(!phone.0.borrow().rebooted);
+    only_our_commands(&phone);
+    // The stop does not say that userdata holds the release: it says that
+    // userdata was begun and the install did not run through
+    assert!(matches!(session.reach(), WriteReach::Userdata { .. }));
+    flow.write_failed(session, &err).unwrap();
+    let stop = stop(&flow);
+    assert_eq!(stop.id(), "write-interrupted");
+    assert!(stop.message[0].contains("is not the one that was checked"));
+    let footer = stop.footer().join(" ");
+    assert!(footer.contains("userdata"), "{footer}");
+    assert!(!footer.contains("Every image was written"), "{footer}");
+
+    // The same through a session used without the helper: pieces of the
+    // right image, but the session was never shown the bytes they were cut
+    // from. It can't vouch for them, and refuses to finish userdata
+    let phone = ready();
+    let mut flow = flow_at(&bundle, &phone, "write");
+    let release = flow.release().unwrap().clone();
+    let root = proof(&release);
+    let mut session = block_on(flow.begin_write(phone.clone())).unwrap().unwrap();
+    let err = block_on(async {
+        for write in &release.manifest().boot_writes {
+            let image = release
+                .verify_boot_image(write, bundle.image(&write.image))
+                .unwrap();
+            session.flash_boot(&image).await.unwrap();
+        }
+        let mut stream =
+            omamobile_installer_core::install::UserdataStream::new(session.max_download_size());
+        stream.feed(&bundle.root_zst).unwrap();
+        session
+            .begin_userdata(&root, stream.image_len().unwrap())
+            .await
+            .unwrap();
+        while let Some(piece) = stream.next_segment().unwrap() {
+            session.flash_userdata_segment(&piece).await.unwrap();
+        }
+        stream.end().unwrap();
+        while let Some(piece) = stream.next_segment().unwrap() {
+            session.flash_userdata_segment(&piece).await.unwrap();
+        }
+        session.finish_userdata().await
+    })
+    .unwrap_err();
+    assert!(matches!(err, Error::Checksum(_)), "{err}");
+    assert!(matches!(
+        block_on(session.activate_and_reboot()),
+        Err(Error::Refused(_))
+    ));
+    assert_eq!(phone.0.borrow().active_slot, "a");
+
+    // The control: the right bytes, the same way, run through
+    let phone = ready();
+    let flow = run(&bundle, &phone, writing());
+    assert!(matches!(flow.step(), Step::Installed(_)));
+    holds_the_release(&bundle, &phone);
+}
 
 #[test]
 fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {

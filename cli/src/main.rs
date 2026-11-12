@@ -169,12 +169,15 @@ fn find_root(dir: &Path, name: &str) -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
+/// Hash the root image from an open file, from where it stands (its
+/// start). The caller keeps the handle and streams from it afterwards, so
+/// that what is hashed and what is sent are one file, not two openings of
+/// a name.
 fn hash_root(
     release: &VerifiedRelease,
-    path: &Path,
+    file: &mut File,
 ) -> Res<omamobile_installer_core::bundle::VerifiedRootImage> {
     let mut check = release.root_image_check();
-    let mut file = File::open(path)?;
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = file.read(&mut buf)?;
@@ -195,7 +198,7 @@ fn cmd_verify(dir: &Path) -> Res<()> {
     );
     match find_root(dir, &m.root_image.name) {
         Some(path) => {
-            hash_root(&release, &path)?;
+            hash_root(&release, &mut File::open(&path)?)?;
             println!("root image matches the signed manifest");
         }
         None => println!(
@@ -556,6 +559,24 @@ async fn walk_images<T: Transport>(
         return Ok(false);
     }
     let io = |e: io::Error| Error::Transport(format!("reading the release's files: {e}"));
+    // Every file is checked before the first write, the root image among
+    // them: a file that is not the release's is found while the phone is
+    // still as it was, not after slot B's boot partitions are written.
+    for w in &m.boot_writes {
+        let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
+        release.verify_boot_image(w, &bytes)?;
+    }
+    // The root image is opened once. It is hashed from this handle, and
+    // the same handle is rewound and streamed, so the file that is sent is
+    // the file that was checked even if the name is given to another file
+    // meanwhile. A file whose bytes change in place between the two is
+    // caught by the session, which hashes what it is sent again and
+    // refuses to make slot B active for anything else.
+    let mut root_file = File::open(&root_path).map_err(io)?;
+    let root = hash_root(release, &mut root_file).map_err(|e| Error::Checksum(e.to_string()))?;
+    root_file.seek(SeekFrom::Start(0)).map_err(io)?;
+    // Each boot image is read and checked again as it is written: the
+    // bytes that are sent are the bytes that were just checked
     for w in &m.boot_writes {
         let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
         let result = session
@@ -566,8 +587,7 @@ async fn walk_images<T: Transport>(
         }
         result?;
     }
-    let root = hash_root(release, &root_path).map_err(|e| Error::Checksum(e.to_string()))?;
-    let reader = File::open(&root_path).map_err(io)?;
+    let reader = &mut root_file;
     if writing {
         // The core has no clock: this one times each flash of userdata
         let begun = std::time::Instant::now();

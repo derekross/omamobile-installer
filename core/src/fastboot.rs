@@ -46,7 +46,7 @@
 //!
 //! A session that stops partway says how far it got ([`Session::reach`]),
 //! from what the phone confirmed: the flow's stop is worded from that.
-use crate::bundle::{VerifiedImage, VerifiedRelease, VerifiedRootImage};
+use crate::bundle::{RootImageCheck, VerifiedImage, VerifiedRelease, VerifiedRootImage};
 use crate::flow::WriteToken;
 use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
@@ -572,6 +572,10 @@ pub struct Session<T: Transport> {
     /// the first write ([`Self::preflight_userdata`]).
     userdata_preflight: Option<u64>,
     userdata_walk: Option<UserdataWalk>,
+    /// The hash of the compressed root image as it was streamed to this
+    /// session ([`Self::userdata_streamed`]): `finish_userdata` compares it
+    /// with the signed manifest's before slot B can be made active.
+    streamed: Option<RootImageCheck>,
     /// Each sparse image of the root image this session took, in order.
     pieces: Vec<PieceReport>,
     /// The front end's clock, for how long each `flash:userdata` took. The
@@ -774,6 +778,7 @@ impl<T: Transport> Session<T> {
             boot_partition_sizes,
             userdata_preflight: None,
             userdata_walk: None,
+            streamed: None,
             pieces: Vec::new(),
             clock: None,
             reach: WriteReach::Nothing,
@@ -1104,9 +1109,39 @@ impl<T: Transport> Session<T> {
         }
     }
 
+    /// The compressed root image, as it is read: every byte that is cut
+    /// into the pieces this session is handed, in order, from the first.
+    /// The session hashes them, and [`Self::finish_userdata`] refuses
+    /// unless they were the image the signed manifest lists. So the bytes
+    /// that were sent are the bytes that were verified, whatever the proof
+    /// given to [`Self::begin_userdata`] was made from: a file that changed
+    /// between the two readings ends the install before slot B is made
+    /// active. [`crate::install::flash_userdata_with_progress`] feeds this
+    /// and the splitter from the same buffer.
+    pub fn userdata_streamed(&mut self, compressed: &[u8]) {
+        if matches!(self.state, State::Boot(_) | State::Userdata { .. }) {
+            let release = &self.release;
+            self.streamed
+                .get_or_insert_with(|| release.root_image_check())
+                .update(compressed);
+        }
+    }
+
+    /// Every piece was taken. The bytes that were streamed must be the
+    /// signed root image ([`Self::userdata_streamed`]); if they are not,
+    /// the session fails here and slot B is never made active.
     pub async fn finish_userdata(&mut self) -> Result<()> {
         match self.state {
             State::Userdata { segments, .. } if segments > 0 => {
+                let streamed = self
+                    .streamed
+                    .take()
+                    .unwrap_or_else(|| self.release.root_image_check());
+                if let Err(e) = streamed.finish() {
+                    return self.fail(Error::Checksum(format!(
+                        "the root image that was sent to the phone is not the one that was checked before the first write ({e}): slot B is not made active"
+                    )));
+                }
                 self.state = State::UserdataDone;
                 if !self.is_dry_run() {
                     self.reach = WriteReach::Written;
