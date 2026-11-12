@@ -314,14 +314,234 @@ fn the_warning_must_be_accepted_and_the_input_ending_stops() {
     assert!(err.contains("no answer"));
 }
 
+/// The whole flow of a run that writes, typed: the warning, the answers,
+/// then what is typed at the confirmation.
+fn typed_install(at_the_confirmation: &str) -> String {
+    format!("yes\n{ANSWERS}{at_the_confirmation}")
+}
+
+/// The commands the pretend phone says it received that were not questions.
+fn others(out: &str) -> Vec<&str> {
+    out.lines()
+        .skip_while(|l| !l.starts_with("Those others, in the order it received them"))
+        .skip(1)
+        .map(str::trim)
+        .collect()
+}
+
 #[test]
-fn install_is_a_dry_run_or_nothing_and_the_test_key_is_for_the_pretend_phone() {
+fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
+    let zip = factory_zip();
+    let extra = ["--write", "--factory-zip", zip.to_str().unwrap()];
+    let (code, out, err) = flow("ready", &extra, &typed_install("cheetah\n"));
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        titles(&out),
+        [
+            "Read this once",
+            "Connect the Pixel 7 Pro",
+            "Google's factory image",
+            "About you and the phone",
+            "The dry run",
+            "This is what the installer will write",
+            "Writing to the phone",
+            "Omarchy Mobile is written, and the phone is restarting"
+        ]
+    );
+    // Before the confirmation: each partition with its sizes, what is
+    // erased, what is not touched, and that the answers don't reach the phone
+    let asked = out.find("Codename: ").unwrap();
+    let before = flat(&out[..asked]);
+    for line in [
+        "boot_b: images/boot.img, 16384 bytes (the partition holds 16384 bytes)",
+        "init_boot_b: images/init_boot.img, 8192 bytes (the partition holds 8192 bytes)",
+        "vendor_boot_b: images/vendor_boot.img, 4096 bytes (the partition holds 16384 bytes)",
+        "vendor_kernel_boot_b: images/vendor_kernel_boot.img, 12288 bytes (the partition holds 32768 bytes)",
+        "dtbo_b: images/dtbo.img, 4096 bytes (the partition holds 8192 bytes)",
+        "userdata: omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst, 2097152 bytes unpacked, sent in 6 pieces (the partition holds 8388608 bytes). ERASES userdata",
+        "then: make slot B the active slot (set_active:b)",
+        "then: restart the phone (reboot)",
+        "userdata will be ERASED: everything Android stored on the phone is lost",
+        "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.",
+        "cannot put your answers on the phone",
+        "To go ahead, type the phone's codename: cheetah",
+    ] {
+        assert!(before.contains(line), "not said before the confirmation: {line}\n{out}");
+    }
+    // Nothing was sent that changes a phone before the codename was typed
+    assert!(!out[..asked].contains("flash:") && !out[..asked].contains("download:"));
+    // What the phone received, all of it and in order: slot B's boot
+    // images, userdata in pieces, slot B made active, the restart
+    let sent = others(&out);
+    assert_eq!(
+        sent[..10],
+        [
+            "download:00004000",
+            "flash:boot_b",
+            "download:00002000",
+            "flash:init_boot_b",
+            "download:00001000",
+            "flash:vendor_boot_b",
+            "download:00003000",
+            "flash:vendor_kernel_boot_b",
+            "download:00001000",
+            "flash:dtbo_b"
+        ]
+    );
+    assert_eq!(sent.len(), 10 + 2 * 6 + 2, "{sent:?}");
+    for pair in sent[10..22].chunks(2) {
+        assert!(pair[0].starts_with("download:"));
+        assert_eq!(pair[1], "flash:userdata");
+    }
+    assert_eq!(sent[22..], ["set_active:b", "reboot"]);
+    assert!(out.contains("(partitions written: boot_b, dtbo_b, init_boot_b, userdata, vendor_boot_b, vendor_kernel_boot_b)"));
+    // After the last write: what the owner is told
+    let after = flat(&out[out.find("==> Omarchy Mobile is written").unwrap()..]);
+    assert!(after.contains("It now starts Omarchy Mobile from slot B."));
+    assert!(after.contains("no user account"));
+    assert!(!out.contains("4812") && !out.contains("FAKESERIAL"));
+}
+
+#[test]
+fn without_the_codename_or_without_write_nothing_is_written() {
+    let zip = factory_zip();
+    let zip = zip.to_str().unwrap();
+    // Anything but the codename at the confirmation stops the install
+    for wrong in ["yes\n", "\n", "Cheetah\n", "cheetah \n", "panther\n"] {
+        let (code, out, err) = flow(
+            "ready",
+            &["--write", "--factory-zip", zip],
+            &typed_install(wrong),
+        );
+        assert_eq!(code, 2, "{wrong:?}: {out}\n{err}");
+        assert_eq!(*titles(&out).last().unwrap(), "Not confirmed");
+        assert!(flat(&out).contains("Nothing was written."));
+        assert!(out.contains(ONLY_GETVAR), "{wrong:?}: {out}");
+    }
+    // The input ends at the confirmation: no answer is not a yes
+    let (code, out, err) = flow(
+        "ready",
+        &["--write", "--factory-zip", zip],
+        &typed_install(""),
+    );
+    assert_eq!(code, 1, "{out}");
+    assert!(err.contains("no answer"));
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+    // Without --write the same typing ends at the dry run: the codename is
+    // never asked for, and typing it changes nothing
+    let (code, out, err) = flow(
+        "ready",
+        &["--factory-zip", zip],
+        &typed_install("cheetah\n"),
+    );
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "The dry run passed. Nothing was written"
+    );
+    assert!(!out.contains("Codename"));
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+    // A phone the flow stops for is not written with --write either
+    for scenario in [
+        "slot-b",
+        "one-slot",
+        "slots-differ",
+        "untested-build",
+        "other-model",
+    ] {
+        let (code, out, _) = flow(
+            scenario,
+            &["--write", "--factory-zip", zip],
+            &typed_install("cheetah\n"),
+        );
+        assert_eq!(code, 2, "{scenario}: {out}");
+        assert!(out.contains(ONLY_GETVAR), "{scenario}: {out}");
+        assert!(!out.contains("This is what the installer will write"));
+    }
+    // The maintainer's override and --write: stopped before the warning,
+    // with nothing asked of the phone
+    let (code, out, _) = flow(
+        "one-slot",
+        &["--write", SLOT_OVERRIDE, "--factory-zip", zip],
+        &typed_install("cheetah\n"),
+    );
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(
+        titles(&out),
+        ["The bootloader-slot check can't be skipped in an install"]
+    );
+    assert!(out.contains("received 0 commands"), "{out}");
+}
+
+#[test]
+fn help_says_what_write_erases_and_install_has_no_default() {
+    let (code, out, _) = run(&["help"], "");
+    assert_eq!(code, 0);
+    let help = flat(&out);
+    for said in [
+        "install DIR --serial S --write",
+        "slot B's boot partitions (the release's boot images, each to its partition with the _b suffix) and userdata",
+        "userdata is ERASED: everything Android stored on the phone is lost",
+        "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written.",
+        "waits for you to type the phone's codename; nothing is written before that",
+        "starts with no user account",
+        "install needs --dry-run or --write, one of them: there is no default.",
+    ] {
+        assert!(help.contains(said), "help does not say: {said}\n{out}");
+    }
+    // The maintainer's override is in no usage or help text
+    assert!(!out.contains("maintainer") && !out.contains("skip"));
+}
+
+#[test]
+fn install_needs_dry_run_or_write_and_the_test_key_is_for_the_pretend_phone() {
     let dir = fixture();
     let dir = dir.to_str().unwrap();
-    // Refused from the arguments alone: no USB device is listed or opened
+    // Each of these is refused from the arguments alone: no USB device is
+    // listed or opened. (`install --serial S --write` is never run here: it
+    // would look for a phone.)
     let (code, _, err) = run(&["install", dir, "--serial", "<SERIAL>"], "");
     assert_eq!(code, 1);
-    assert!(err.contains("only with --dry-run"), "{err}");
+    assert!(
+        err.contains("install needs --dry-run or --write, and has no default"),
+        "{err}"
+    );
+    assert!(err.contains("--write erases the phone's userdata and writes slot B"));
+    let (code, _, err) = run(&["install", dir, "--write"], "");
+    assert_eq!(code, 1);
+    assert!(err.contains("--serial SERIAL is required"));
+    let (code, _, err) = run(
+        &[
+            "install",
+            dir,
+            "--serial",
+            "<SERIAL>",
+            "--write",
+            "--dry-run",
+        ],
+        "",
+    );
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("--dry-run and --write are two different runs"),
+        "{err}"
+    );
+    let (code, _, err) = run(
+        &[
+            "install",
+            dir,
+            "--serial",
+            "<SERIAL>",
+            "--write",
+            SLOT_OVERRIDE,
+        ],
+        "",
+    );
+    assert_eq!(code, 1);
+    assert!(err.contains("can be skipped in a dry run only"), "{err}");
+    let (code, _, err) = run(&["install", dir, "--fake-phone", "ready", "--write"], "");
+    assert_eq!(code, 1);
+    assert!(err.contains("install is for a real phone"));
     let (code, _, err) = run(&["install", dir, "--dry-run"], "");
     assert_eq!(code, 1);
     assert!(err.contains("--serial SERIAL is required"));

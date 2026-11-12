@@ -37,6 +37,13 @@ pub struct FakeState {
     pub take_at_most: Option<usize>,
     /// After this many commands, report another serial number.
     pub swap_serial_after: Option<usize>,
+    /// The cable is pulled once this many commands have been received: the
+    /// next one never arrives, and nothing is answered until [`FakePhone::replug`].
+    pub unplug_at: Option<usize>,
+    /// The cable is pulled while the phone works on command number N (from
+    /// 0): the phone carries it out, and its answer never arrives.
+    pub lose_answer_at: Option<usize>,
+    unplugged: bool,
     // Protocol state
     staged: Option<Vec<u8>>,
     expecting: usize,
@@ -101,6 +108,9 @@ impl FakePhone {
             short_data: false,
             take_at_most: None,
             swap_serial_after: None,
+            unplug_at: None,
+            lose_answer_at: None,
+            unplugged: false,
             staged: None,
             expecting: 0,
             incoming: Vec::new(),
@@ -187,6 +197,30 @@ impl FakePhone {
         "untested-build",
         "untested-old-build",
     ];
+
+    /// The owner plugs the cable back in, with the phone still in Fastboot
+    /// Mode: what was downloaded and not flashed is gone, as is any answer
+    /// that was on its way.
+    pub fn replug(&self) -> &Self {
+        self.edit(|s| {
+            s.unplug_at = None;
+            s.lose_answer_at = None;
+            s.unplugged = false;
+            s.staged = None;
+            s.expecting = 0;
+            s.incoming.clear();
+            s.replies.clear();
+        })
+    }
+
+    /// The commands received that change a phone: everything but `getvar:`,
+    /// `download:` (held in memory until a flash) and the unlock question.
+    pub fn changes(&self) -> Vec<String> {
+        self.not_reads()
+            .into_iter()
+            .filter(|c| !c.starts_with("download:"))
+            .collect()
+    }
 
     pub fn partition(&self, name: &str) -> Vec<u8> {
         self.0.borrow().partitions[name].clone()
@@ -352,7 +386,9 @@ impl FakeState {
                 Err(why) => self.reply("FAIL", &why),
             }
         } else if let Some(slot) = cmd.strip_prefix("set_active:") {
+            // A bootloader reports the active slot as the current one
             self.active_slot = slot.to_string();
+            self.vars.insert("current-slot".into(), slot.to_string());
             self.reply("OKAY", "");
         } else if cmd == "reboot" {
             self.rebooted = true;
@@ -372,7 +408,11 @@ impl FakeState {
 impl Transport for FakePhone {
     async fn send(&mut self, data: &[u8]) -> Result<usize> {
         let mut s = self.0.borrow_mut();
-        if s.rebooted {
+        if s.rebooted || s.unplugged {
+            return Err(Error::Transport("the phone left the bus".into()));
+        }
+        if s.expecting == 0 && s.unplug_at.is_some_and(|n| s.log.len() >= n) {
+            s.unplugged = true;
             return Err(Error::Transport("the phone left the bus".into()));
         }
         if s.expecting > 0 {
@@ -388,17 +428,25 @@ impl Transport for FakePhone {
             }
             return Ok(take);
         }
+        let lose_answer = s.lose_answer_at == Some(s.log.len());
         match core::str::from_utf8(data) {
             Ok(cmd) if data.len() <= 64 => s.command(cmd),
             _ => s.reply("FAIL", "not a command"),
+        }
+        if lose_answer {
+            s.unplugged = true;
+            s.expecting = 0;
+            s.replies.clear();
         }
         Ok(data.len())
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
-        self.0
-            .borrow_mut()
-            .replies
+        let mut s = self.0.borrow_mut();
+        if s.unplugged {
+            return Err(Error::Transport("the phone left the bus".into()));
+        }
+        s.replies
             .pop_front()
             .ok_or_else(|| Error::Transport("timed out waiting for the phone".into()))
     }

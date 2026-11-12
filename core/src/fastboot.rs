@@ -16,17 +16,28 @@
 //!   -> activate_and_reboot
 //! ```
 //!
+//! That is the order of Omarchy Mobile's `tools/install-phone`: slot B's
+//! boot images in the descriptor's order, `userdata`, `set_active:b` (what
+//! `fastboot --set-active=b` sends), `reboot`. Nothing else is done about
+//! the slots: no other slot is made active, and no slot is marked.
+//!
 //! What it can send: `getvar:`, `download:`, `flash:<p>` where `<p>` is a
 //! [`Partition`] of the verified release (slot B's boot images, `userdata`),
 //! `set_active:b` and `reboot`; and one question outside the session,
 //! [`unlock_ability`], which sends `flashing get_unlock_ability` and changes
 //! nothing on the phone. That list is closed, and checked again at the one
-//! place a command leaves (`allowed`): there is no code for `erase`,
-//! `format`, `oem`, any other `flashing` command (`flashing unlock` among
-//! them), another slot or a caller-chosen partition name. Bytes
-//! to write come only as [`VerifiedImage`] or under a [`VerifiedRootImage`].
-//! Before every write the phone's serial number and product are read again
-//! and must still be the ones pinned at `connect`.
+//! place a command leaves (`Client::allowed`): a `flash:` leaves only for a
+//! partition on the session's own list, which `connect` builds from the
+//! verified release (the descriptor's `BOOT_IMAGES` with `_b`, and
+//! `userdata`), and the questions outside a session have an empty list.
+//! There is no code for `erase`, `format`, `oem`, any other `flashing`
+//! command (`flashing unlock` among them), another slot or a caller-chosen
+//! partition name. Bytes to write come only as [`VerifiedImage`] or under a
+//! [`VerifiedRootImage`]. Before every write the phone's serial number and
+//! product are read again and must still be the ones pinned at `connect`.
+//!
+//! A session that stops partway says how far it got ([`Session::reach`]),
+//! from what the phone confirmed: the flow's stop is worded from that.
 use crate::bundle::{VerifiedImage, VerifiedRelease, VerifiedRootImage};
 use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
@@ -55,13 +66,50 @@ pub const GET_UNLOCK_ABILITY: &str = "flashing get_unlock_ability";
 /// `flashing` entry is the whole command, compared exactly: `flashing unlock`,
 /// `flashing lock`, `flashing unlock_critical` and every `oem` command are
 /// not on the list, and neither is anything else that isn't named here.
-fn allowed(command: &str) -> bool {
+/// `flash:` is allowed only for a partition in `flashable`, compared whole.
+fn allowed(command: &str, flashable: &[String]) -> bool {
+    if let Some(partition) = command.strip_prefix("flash:") {
+        return flashable.iter().any(|p| p == partition);
+    }
     command == GET_UNLOCK_ABILITY
         || command == "set_active:b"
         || command == "reboot"
-        || ["getvar:", "download:", "flash:"]
+        || ["getvar:", "download:"]
             .iter()
             .any(|prefix| command.starts_with(prefix))
+}
+
+/// How far a session's writes got, from what the phone confirmed. A
+/// `download:` alone changes nothing on a phone (it is held in memory until
+/// a `flash:`), so only `flash:`, `set_active:b` and `reboot` count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteReach {
+    /// No command that changes the phone was sent.
+    Nothing,
+    /// Slot B's boot images: `done` of `of` were written and confirmed.
+    /// `in_doubt`: the next one's `flash:` was sent and not confirmed, so
+    /// that partition may be partly written. `userdata` is untouched.
+    BootImages { done: u32, of: u32, in_doubt: bool },
+    /// Every boot image is written, and `userdata` was begun: `pieces`
+    /// sparse images were confirmed, and one more may be partly written.
+    Userdata { pieces: u32 },
+    /// Every image is written and confirmed. Slot B was not made active.
+    Written,
+    /// As `Written`; `set_active:b` was sent and not confirmed.
+    SlotInDoubt,
+    /// Slot B is the active slot. `reboot` was not confirmed.
+    SlotSet,
+    /// Everything, and the phone confirmed the restart.
+    Rebooted,
+}
+
+/// What a walk of the root image through a session found: the raw image's
+/// size, `userdata`'s size on the phone, and how many sparse images it took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserdataWalk {
+    pub image_len: u64,
+    pub partition_size: u64,
+    pub pieces: u32,
 }
 
 /// A USB (or fake) link to a phone in fastboot mode: one bulk OUT and one
@@ -164,10 +212,7 @@ fn unlock_ability_line(line: &str) -> Option<bool> {
 /// and the caller goes on without the answer. Because a phone that never
 /// answers could answer late, send this as the last question on a transport.
 pub async fn unlock_ability<T: Transport>(transport: &mut T) -> UnlockAbility {
-    let mut client = Client {
-        transport,
-        log: Vec::new(),
-    };
+    let mut client = Client::reading(transport);
     let mut lines = Vec::new();
     match client.command(GET_UNLOCK_ABILITY, &mut lines).await {
         Ok(Reply::Okay(text)) => lines.push(text),
@@ -184,10 +229,7 @@ pub async fn unlock_ability<T: Transport>(transport: &mut T) -> UnlockAbility {
 /// Ask a phone in fastboot mode what it is. Sends `getvar:` commands and
 /// nothing else, so it is safe on a locked phone and before any decision.
 pub async fn probe<T: Transport>(transport: &mut T) -> Result<PhoneReport> {
-    let mut client = Client {
-        transport,
-        log: Vec::new(),
-    };
+    let mut client = Client::reading(transport);
     let id = PhoneId::of_serial(&client.getvar("serialno").await?).ok_or_else(|| {
         Error::Phone("the phone tells no serial number, so an install can't be tied to it".into())
     })?;
@@ -235,6 +277,19 @@ enum Reply {
 struct Client<T> {
     transport: T,
     log: Vec<String>,
+    /// The partitions a `flash:` may name. Empty outside a [`Session`].
+    flashable: Vec<String>,
+}
+
+impl<T> Client<T> {
+    /// A client that can ask and can't flash.
+    fn reading(transport: T) -> Self {
+        Client {
+            transport,
+            log: Vec::new(),
+            flashable: Vec::new(),
+        }
+    }
 }
 
 impl<T: Transport> Client<T> {
@@ -274,7 +329,7 @@ impl<T: Transport> Client<T> {
     async fn command(&mut self, command: &str, info: &mut Vec<String>) -> Result<Reply> {
         debug_assert!(command.len() <= 64, "the original protocol's command limit");
         // The one place a command leaves: nothing off the list is sent
-        if !allowed(command) {
+        if !allowed(command, &self.flashable) {
             return Err(Error::Refused(format!(
                 "'{command}' is not a command this installer sends"
             )));
@@ -408,6 +463,13 @@ pub struct Session<T: Transport> {
     /// The bootloader-slot check was skipped by the maintainer's override.
     /// Only ever true together with `dry_run`.
     slot_check_skipped: bool,
+    /// The phone's size for each boot image's partition, in the plan's order.
+    boot_partition_sizes: Vec<u64>,
+    /// The root image's size, when it was checked against `userdata` before
+    /// the first write ([`Self::preflight_userdata`]).
+    userdata_preflight: Option<u64>,
+    userdata_walk: Option<UserdataWalk>,
+    reach: WriteReach,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -449,9 +511,19 @@ impl<T: Transport> Session<T> {
             return Err(Error::OverrideOutsideDryRun);
         }
         let m: &Manifest = release.manifest();
+        // The closed list of what this session may flash: the verified
+        // release's writes, which are the descriptor's BOOT_IMAGES with _b,
+        // and userdata. Nothing a person typed or a phone said is on it.
+        let mut flashable: Vec<String> = m
+            .boot_writes
+            .iter()
+            .map(|w| w.partition.name().to_string())
+            .collect();
+        flashable.push(m.root_image.partition.name().to_string());
         let mut client = Client {
             transport,
             log: Vec::new(),
+            flashable,
         };
         let serial = client.getvar("serialno").await?;
         if PhoneId::of_serial(&serial).as_ref() != Some(expected) {
@@ -521,6 +593,7 @@ impl<T: Transport> Session<T> {
             )));
         }
         // Each image must fit its slot B partition, a footer image exactly.
+        let mut boot_partition_sizes = Vec::with_capacity(m.boot_writes.len());
         for w in &m.boot_writes {
             let name = w.partition.name();
             let psize = parse_size(&client.getvar(&format!("partition-size:{name}")).await?)
@@ -545,6 +618,7 @@ impl<T: Transport> Session<T> {
                     w.source
                 )));
             }
+            boot_partition_sizes.push(psize);
         }
         let baseband = client
             .getvar("version-baseband")
@@ -566,7 +640,51 @@ impl<T: Transport> Session<T> {
             state: State::Boot(0),
             dry_run: options.dry_run,
             slot_check_skipped,
+            boot_partition_sizes,
+            userdata_preflight: None,
+            userdata_walk: None,
+            reach: WriteReach::Nothing,
         })
+    }
+
+    /// The phone's size for each boot image's partition, in the plan's
+    /// order, as read by the checks.
+    pub fn boot_partition_sizes(&self) -> &[u64] {
+        &self.boot_partition_sizes
+    }
+    /// What the walk of the root image found, once it was begun.
+    pub fn userdata_walk(&self) -> Option<UserdataWalk> {
+        self.userdata_walk
+    }
+    /// How far this session's writes got. In a dry run: nothing, always.
+    pub fn reach(&self) -> WriteReach {
+        self.reach
+    }
+
+    async fn userdata_size(&mut self) -> Result<u64> {
+        parse_size(&self.client.getvar("partition-size:userdata").await?)
+            .ok_or_else(|| Error::Phone("the phone reports no partition-size for userdata".into()))
+    }
+
+    /// Before the first write: the root image, `image_len` bytes unpacked
+    /// (as a dry run of the same release found), must fit `userdata`. The
+    /// boot images were checked at `connect`; with this every image is
+    /// checked against its partition before anything is written. The root
+    /// image that is then streamed must be that size.
+    pub async fn preflight_userdata(&mut self, image_len: u64) -> Result<()> {
+        if self.state != State::Boot(0) {
+            return Err(Error::Refused(
+                "userdata's size is checked before the first write".into(),
+            ));
+        }
+        let size = self.userdata_size().await?;
+        if image_len > size {
+            return Err(Error::Phone(format!(
+                "the root image is {image_len} bytes, larger than userdata ({size} bytes)"
+            )));
+        }
+        self.userdata_preflight = Some(image_len);
+        Ok(())
     }
 
     pub fn facts(&self) -> &PhoneFacts {
@@ -665,9 +783,36 @@ impl<T: Transport> Session<T> {
         }
         self.may_write()?;
         self.client.download(data).await?;
+        // From here the partition may be partly written until the phone
+        // confirms: recorded before the command leaves
+        let boots = self.release.manifest().boot_writes.len() as u32;
+        let before = self.reach;
+        self.reach = match before {
+            WriteReach::Nothing => WriteReach::BootImages {
+                done: 0,
+                of: boots,
+                in_doubt: true,
+            },
+            WriteReach::BootImages { done, of, .. } if done < of => WriteReach::BootImages {
+                done,
+                of,
+                in_doubt: true,
+            },
+            WriteReach::BootImages { .. } => WriteReach::Userdata { pieces: 0 },
+            other => other,
+        };
         self.client
             .simple(&format!("flash:{}", partition.name()))
             .await?;
+        self.reach = match self.reach {
+            WriteReach::BootImages { done, of, .. } => WriteReach::BootImages {
+                done: done + 1,
+                of,
+                in_doubt: false,
+            },
+            WriteReach::Userdata { pieces } => WriteReach::Userdata { pieces: pieces + 1 },
+            other => other,
+        };
         Ok(())
     }
 
@@ -716,15 +861,25 @@ impl<T: Transport> Session<T> {
                 "the root image was verified against another release".into(),
             ));
         }
-        let size =
-            parse_size(&self.client.getvar("partition-size:userdata").await?).ok_or_else(|| {
-                Error::Phone("the phone reports no partition-size for userdata".into())
-            })?;
+        if self
+            .userdata_preflight
+            .is_some_and(|checked| checked != image_len)
+        {
+            return Err(Error::Refused(format!(
+                "the root image is {image_len} bytes, not the size that was checked against userdata before the first write"
+            )));
+        }
+        let size = self.userdata_size().await?;
         if image_len > size {
             return Err(Error::Phone(format!(
                 "the root image is {image_len} bytes, larger than userdata ({size} bytes)"
             )));
         }
+        self.userdata_walk = Some(UserdataWalk {
+            image_len,
+            partition_size: size,
+            pieces: 0,
+        });
         self.state = State::Userdata {
             image_len,
             segments: 0,
@@ -759,6 +914,9 @@ impl<T: Transport> Session<T> {
                     image_len,
                     segments: segments + 1,
                 };
+                if let Some(walk) = self.userdata_walk.as_mut() {
+                    walk.pieces = segments + 1;
+                }
                 Ok(())
             }
             Err(e) => self.fail(e),
@@ -769,6 +927,9 @@ impl<T: Transport> Session<T> {
         match self.state {
             State::Userdata { segments, .. } if segments > 0 => {
                 self.state = State::UserdataDone;
+                if !self.dry_run {
+                    self.reach = WriteReach::Written;
+                }
                 Ok(())
             }
             _ => Err(Error::Refused("userdata has not been written".into())),
@@ -794,12 +955,19 @@ impl<T: Transport> Session<T> {
         if let Err(e) = self.may_write() {
             return self.fail(e);
         }
+        self.reach = WriteReach::SlotInDoubt;
         if let Err(e) = self.client.simple("set_active:b").await {
+            // FAIL is the phone's answer: the slot was not changed
+            if matches!(e, Error::DeviceFail { .. }) {
+                self.reach = WriteReach::Written;
+            }
             return self.fail(e);
         }
+        self.reach = WriteReach::SlotSet;
         match self.client.simple("reboot").await {
             Ok(_) => {
                 self.state = State::Rebooted;
+                self.reach = WriteReach::Rebooted;
                 Ok(())
             }
             Err(e) => self.fail(e),
@@ -832,10 +1000,21 @@ mod tests {
         }
     }
 
+    /// A session's list for the Pixel 7 Pro's descriptor.
+    const OURS: [&str; 6] = [
+        "boot_b",
+        "init_boot_b",
+        "vendor_boot_b",
+        "vendor_kernel_boot_b",
+        "dtbo_b",
+        "userdata",
+    ];
+
     fn try_command(command: &str) -> (Result<String>, Vec<String>) {
         let mut client = Client {
             transport: Recorder::default(),
             log: Vec::new(),
+            flashable: OURS.iter().map(|p| p.to_string()).collect(),
         };
         let result = block_on(client.simple(command));
         assert_eq!(client.log, client.transport.sent);
@@ -902,6 +1081,81 @@ mod tests {
             let (result, sent) = try_command(command);
             assert_eq!(result.is_ok(), ok, "{command:?}");
             assert_eq!(sent.len(), usize::from(ok), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn a_flash_leaves_only_for_a_partition_on_the_sessions_list() {
+        for ours in OURS {
+            let (result, sent) = try_command(&format!("flash:{ours}"));
+            assert!(result.is_ok(), "{ours}");
+            assert_eq!(sent, [format!("flash:{ours}")]);
+        }
+        for refused in [
+            // Slot A, and the same names without a slot
+            "boot_a",
+            "init_boot_a",
+            "vendor_boot_a",
+            "vendor_kernel_boot_a",
+            "dtbo_a",
+            "boot",
+            "init_boot",
+            "vendor_boot",
+            "vendor_kernel_boot",
+            "dtbo",
+            // What an install never touches, with and without a slot
+            "bootloader",
+            "bootloader_a",
+            "bootloader_b",
+            "radio",
+            "radio_a",
+            "radio_b",
+            "vbmeta",
+            "vbmeta_a",
+            "vbmeta_b",
+            "vbmeta_system_b",
+            "vbmeta_vendor_b",
+            "devinfo",
+            "persist",
+            "efs",
+            "efs_backup",
+            "modem",
+            "modem_a",
+            "modem_b",
+            "modem_userdata",
+            "misc",
+            "super",
+            "abl_b",
+            "bl1_b",
+            "bl2_b",
+            "bl31_b",
+            "pbl_b",
+            // Made up, and near misses of our own names
+            "omamobile_made_up",
+            "made_up_b",
+            "userdata_b",
+            "userdata_a",
+            "boot_b ",
+            " boot_b",
+            "boot_b\0",
+            "boot_b:raw",
+            "BOOT_B",
+            "boot_b,boot_a",
+            "",
+        ] {
+            let (result, sent) = try_command(&format!("flash:{refused}"));
+            assert!(
+                matches!(&result, Err(Error::Refused(why)) if why.contains("not a command this installer sends")),
+                "{refused:?}: {result:?}"
+            );
+            assert!(sent.is_empty(), "flash:{refused:?} reached the transport");
+        }
+        // A client that only asks (the look at the phone, the unlock
+        // question) has no list: it can flash nothing at all
+        for ours in OURS {
+            let mut client = Client::reading(Recorder::default());
+            assert!(block_on(client.simple(&format!("flash:{ours}"))).is_err());
+            assert!(client.transport.sent.is_empty());
         }
     }
 

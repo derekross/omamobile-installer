@@ -116,15 +116,28 @@ impl UserdataStream {
 pub async fn flash_userdata_from_reader<T: Transport>(
     session: &mut Session<T>,
     proof: &VerifiedRootImage,
+    reader: impl Read,
+    segment_cap: Option<u64>,
+) -> Result<u64> {
+    flash_userdata_with_progress(session, proof, reader, segment_cap, &mut |_| {}).await
+}
+
+/// As [`flash_userdata_from_reader`]; `progress` is called after each sparse
+/// image the session took, with how many it has taken so far, so a front end
+/// can show that a long write is moving.
+pub async fn flash_userdata_with_progress<T: Transport>(
+    session: &mut Session<T>,
+    proof: &VerifiedRootImage,
     mut reader: impl Read,
     segment_cap: Option<u64>,
+    progress: &mut dyn FnMut(u32),
 ) -> Result<u64> {
     let limit = segment_cap.map_or(session.max_download_size(), |c| {
         c.min(session.max_download_size())
     });
     let mut stream = UserdataStream::new(limit);
     let mut buf = vec![0u8; 256 << 10];
-    let mut begun = false;
+    let (mut begun, mut pieces) = (false, 0u32);
     loop {
         let n = reader
             .read(&mut buf)
@@ -141,11 +154,15 @@ pub async fn flash_userdata_from_reader<T: Transport>(
         }
         while let Some(segment) = stream.next_segment()? {
             session.flash_userdata_segment(&segment).await?;
+            pieces += 1;
+            progress(pieces);
         }
     }
     let len = stream.end()?;
     while let Some(segment) = stream.next_segment()? {
         session.flash_userdata_segment(&segment).await?;
+        pieces += 1;
+        progress(pieces);
     }
     session.finish_userdata().await?;
     Ok(len)

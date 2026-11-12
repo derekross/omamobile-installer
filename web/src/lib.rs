@@ -6,9 +6,11 @@
 //! the core's API into JavaScript classes; it holds no rule of its own.
 //!
 //! The page drives [`InstallFlow`], the core's one install flow: it renders
-//! the screen the flow gives it and hands in what the person did. The flow
-//! ends at the dry run, so nothing the page does through it can write to a
-//! phone.
+//! the screen the flow gives it and hands in what the person did. The page
+//! begins every flow as a dry run: it never sets `FlowOptions::write`, and
+//! this file calls none of the flow's write steps, so the flow ends at the
+//! dry run and nothing the page does through it can write to a phone. CI
+//! checks both in this file's source.
 //!
 //! The browser's part is what only a browser can do: the device chooser
 //! (`navigator.usb.requestDevice`, which needs a click), fetching files and
@@ -271,6 +273,8 @@ impl InstallFlow {
                 // here: the page as it ships has no way to set it
                 FlowOptions {
                     reinstall,
+                    // Never: the page is a preview, and its flow a dry run
+                    write: false,
                     ..Default::default()
                 },
             ),
@@ -743,6 +747,7 @@ impl InstallFlow {
                 FlowOptions {
                     reinstall,
                     maintainer_skip_bootloader_slot_check: slot_override,
+                    write: false,
                     ..Default::default()
                 },
             ),
