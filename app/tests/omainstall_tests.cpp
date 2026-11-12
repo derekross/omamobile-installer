@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 // The app against a stand-in for the installer's tool (tests/stand-in-tool),
-// which replays screens recorded from the core's flow (tests/fixtures/screens).
-// No Rust build, no phone, no USB, no network, and no window on the desktop:
-// bin/test runs this offscreen.
+// which replays screens recorded from the core's flow (tests/fixtures/screens),
+// and, at the end of this file, against the real tool: `omamobile-install
+// json` built with its pretend phone, which bin/test builds and names in
+// OMAINSTALL_REAL_TOOL (without it those tests are skipped, and say so).
+// No phone, no USB, nothing from the internet, and no window on the
+// desktop: bin/test runs this offscreen.
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -15,6 +18,8 @@
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSignalSpy>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <functional>
@@ -38,6 +43,135 @@ public:
     int opened = 0;
     QString lastTitle;
 };
+
+// ---- The real tool, with its pretend phone --------------------------------
+
+// The test bundle the tool's own tests use, and its stand-in factory image.
+const QString Release = QDir(Tests + "/../../fixtures/selftest").absolutePath();
+const QString ZipName = QStringLiteral("cheetah-test.260101.001-factory-31c2322a.zip");
+const QString Zip = Release + "/factory/" + ZipName;
+
+// `omamobile-install json`, the real one, as the app starts it: through a
+// small script that adds what only a test may add, the pretend phones (and
+// the stand-in for Google's server). The app itself passes `json` and the
+// release, and nothing else. No USB device is opened: a tool built with the
+// pretend phone and started with --fake-phone has no way to one.
+struct RealTool {
+    explicit RealTool(const QString &phones, const QString &google = {}) {
+        const QString tool = qEnvironmentVariable("OMAINSTALL_REAL_TOOL");
+        QFile script(directory.filePath("omamobile-install"));
+        if (tool.isEmpty() || !script.open(QIODevice::WriteOnly))
+            return;
+        QString line = QStringLiteral("exec '%1' \"$@\" --fake-phone '%2' --work-dir '%3'").arg(tool, phones, directory.filePath("work"));
+        if (!google.isEmpty())
+            line += QStringLiteral(" --fake-google '%1'").arg(google);
+        // The tool's standard error holds the pretend phones' record.
+        script.write(("#!/bin/sh\n" + line + " 2>>'" + directory.filePath("stderr") + "'\n").toUtf8());
+        script.close();
+        script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        qputenv("OMAINSTALL_TOOL", script.fileName().toUtf8());
+        ok = true;
+    }
+    static bool built() { return !qEnvironmentVariableIsEmpty("OMAINSTALL_REAL_TOOL"); }
+    // What is wrong with what the pretend phones received, or nothing: read
+    // from the tool's own record once it has left. Reads only: `getvar`
+    // and, for a locked phone, the one question. No flash, no erase, no
+    // set_active, no reboot, and no partition changed.
+    QString nothingButReads(int *commands = nullptr) const {
+        QFile file(directory.filePath("stderr"));
+        if (!file.open(QIODevice::ReadOnly))
+            return "the tool left no record";
+        int runs = 0, received = 0;
+        const QStringList lines = QString::fromUtf8(file.readAll()).split('\n');
+        for (const QString &line : lines) {
+            const qsizetype arrow = line.indexOf(" <- ");
+            if (line.startsWith("pretend phone ") && arrow > 0) {
+                const QString command = line.mid(arrow + 4);
+                ++received;
+                if (!command.startsWith("getvar:") && command != "flashing get_unlock_ability")
+                    return "a pretend phone received: " + command;
+            } else if (line.startsWith("pretend phone ") && line.contains("received ")) {
+                ++runs;
+                if (!line.endsWith(" 0 others; partitions written: 0"))
+                    return line;
+            }
+        }
+        if (commands)
+            *commands = received;
+        return runs > 0 ? QString() : "the tool's record has no count";
+    }
+
+    QTemporaryDir directory;
+    bool ok = false;
+};
+
+// A stand-in for Google's server, for the real tool's downloads: a socket on
+// 127.0.0.1 in this process. Nothing here reaches Google.
+class Google : public QObject {
+public:
+    // The file; its first 20000 bytes and then nothing more; or a file of
+    // the right size with one byte changed.
+    enum Mode { Whole, Stalls, Wrong };
+    explicit Google(Mode mode) : m_mode(mode) {
+        QFile file(Zip);
+        if (file.open(QIODevice::ReadOnly))
+            m_file = file.readAll();
+        if (mode == Wrong && !m_file.isEmpty())
+            m_file[m_file.size() / 2] = char(m_file.at(m_file.size() / 2) ^ 1);
+        connect(&m_server, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket *socket = m_server.nextPendingConnection()) {
+                connect(socket, &QTcpSocket::readyRead, this, [this, socket] { answer(socket); });
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+            }
+        });
+        m_server.listen(QHostAddress::LocalHost);
+    }
+    QString address() const { return "127.0.0.1:" + QString::number(m_server.serverPort()); }
+    qsizetype size() const { return m_file.size(); }
+    // From the next request on, the whole file (or the rest that is asked for).
+    void goOn() { m_mode = Whole; }
+    int asked = 0;
+    QStringList paths;
+
+private:
+    void answer(QTcpSocket *socket) {
+        const QByteArray head = socket->property("head").toByteArray() + socket->readAll();
+        socket->setProperty("head", head);
+        if (!head.contains("\r\n\r\n") || socket->property("answered").toBool())
+            return;
+        socket->setProperty("answered", true);
+        ++asked;
+        paths << QString::fromLatin1(head.split(' ').value(1));
+        static const QRegularExpression rest("\r\nrange: bytes=(\\d+)-\r\n", QRegularExpression::CaseInsensitiveOption);
+        const QRegularExpressionMatch range = rest.match(QString::fromLatin1(head));
+        const qsizetype from = range.hasMatch() ? range.captured(1).toLongLong() : 0;
+        const auto n = [](qsizetype number) { return QByteArray::number(number); };
+        QByteArray reply = range.hasMatch()
+                               ? "HTTP/1.1 206 Stand-in\r\nContent-Range: bytes " + n(from) + "-" + n(m_file.size() - 1) + "/" + n(m_file.size()) + "\r\n"
+                               : QByteArray("HTTP/1.1 200 Stand-in\r\n");
+        reply += "Connection: close\r\nContent-Length: " + n(m_file.size() - from) + "\r\n\r\n";
+        socket->write(reply);
+        if (m_mode == Stalls) {
+            socket->write(m_file.mid(from, 20000));
+            socket->flush();
+            return;
+        }
+        socket->write(m_file.mid(from));
+        socket->disconnectFromHost();
+    }
+
+    Mode m_mode;
+    QByteArray m_file;
+    QTcpServer m_server;
+};
+
+// Waits until the tool has answered and the flow is at `state`.
+bool at(const Backend &backend, const char *state) {
+    return QTest::qWaitFor([&] { return !backend.busy() && backend.state() == state; }, 20000);
+}
+
+const QVariantMap GoodAnswers{{"username", "alex"}, {"password", "481516"}, {"password_again", "481516"}, {"hostname", ""},
+                              {"timezone", "Europe/Paris"}, {"wifi_ssid", ""}, {"wifi_psk", ""}};
 
 void standIn(const QByteArray &mode) {
     qputenv("OMAINSTALL_TOOL", StandIn.toUtf8());
@@ -1153,6 +1287,358 @@ private slots:
         QVERIFY(!backend.dryRun());
         QCOMPARE(sent.count(), 0);
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    // ---- The real tool -------------------------------------------------------
+    //
+    // The app's backend and window against `omamobile-install json` itself,
+    // built with the pretend phone: the core's flow behind the protocol, not
+    // recorded screens. Each test ends by reading the pretend phones' own
+    // record of what they received.
+
+#define REAL_TOOL(tool) \
+    if (!RealTool::built()) \
+        QSKIP("SKIPPED: no real tool (bin/test found no cargo to build omamobile-install with)."); \
+    QVERIFY2((tool).ok, "the script around the real tool could not be written")
+
+    void theRealToolSaysHelloAndIsAskedNothingMore() {
+        // What `omainstall check` does: the hello, then quit.
+        RealTool tool("ready");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        QSignalSpy ready(&backend, &Backend::ready);
+        QSignalSpy sent(&backend, &Backend::sent);
+        backend.probe();
+        QTRY_COMPARE(ready.count(), 1);
+        QCOMPARE(backend.toolProtocol(), Backend::Protocol);
+        QVERIFY(QRegularExpression("^\\d+\\.\\d+\\.\\d+$").match(backend.toolVersion()).hasMatch());
+        QCOMPARE(backend.toolError(), QString());
+        QVERIFY(!backend.hasScreen());
+        QCOMPARE(sent.count(), 1);
+        QCOMPARE(json(sent.at(0).at(0).toByteArray()), (QJsonObject{{"type", "quit"}}));
+        backend.shutdown();
+        int commands = -1;
+        QCOMPARE(tool.nothingButReads(&commands), QString());
+        QCOMPARE(commands, 0);
+    }
+
+    void theRealToolTheStraightPathToTheDryRun() {
+        Google google(Google::Whole);
+        RealTool tool("ready", google.address());
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        Window w(&backend);
+        QVERIFY(w.window);
+        QSignalSpy progress(&backend, &Backend::progressChanged);
+        QStringList whats;
+        connect(&backend, &Backend::progressChanged, this, [&] {
+            if (backend.hasProgress() && !whats.contains(backend.progressWhat()))
+                whats << backend.progressWhat();
+        });
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QCOMPARE(backend.screen().value("title").toString(), QString("Read this once"));
+        w.settle();
+        QCOMPARE(w.text("title"), QString("Read this once"));
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "google-terms"));
+        // Google's words arrive as a quote, and nothing was fetched yet.
+        QVERIFY(backend.screen().value("quote").toMap().value("lines").toList().size() >= 2);
+        QCOMPARE(google.asked, 0);
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "factory-image"));
+        QCOMPARE(backend.action(), QString("download"));
+        QCOMPARE(backend.screen().value("file").toMap().value("name").toString(), ZipName);
+        QCOMPARE(google.asked, 0);
+        QVERIFY(w.click("primaryButton"));
+        QCOMPARE(backend.pending(), QString("download"));
+        QVERIFY(at(backend, "answers"));
+        QCOMPARE(google.asked, 1);
+        QVERIFY(google.paths.at(0).endsWith("/" + ZipName));
+        QCOMPARE(whats, QStringList{"download"});
+        QVERIFY(QFile::exists(tool.directory.filePath("work/factory/" + ZipName)));
+
+        // The real core's objections, per field, and the step stays.
+        QVERIFY(backend.submitAnswers({{"username", "Root"}, {"password", "481516"}, {"password_again", "481517"},
+                                       {"timezone", "Europe/Paris"}}));
+        QTRY_VERIFY(!backend.busy());
+        QCOMPARE(backend.state(), QString("answers"));
+        QCOMPARE(backend.problemFor("username"), QString("Use lower-case letters, digits, - and _, starting with a letter (at most 32)."));
+        QCOMPARE(backend.problemFor("password"), QString("The two don't match."));
+        QVERIFY(backend.submitAnswers(GoodAnswers));
+        QVERIFY(at(backend, "dry-run"));
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "done"));
+        QVERIFY(whats.contains("dry-run"));
+        QCOMPARE(backend.action(), QString("none"));
+        QCOMPARE(backend.screen().value("title").toString(), QString("The dry run passed. Nothing was written"));
+        // The release's images are beside the tool's release: they were walked.
+        const QVariantList plan = backend.screen().value("plan").toList();
+        QVERIFY(plan.size() >= 7);
+        QVERIFY(plan.contains(QString("set_active:b")));
+        w.settle();
+        QCOMPARE(w.texts("planLine").size(), plan.size());
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        // The last screen is no stop: nothing to start again.
+        QVERIFY(!backend.canStartAgain());
+        QVERIFY(!w.shown("secondaryButton"));
+        QCOMPARE(backend.toolError(), QString());
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+
+        backend.shutdown();
+        // The plan names the writes of an install; the phone received reads.
+        int commands = 0;
+        QCOMPARE(tool.nothingButReads(&commands), QString());
+        QVERIFY(commands > 10);
+    }
+
+    void theRealToolsStops_data() {
+        QTest::addColumn<QString>("phones");
+        QTest::addColumn<bool>("declines");
+        QTest::addColumn<QString>("stop");
+        QTest::addColumn<QString>("retry");
+        QTest::newRow("the warning declined") << "ready" << true << "warning-declined" << "whenever";
+        QTest::newRow("another model") << "other-model" << false << "wrong-model" << "after-fix";
+        QTest::newRow("slot B") << "slot-b" << false << "runs-from-slot-b" << "stops-again";
+        QTest::newRow("one bootloader slot reported") << "one-slot" << false << "bootloader-slots-unknown" << "stops-again";
+        QTest::newRow("the bootloader slots differ") << "slots-differ" << false << "bootloader-slots-differ" << "stops-again";
+        QTest::newRow("a build that is not listed") << "unknown-build" << false << "build-not-listed" << "after-fix";
+        QTest::newRow("a build not tested yet") << "untested-build" << false << "build-not-tested" << "stops-again";
+        QTest::newRow("a build not tested, a newer one is") << "untested-old-build" << false << "build-not-tested" << "after-fix";
+    }
+    void theRealToolsStops() {
+        QFETCH(QString, phones);
+        QFETCH(bool, declines);
+        QFETCH(QString, stop);
+        QFETCH(QString, retry);
+        RealTool tool(phones);
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        if (declines) {
+            QVERIFY(backend.decline());
+        } else {
+            QVERIFY(backend.acknowledge());
+            QVERIFY(at(backend, "phone"));
+            QVERIFY(backend.readPhone());
+        }
+        QVERIFY(at(backend, "stopped"));
+        const QVariantMap screen = backend.screen();
+        QCOMPARE(screen.value("stop").toString(), stop);
+        QCOMPARE(screen.value("retry").toString(), retry);
+        QCOMPARE(backend.action(), QString("none"));
+        // The core's words, drawn as sent; the stages are hidden on a stop.
+        w.settle();
+        QCOMPARE(w.text("title"), screen.value("title").toString());
+        QCOMPARE(w.texts("body"), screen.value("body").toStringList());
+        QCOMPARE(w.texts("footerLine"), screen.value("footer").toStringList());
+        QVERIFY(!w.shown("stages"));
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        // "Start again" exactly where the core says a new run can help, and
+        // the core's closing line says the same in words.
+        const bool again = retry != "stops-again";
+        QCOMPARE(backend.canStartAgain(), again);
+        QCOMPARE(w.shown("secondaryButton"), again);
+        QCOMPARE(screen.value("footer").toStringList().last().contains("will stop here again"), !again);
+        // A stop takes nothing more.
+        QVERIFY(!backend.readPhone());
+        QVERIFY(!backend.primaryAction());
+        if (again) {
+            QCOMPARE(w.text("secondaryButton"), QString("Start again"));
+            QVERIFY(w.click("secondaryButton"));
+            // A new run of the tool, and the flow from its start.
+            QVERIFY(at(backend, "warning"));
+            QVERIFY(!backend.canStartAgain());
+        }
+        QCOMPARE(backend.toolError(), QString());
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
+    }
+
+    void theRealToolStopsForADownloadThatIsNotTheListedFile() {
+        Google google(Google::Wrong);
+        RealTool tool("ready", google.address());
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        QVERIFY(at(backend, "google-terms"));
+        QVERIFY(backend.acceptTerms());
+        QVERIFY(at(backend, "factory-image"));
+        QVERIFY(backend.download());
+        QVERIFY(at(backend, "stopped"));
+        QCOMPARE(backend.screen().value("stop").toString(), QString("factory-download-mismatch"));
+        // The download is fetched afresh by a new run: the core says so.
+        QVERIFY(backend.canStartAgain());
+        QVERIFY(QDir(tool.directory.filePath("work/factory")).isEmpty());
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
+    }
+
+    void theRealToolALockedPhoneAndAReinstall() {
+        {
+            RealTool tool("locked");
+            REAL_TOOL(tool);
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.start();
+            QVERIFY(at(backend, "warning"));
+            QVERIFY(backend.acknowledge());
+            QVERIFY(at(backend, "phone"));
+            QVERIFY(backend.readPhone());
+            QVERIFY(at(backend, "unlock"));
+            QCOMPARE(backend.action(), QString("read-phone"));
+            QStringList commands;
+            for (const QVariant &step : backend.screen().value("steps").toList())
+                if (!step.toMap().value("command").isNull())
+                    commands << step.toMap().value("command").toString();
+            QCOMPARE(commands, QStringList{"fastboot flashing unlock"});
+            // The pretend owner unlocked it; the app only looks again.
+            QVERIFY(backend.readPhone());
+            QVERIFY(at(backend, "google-terms"));
+            backend.shutdown();
+            // The command was shown. It was never sent: reads only.
+            QCOMPARE(tool.nothingButReads(), QString());
+        }
+        // Slot B is a stop, unless the person said up front that this is a
+        // reinstall: `omainstall open --reinstall`, in `start`.
+        RealTool tool("slot-b");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        backend.setReinstall(true);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        QVERIFY(at(backend, "google-terms"));
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
+    }
+
+    void theRealToolAsksWhichOfTwoPhones() {
+        RealTool tool("ready,slot-b");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        QTRY_VERIFY(!backend.busy());
+        // The flow has not moved; the tool asks, in its words.
+        QCOMPARE(backend.state(), QString("phone"));
+        QCOMPARE(backend.phones().size(), 2);
+        QVERIFY(backend.phonesTitle().endsWith("Which one is this install for?"));
+        w.settle();
+        QVERIFY(w.shown("phoneChooser"));
+        QCOMPARE(w.text("phonesTitle"), backend.phonesTitle());
+        QCOMPARE(w.texts("phoneButton"), (QStringList{"Pretend phone 1 (ready)", "Pretend phone 2 (slot-b)"}));
+        // Neither an id nor a label is a serial number.
+        for (const QVariant &phone : backend.phones())
+            QVERIFY(!phone.toMap().value("id").toString().contains("SERIAL") && !phone.toMap().value("label").toString().contains("SERIAL"));
+        QVERIFY(QMetaObject::invokeMethod(w.items("phoneButton").at(0), "clicked"));
+        QVERIFY(at(backend, "google-terms"));
+        QCOMPARE(backend.phones().size(), 0);
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
+    }
+
+    void theRealToolTakesAFileHandedIn() {
+        RealTool tool("ready");
+        REAL_TOOL(tool);
+        FakePicker picker;
+        Backend backend(&picker);
+        backend.setReleaseDirectory(Release);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        QVERIFY(at(backend, "google-terms"));
+        QVERIFY(backend.declineTerms());
+        QVERIFY(at(backend, "factory-image"));
+        QCOMPARE(backend.action(), QString("take-file"));
+        // A file that is not there: the tool's words, and the step stays.
+        emit picker.picked(Release + "/nothing-here.zip");
+        QTRY_VERIFY(!backend.busy());
+        QCOMPARE(backend.actionError(), "There is no file " + Release + "/nothing-here.zip");
+        QCOMPARE(backend.action(), QString("take-file"));
+        // Not the file: no error, the core's problem on the same step.
+        emit picker.picked(Release + "/MANIFEST");
+        QTRY_VERIFY(!backend.busy());
+        QCOMPARE(backend.actionError(), QString());
+        QVERIFY(backend.screen().value("problem").toString().startsWith("MANIFEST is not the file for this phone"));
+        // The file: checked by the core, and the flow goes on.
+        QStringList whats;
+        connect(&backend, &Backend::progressChanged, this, [&] {
+            if (backend.hasProgress() && !whats.contains(backend.progressWhat()))
+                whats << backend.progressWhat();
+        });
+        QVERIFY(backend.takeFileUrl(QUrl::fromLocalFile(Zip)));
+        QVERIFY(at(backend, "answers"));
+        QCOMPARE(whats, QStringList{"check"});
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
+    }
+
+    void theRealToolCancelsADownloadAndGoesOnFromWhatArrived() {
+        Google google(Google::Stalls);
+        RealTool tool("ready", google.address());
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        QVERIFY(at(backend, "google-terms"));
+        QVERIFY(backend.acceptTerms());
+        QVERIFY(at(backend, "factory-image"));
+        QVERIFY(backend.download());
+        // 20000 bytes arrive, and then the transfer stands still.
+        QTRY_VERIFY(backend.hasProgress() && backend.progressDone() == 20000.0);
+        QCOMPARE(backend.progressTotal(), double(google.size()));
+        w.settle();
+        QCOMPARE(w.text("secondaryButton"), QString("Cancel"));
+        QVERIFY(w.click("secondaryButton"));
+        // The core's screen says how far it came, and the step stays open.
+        QVERIFY(at(backend, "factory-image"));
+        QVERIFY(backend.screen().value("problem").toString().contains("20000 of 49152 bytes had arrived"));
+        QCOMPARE(backend.action(), QString("download"));
+        QVERIFY(!backend.hasProgress());
+        // The next try asks Google for the rest only, and ends with the file.
+        google.goOn();
+        QVERIFY(backend.download());
+        QVERIFY(at(backend, "answers"));
+        QCOMPARE(google.asked, 2);
+        QFile got(tool.directory.filePath("work/factory/" + ZipName)), wanted(Zip);
+        QVERIFY(got.open(QIODevice::ReadOnly) && wanted.open(QIODevice::ReadOnly));
+        QCOMPARE(got.readAll(), wanted.readAll());
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
     }
 
     // ---- Theme and language ------------------------------------------------
