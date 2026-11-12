@@ -22,8 +22,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: No identifiers
-        run: tools/check-identifiers
+      - name: No identifiers (the check judges made-up ones first, then reads every tracked file)
+        run: |
+          tools/check-identifiers --self-test
+          tools/check-identifiers
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show
       - name: Format

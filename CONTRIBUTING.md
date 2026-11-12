@@ -31,7 +31,7 @@ This code will write to people's phones. The rules below exist because a phone h
 Run what CI runs:
 
 ```sh
-tools/check-identifiers
+tools/check-identifiers --self-test && tools/check-identifiers
 cargo fmt --all --check
 cargo clippy
 cargo test
@@ -43,7 +43,7 @@ If you changed the flow or the page, also run `web/selftest.sh` (a headless Chro
 
 The toolchain is pinned in `rust-toolchain.toml`, so `cargo` installs the right one.
 
-- **Never commit identifying data:** serial numbers, MAC or Bluetooth addresses, IMEIs, network names, account names. Use placeholders such as `<SERIAL>`. `fixtures/published/` holds the project's public release key and the small files of one published release; nothing else that names a person or a phone belongs in the repository.
+- **Never commit identifying data:** serial numbers, MAC or Bluetooth addresses, IMEIs, network names, account names. Use placeholders such as `<SERIAL>`. `fixtures/published/` holds the project's public release key and the small files of one published release; nothing else that names a person or a phone belongs in the repository. `tools/check-identifiers` reads every tracked file, fixtures and binary files included, for addresses (with colons, hyphens or bare), IMEIs, strings shaped like a serial number and home directories; what it lets through is listed in it by file and value, with the reason. It can't find a network's or a person's name: read your diff. `tools/check-identifiers --self-test` shows what it catches.
 - **A new check must fail when what it guards is removed.** Try it: take the guard out, see the test fail, put it back, and say in the pull request which you tried.
 - **Say what you ran and what you didn't.** If a change wasn't tried on a real phone, write that in the pull request. Only claim what you tested yourself.
 - **Cite only properly licensed sources** in code and commit messages: Google's open-source documentation for the fastboot and sparse formats, crate documentation, and this project's own files. Don't name or compare other mobile Linux projects or their tools.

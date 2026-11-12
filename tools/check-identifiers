@@ -1,19 +1,203 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # Refuse identifiers of a real phone or person in tracked files: MAC and
-# Bluetooth addresses, IMEIs, and a builder's home directory. The published
-# release key under fixtures/published/ is the one file that names a person,
-# and it is public by design.
+# Bluetooth addresses (with colons, with hyphens or bare), IMEIs (plain or
+# with dashes), strings shaped like a serial number, and a builder's home
+# directory (Linux, macOS or Windows).
+#
+#   tools/check-identifiers               every tracked file but the two below
+#   tools/check-identifiers --self-test   feed it made-up identifiers and
+#                                         harmless text, and see each judged
+#
+# Every tracked file is read, fixtures/ and binary files included. Not read:
+# Cargo.lock (names and checksums of crates) and this script (it holds the
+# patterns and its self-test's samples).
+#
+# What is declared, and passes, is listed in ALLOWED below, each value with
+# the one file it may stand in and why. Add to it only what is public and
+# names no phone and no person; a new fixture that trips a pattern is looked
+# at, not waved through.
+#
+# fixtures/published/omamobile.gpg is the project's public release key as
+# published. Its user ID names the maintainer, and that is public by design.
+# No pattern here looks for a name or an e-mail address, so the key needs no
+# exception and is read like any other file.
+#
+# What no pattern can find: a Wi-Fi network's name, a person's or an
+# account's name. Those are for a reviewer's eyes.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-fail=0
-check() {   # check NAME REGEX
-  local hits
-  hits=$(git ls-files -z -- . ':!Cargo.lock' ':!fixtures/' ':!tools/check-identifiers' |
-         xargs -0 grep -nIE -- "$2" 2>/dev/null || true)
-  if [[ -n $hits ]]; then printf 'not ok - %s:\n%s\n' "$1" "$hits"; fail=1; else printf 'ok - no %s\n' "$1"; fi
+# Bytes, not characters: binary files are read too
+export LC_ALL=C
+# The patterns are Perl's (GNU grep's -P)
+echo x | grep -qP 'x(?!y)' 2>/dev/null || { echo "check-identifiers: needs a grep with -P (GNU grep)" >&2; exit 2; }
+
+# FILE|VALUE: a match that is exactly VALUE is let through in FILE (a path
+# from the repository's root; * for any file).
+ALLOWED=(
+  # The pretend phones' serial numbers in the test code: placeholders
+  "*|FAKESERIAL0001"
+  "*|ANOTHERPHONE0002"
+  # The published release names the two commits it was built from
+  "fixtures/published/MANIFEST|1a9d1d4e9289"
+  "fixtures/published/MANIFEST|71b47a6a4a19"
+  "fixtures/published/manifest.json|1a9d1d4e9289"
+  "fixtures/published/manifest.json|71b47a6a4a19"
+  # A run of counted digits in the test image the zstd tool compressed
+  "fixtures/zstd/pattern.img.zst|123456789601234"
+  # A key ID, in the test that a key ID is not taken for a fingerprint
+  "core/tests/published_release.rs|7F1041BF47291504"
+)
+
+# NAME|PCRE, tried on every line of every file.
+HEX='[0-9A-Fa-f]'
+PATTERNS=(
+  # Six pairs or more, joined by colons or by hyphens
+  "MAC or Bluetooth addresses|(?<![0-9A-Fa-f])$HEX{2}(?:[:-]$HEX{2}){5,}(?![0-9A-Fa-f])"
+  # Twelve hex digits as a word of their own, with a digit and a letter
+  # among them (so neither a number nor a word)
+  "bare MAC or Bluetooth addresses|\b(?=$HEX{0,11}[0-9])(?=$HEX{0,11}[A-Fa-f])$HEX{12}\b"
+  "IMEIs|\b[0-9]{15}\b|\b[0-9]{2}-[0-9]{6}-[0-9]{6}-[0-9]\b"
+  # Capitals and digits, both, 12 to 18 of them, as a word of their own:
+  # the shape of what fastboot and adb report as a serial number
+  "strings shaped like a serial number|\b(?=[A-Z0-9]{0,17}[0-9])(?=[A-Z0-9]{0,17}[A-Z])[A-Z0-9]{12,18}\b"
+  "home directories|/(?:home|Users)/[A-Za-z][A-Za-z0-9._-]*/|\b[A-Za-z]:\\\\+(?:Users|Documents and Settings)\\\\+[A-Za-z]"
+)
+
+errors=$(mktemp)
+scratch=
+trap 'rm -rf "$errors" "$scratch"' EXIT
+
+allowed() {   # allowed FILE VALUE
+  local entry
+  for entry in "${ALLOWED[@]}"; do
+    [[ ${entry#*|} == "$2" && ( ${entry%%|*} == "*" || ${entry%%|*} == "$1" ) ]] && return 0
+  done
+  return 1
 }
-check "MAC or Bluetooth addresses" '\b[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}\b'
-check "IMEIs" '\b[0-9]{15}\b'
-check "home directories" '/home/[a-z][a-z0-9_-]+/'
-exit "$fail"
+
+# scan < NUL-separated file names. Prints a line per pattern; status 1 when
+# any pattern found something. A file that can't be read, or a grep that
+# fails, ends the run with status 2: an error is never a pass.
+scan() {
+  local files=() file entry name pattern found line value keep hit=0
+  while IFS= read -r -d '' file; do files+=("$file"); done
+  for file in "${files[@]}"; do
+    [[ -f $file && -r $file ]] || { echo "check-identifiers: can't read $file" >&2; exit 2; }
+  done
+  for entry in "${PATTERNS[@]}"; do
+    name=${entry%%|*} pattern=${entry#*|}
+    keep=
+    if (( ${#files[@]} )); then
+      # Status 1 is "nothing found"; whatever goes wrong says so on stderr.
+      # A binary file's line may hold NUL bytes, which a variable can't
+      found=$(grep -naHP -- "$pattern" "${files[@]}" /dev/null 2>"$errors" | tr '\000' '?') || true
+      if [[ -s $errors ]]; then
+        echo "check-identifiers: grep failed on '$name':" >&2; cat "$errors" >&2; exit 2
+      fi
+      # A line stays unless every match on it is declared for its file
+      while IFS= read -r line; do
+        [[ -n $line ]] || continue
+        file=${line%%:*}
+        while IFS= read -r value; do
+          if ! allowed "$file" "$value"; then keep+=$line$'\n'; break; fi
+        done < <(printf '%s\n' "${line#*:*:}" | grep -oaP -- "$pattern" || true)
+      done <<<"$found"
+    fi
+    if [[ -n $keep ]]; then
+      # A binary file's line can be long and unprintable: its start, in print
+      printf 'not ok - %s:\n%s' "$name" "$(printf '%s' "$keep" | cut -c1-240 | tr -c '[:print:]\n' '?')"
+      printf '\n'
+      hit=1
+    else
+      printf 'ok - no %s\n' "$name"
+    fi
+  done
+  return "$hit"
+}
+
+tracked() {
+  git ls-files -z -- . ':!Cargo.lock' ':!tools/check-identifiers'
+}
+
+self_test() {
+  local bad=0 n=0 sample status
+  scratch=$(mktemp -d)
+  # Made-up values in the shape of real ones. None belongs to a device.
+  local caught=(
+    "a MAC address with colons|a phone at 02:00:5e:10:00:ff answered"
+    "one in capitals|addr 02:00:5E:10:00:FF"
+    "one after a tag|tag:02:00:5e:10:00:ff"
+    "one with hyphens|bssid 02-00-5e-10-00-ff"
+    "a bare one|wlan0 02005e1000ff up"
+    "a bare one in capitals|BD_ADDR=02005E1000FF"
+    "an IMEI|imei 490154203237518"
+    "an IMEI with dashes|IMEI: 49-015420-323751-8"
+    "a serial number|serialno: 1A234BCD5E6789"
+    "a serial number of sixteen|(bootloader) serialno:0A1B2C3D4E5F6G7H"
+    "a serial number beside a placeholder|FAKESERIAL0001 was 1A234BCD5E6789"
+    "a declared value in a file it is not declared for|commit 1a9d1d4e9289"
+    "eight pairs|eui 02:00:5e:ff:fe:10:00:ff"
+    "a home directory|/home/someone/src/installer/target"
+    "one with a capital|/home/Someone/src"
+    "one on macOS|/Users/someone/Library/Caches/x"
+    "one on Windows|C:\\Users\\someone\\AppData\\Local"
+  )
+  local passes=(
+    "a SHA-256|31c2322a3d1a5e0f6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c"
+    "a key's fingerprint|0123456789ABCDEF0123456789ABCDEF01234567"
+    "the release's files|SHA256SUMS and SHA256SUMS.sig"
+    "the pretend phones' serial numbers|FAKESERIAL0001 and ANOTHERPHONE0002"
+    "a date and a time|2026-11-12 at 14:03 UTC, 14:03:59"
+    "a bootloader version|cloudripper-14.5-11677881"
+    "a build and its zip|TQ3A.230901.001 cheetah-tq3a.230901.001-factory-31c2322a.zip"
+    "sizes|3910686132 bytes, 0x00000000e9180000"
+    "a placeholder for a home|/home/<user>/src and ~/src"
+    "paths that name nobody|/usr/share/zoneinfo and /home/ alone"
+    "words in capitals|OMAMOBILE INSTALL_KEYS_FASTBOOT BOOTLOADER_SLOT_PROBE"
+    "a USB id|18d1:4ee0 class 0xff"
+    "a short commit and a long one|13e4029 and 13e40291a5e0f6b7c8d9e0f1a2b3c4d5e6f70819"
+  )
+  judge() {   # judge SAMPLE: the scan's status on a file holding it
+    printf '%s\n' "${1#*|}" >"$scratch/sample"
+    status=0
+    printf '%s\0' "$scratch/sample" | scan >"$scratch/out" || status=$?
+  }
+  for sample in "${caught[@]}"; do
+    n=$((n + 1)); judge "$sample"
+    if (( status == 1 )); then printf 'ok - caught: %s\n' "${sample%%|*}"
+    else printf 'not ok - NOT caught: %s\n' "${sample%%|*}"; bad=1; fi
+  done
+  for sample in "${passes[@]}"; do
+    n=$((n + 1)); judge "$sample"
+    if (( status == 0 )); then printf 'ok - passes: %s\n' "${sample%%|*}"
+    else printf 'not ok - refused, and should pass: %s\n' "${sample%%|*}"; grep -A1 '^not ok' "$scratch/out" || true; bad=1; fi
+  done
+  # Binary files are read too
+  n=$((n + 1)); status=0
+  printf '\001\002\377\000 02-00-5e-10-00-ff \000\376\n' >"$scratch/sample"
+  printf '%s\0' "$scratch/sample" | scan >/dev/null || status=$?
+  if (( status == 1 )); then printf 'ok - caught: an identifier in a binary file\n'
+  else printf 'not ok - NOT caught: an identifier in a binary file\n'; bad=1; fi
+  # A file that can't be read is an error, never a pass
+  n=$((n + 1)); status=0
+  (printf '%s\0' "$scratch/no-such-file" | scan >/dev/null 2>&1) || status=$?
+  if (( status == 2 )); then printf 'ok - a file that cannot be read fails the check\n'
+  else printf 'not ok - a file that could not be read went unnoticed\n'; bad=1; fi
+  printf '%s self-test checks: %s\n' "$n" "$( ((bad)) && echo FAILED || echo passed)"
+  return "$bad"
+}
+
+case ${1:-} in
+  --self-test) self_test ;;
+  "")
+    files=$(mktemp)
+    # A failed listing is an error, not an empty list
+    tracked >"$files" || { rm -f "$files"; echo "check-identifiers: git ls-files failed" >&2; exit 2; }
+    [[ -s $files ]] || { rm -f "$files"; echo "check-identifiers: no tracked files found" >&2; exit 2; }
+    status=0
+    scan <"$files" || status=$?
+    rm -f "$files"
+    exit "$status" ;;
+  *) echo "usage: tools/check-identifiers [--self-test]" >&2; exit 2 ;;
+esac
