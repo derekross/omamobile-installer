@@ -29,6 +29,11 @@
 //! only ways out are the transport trait and, for Google's factory image, a
 //! typed request the front end carries out ([`download::FetchRequest`]).
 
+// The tests' support files (core/tests/support) name this crate from the
+// outside; the unit tests that borrow them see it under the same name.
+#[cfg(test)]
+extern crate self as omamobile_installer_core;
+
 pub mod build_index;
 pub mod bundle;
 pub mod device_conf;

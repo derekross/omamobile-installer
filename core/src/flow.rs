@@ -2729,3 +2729,6 @@ enum Judged {
         same_pair: Vec<String>,
     },
 }
+
+#[cfg(test)]
+mod tests;
