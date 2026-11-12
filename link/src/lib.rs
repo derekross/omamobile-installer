@@ -14,8 +14,11 @@
 //! do. The phone's daemon and the installer are shells around them.
 #![forbid(unsafe_code)]
 
+pub mod answers;
 pub mod digest;
 pub mod frame;
+pub mod json;
+pub mod msg;
 #[cfg(feature = "sim")]
 pub mod sim;
 
