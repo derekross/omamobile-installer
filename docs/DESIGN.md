@@ -17,7 +17,7 @@ fetches Google's factory zip <--  FetchRequest         the address from the sign
 hands in each answer, the bytes -->  FactoryDownload   every redirect, the size and the SHA-256 are decided here
 ```
 
-The core decides the order of the steps, every refusal and every sentence a person reads about the phone. A front end draws and listens. That is what keeps the two front ends from drifting, and what a third one (the desktop window) gets for free.
+The core decides the order of the steps, every refusal and every sentence a person reads about the phone. A front end draws and listens. That is what keeps the front ends from drifting. There are three: the command-line tool, the web page, and the desktop window (`app/`), which drives the tool through its `json` mode ([APP.md](APP.md)).
 
 ## 2. The decisions the flow carries
 
@@ -133,6 +133,7 @@ Not stops either: Google's terms not accepted, a download that can't be made (`O
 The M1 reviews of the shell installer found stops that reassured wrongly: "Nothing is lost. Run this command again" after a half-written phone and after stops that a rerun can't pass, and a footer that called the wrong one of two phones "the phone". So here:
 
 - **The closing lines are derived, never fixed.** `Stop::footer()` is built from two facts: `PhoneFact` (no phone was asked; a phone was only asked what it is; the same after the unlock steps were shown, with "if you unlocked its bootloader, that erased the phone"; two phones, each only asked) and `Retry` (at any time; once the message's fix is done; stops here again).
+- **Whether starting again can help is also on the screen as a fact,** not only as that sentence: `Screen.retry` is the stop's `Retry` (`whenever`, `after-fix`, `stops-again`; nothing on a screen that is not a stop). A front end that offers "start again" decides from it, and offers none where it reads `stops-again`. It never reads the sentence.
 - **A stop that a retry can't pass says so,** and its message says what has to change or who to ask. The slot stop hands out no way around it.
 - **Advice comes with where it leads.** "Update Android" is followed by: Android then runs from slot B, and the installer will stop for that.
 - **No advice that can't work.** An untested build with no newer tested build in the index is "not tested yet" (decision 10, 2026-11-12): the stop's title says so, and its message says that nothing the owner can install today changes that, that an Android update does not help, and what they can do, which is to wait until the build has been tested or ask in the issue tracker. It is not told to update Android, and it still stops. "Newer" is the index's own order, newest first: a tested build listed before the phone's. When there is one, the stop names it and says to update Android to it, with where that leads.
@@ -185,7 +186,7 @@ For a later version to probe, the rule has to be in the signed install plan, not
 
 ## 7. What a front end must do
 
-1. **Draw the whole `Screen`:** title, the notice (right under the title, set apart), body, numbered steps, a step's `command` as text to copy, the link, the file wanted, the problem, the plan, the footer. Add no sentence of its own about the phone's state, and no reassurance.
+1. **Draw the whole `Screen`:** title, the notice (right under the title, set apart), body, numbered steps, a step's `command` as text to copy, the link, the file wanted, the problem, the plan, the footer. Add no sentence of its own about the phone's state, and no reassurance. Offer "start again" on a stop only where `Screen.retry` says a new run can get past it (§4).
 2. **Never run a `command`.** It is for the person's terminal.
 3. **Send nothing to a phone itself,** and offer no control for the maintainer's override in a page or a usage text (§6). It lends the flow a transport (`read_phone`, `dry_run`) and passes which device the person chose (`PhoneId::of_serial` of the USB serial number), so the phone that answers must be that one.
 4. **Open Google's page only on the person's click,** as an ordinary link in a new tab. **Fetch one thing from Google, and only what the core asks for:** the `FetchRequest` of a `FactoryDownload`, which the flow gives out only after the owner accepted Google's terms. Don't build an address, change one, or follow a redirect the core did not answer with `Fetch`. Send Google no cookie and no referrer. Draw `Screen.quote` set apart, as someone else's words.
@@ -194,7 +195,7 @@ For a later version to probe, the rule has to be in the signed install plan, not
 7. **Say what it is.** The page's first line says it is a preview that cannot write to a phone.
 8. **Offer the pretend phone only in builds made for it** (the command-line tool's `fake-phone` feature, the page's `selftest` feature). Those are also the only builds that trust a test key.
 
-How the two do it: `cli/src/main.rs` (`run_flow`) and `web/static/app.js` with `web/src/lib.rs` (`InstallFlow`).
+How they do it: `cli/src/main.rs` (`run_flow`) on a terminal; `web/static/app.js` with `web/src/lib.rs` (`InstallFlow`) in a browser; and `cli/src/json.rs`, which sends each `Screen` as JSON and takes what the person did as messages, for the desktop window and for agents and scripts. That last one is specified in [APP.md](APP.md) §3; it has no message and no argument for a write or for the maintainer's override.
 
 ### The download in each front end
 
@@ -226,7 +227,8 @@ Not built, in the order a real install needs them:
 - **The install link** and every step after the write: the first start, the radio backup, firmware, the restart, the check.
 - **Real writes**, the confirmation before them, and a record of how far an install got, so a second run goes on instead of starting over.
 - **The web page's downloads:** the release's images and root image, with resume and storage, so the dry run there can walk them.
-- **The desktop window** (a web view around the same page, with the native core behind it), and **Windows and macOS** (type-checked only; drivers, signing).
+- **The desktop window on a real desktop and with a real phone.** It is built (`app/`, a Qt Quick window that drives `omamobile-install json`; not the web view around the page that this line once planned) and tested offscreen against the pretend phone; what is open for it is in [APP.md](APP.md) §9.
+- **Windows and macOS** (drivers, signing; the `json` mode keeps standard output to itself on Unix only).
 - **The published build index** with a detached signature (§5).
 - **Timeouts in the browser** for a phone that stops answering.
 
@@ -237,6 +239,8 @@ Not built, in the order a real install needs them:
 - `core/tests/factory_download.rs`: the terms step's words and that nothing is downloaded or taken before it is answered; the acceptance and its date; declining; and each property of the download against a stand-in that is a function in the test: the address is the signed index's, redirects on and off Google's host, the size before and during the transfer, the SHA-256, going on from kept bytes with the hash from the first byte, progress, and each fallback.
 - `core/tests/build_index.rs`: every field's rule on the real cheetah index (`fixtures/index/`) and on changed copies; the match; trust.
 - `cli/tests/flow_fake_phone.rs` (`--features fake-phone`): the built tool with typed input.
+- `cli/tests/json_mode.rs` (the same feature): the built tool's `json` mode, message by message (APP.md §10): the handshake, the flow to the dry run as a transcript, the stops, the reply rule, lines that are not messages, actions out of turn, a download cancelled, the input closing. Every run is checked for three things: standard output held the protocol and nothing else, each action got exactly one screen, and the pretend phone received only reads.
+- `app/tests/` (Qt Test, offscreen, `app/bin/test`): the window against a stand-in that replays the core's recorded screens, and against the real tool with its pretend phone.
 - `cli/tests/factory_download.rs` (the same feature): the built tool downloading from a stand-in for Google's server, a socket on 127.0.0.1 in the test: the terms before the first request, the file in the work directory, a download that broke off going on in a later run and in the same one with `Range`, a spoiled part found out and deleted, files that are not the listed one, redirects, and that a pretend run can't reach Google.
 - `web/selftest.sh`: the page in a headless Chromium, clicked through every state against the pretend phone, under the strict Content-Security-Policy. Its downloads go to a stand-in that `web/serve.py --stand-in` runs on another port, which takes `dl.google.com`'s place in the policy, so the run can reach nothing of Google's: a server that lets the page read and one that does not, one that can't be reached, wrong bytes, too many, another size, redirects, a missing file and a transfer that breaks off. The browser is started with WebUSB off and, where bubblewrap is installed, without USB device nodes.
 

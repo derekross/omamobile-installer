@@ -1,0 +1,23 @@
+{
+  "state": "stopped",
+  "stop": "runs-from-slot-b",
+  "retry": "stops-again",
+  "title": "This phone runs from its second system copy",
+  "notice": null,
+  "body": [
+    "This phone is running from its second system copy (slot B). Omarchy Mobile is written there, and Android must stay on the first copy (slot A) as your way back.",
+    "If Omarchy Mobile is already on this phone and you are installing it again, start the installer again and say that this is a reinstall.",
+    "If the phone runs Android (it moves to slot B after an Android system update), Android has to be put on slot A first. The install guide says how."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer only asked the phone what it is. It has written nothing to it.",
+    "Starting the installer again as things are will stop here again."
+  ],
+  "action": "none"
+}

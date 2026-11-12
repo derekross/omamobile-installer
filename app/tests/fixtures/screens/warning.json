@@ -1,0 +1,33 @@
+{
+  "state": "warning",
+  "stop": null,
+  "retry": null,
+  "title": "Read this once",
+  "notice": null,
+  "body": [
+    "It is the only warning; nothing will ask again."
+  ],
+  "quote": null,
+  "steps": [
+    {
+      "text": "The phone is erased. Everything on it is lost: photos, messages, apps, accounts and two-factor codes. Copy off what you want to keep first. If its bootloader is still locked, unlocking it (the next step) is what erases it, before anything of Omarchy Mobile is written.",
+      "command": null
+    },
+    {
+      "text": "Omarchy Mobile replaces Android as the phone's system. There are no Google apps and no Play Store, and Android apps don't run on it. This release is a test: some things a phone normally does are missing or unfinished. The list for this phone: https://omamobile.org/devices/cheetah",
+      "command": null
+    },
+    {
+      "text": "You can go back. Android stays on the phone, unused, as a quick way back, and Google's own tools can put the phone back as it was sold. The install guide's \"Going back to Android\" has the steps.",
+      "command": null
+    }
+  ],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "Nothing is asked of the phone until you accept."
+  ],
+  "action": "acknowledge"
+}

@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Writes ../fixtures/screens/*.json again from the core as it is now: each is
+# what Flow::screen() gives, serialised by serde, for one state or one stop.
+# The phone is the core's pretend phone, held in memory: no USB device is
+# opened and nothing is fetched from anywhere but crates.io (for the build).
+set -eu
+
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$HERE"
+# The versions the repository pins.
+cp ../../../Cargo.lock Cargo.lock
+CARGO_TARGET_DIR="$HERE/target" cargo run --quiet -- "$HERE/../fixtures/screens"

@@ -1075,6 +1075,8 @@ dependencies = [
  "omamobile-installer-core",
  "omamobile-installer-usb",
  "pollster",
+ "rustix",
+ "serde_json",
  "ureq",
 ]
 

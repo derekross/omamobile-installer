@@ -1,0 +1,22 @@
+{
+  "state": "stopped",
+  "stop": "no-build-index",
+  "retry": "stops-again",
+  "title": "This release can't be installed with this installer",
+  "notice": null,
+  "body": [
+    "This release carries no list of Google's builds for the Pixel 7 Pro, so the installer can't tell which of Google's factory images matches the phone.",
+    "It takes a release that carries one. The install guide has the steps for this release."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "Nothing was sent to a phone.",
+    "Starting the installer again as things are will stop here again."
+  ],
+  "action": "none"
+}

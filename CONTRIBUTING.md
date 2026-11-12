@@ -1,6 +1,6 @@
 # Contributing to the Omarchy Mobile installer
 
-This repository holds the installer's shared core and its two front ends, a command-line tool and a web page. It is an early prototype (see [README.md](README.md), [docs/DESIGN.md](docs/DESIGN.md) and [RECOMMENDATION.md](RECOMMENDATION.md)). It belongs to [Omarchy Mobile](https://github.com/derekross/omarchy-mobile), and that project's rules apply here: read its [CONTRIBUTING.md](https://github.com/derekross/omarchy-mobile/blob/main/CONTRIBUTING.md) and the safety rules in its [AGENTS.md](https://github.com/derekross/omarchy-mobile/blob/main/AGENTS.md) first.
+This repository holds the installer's shared core and its front ends: a command-line tool, a web page, and a desktop window that drives the tool. It is an early prototype (see [README.md](README.md), [docs/DESIGN.md](docs/DESIGN.md) and [RECOMMENDATION.md](RECOMMENDATION.md)). It belongs to [Omarchy Mobile](https://github.com/derekross/omarchy-mobile), and that project's rules apply here: read its [CONTRIBUTING.md](https://github.com/derekross/omarchy-mobile/blob/main/CONTRIBUTING.md) and the safety rules in its [AGENTS.md](https://github.com/derekross/omarchy-mobile/blob/main/AGENTS.md) first.
 
 This code will write to people's phones. The rules below exist because a phone holds calibration data that can't be replaced.
 
@@ -12,8 +12,8 @@ This code will write to people's phones. The rules below exist because a phone h
 - **The install flow is the core's** (`core/src/flow.rs`): its order, its refusals and its words. A front end draws the screen it is given and hands in what the person did. Don't add a check, a step or a sentence about the phone's state in a front end; add it to the flow, with a test.
 - **The one warning comes before anything is asked of a phone,** and before the unlock steps. Don't add a path to a phone that goes round it.
 - **A stop says what is true.** Its closing lines come from what was done to the phone and whether starting again can help (`PhoneFact`, `Retry`). Don't add a fixed reassurance, and don't hand out a way around a stop in its text.
-- **Real writes are switched off in both front ends for now.** Don't turn them on in a pull request. That is the maintainer's decision, after an attended run on a real phone.
-- **Tests never touch USB.** Every fastboot test uses the fake phone in `core/tests/support/`. Don't add a test that opens or lists real USB devices, and don't run the command-line tool against a phone you care about.
+- **Real writes are switched off in every front end for now.** The tool's `json` mode, which the desktop window and scripts drive, has no message and no argument for a write: don't add one, and keep its arguments a closed list. A version that writes takes a new message and a new protocol number (docs/APP.md §3.6). Don't turn them on in a pull request. That is the maintainer's decision, after an attended run on a real phone.
+- **Tests never touch USB.** Every fastboot test uses the fake phone in `core/tests/support/`. Don't add a test that opens or lists real USB devices, and don't run the command-line tool against a phone you care about. A test that starts `omamobile-install json` always starts it with `--fake-phone`.
 - **The installer never sends `fastboot flashing unlock`.** It shows the unlock command for the owner to type, and asks a locked phone only whether it would take that command (to say whether "OEM unlocking" is switched on; a phone that doesn't answer is not stopped for it).
 - **Google's factory image comes from Google, to the owner's computer, and from nowhere else** (the maintainer's decision of 2026-11-12, which reverses the one of 2026-11-10 that the installer never downloads it). The installer downloads it for the owner after showing Google's terms for the owner to accept; an owner can still save it from Google's page and hand it in. This project hosts none of Google's files and never redistributes them: don't add a mirror, a cache on a server, a bundle that carries them, or a test fixture made from them. Whether the project may ship files extracted from a factory image itself is a separate question that is not decided; don't build towards it in a pull request. The rules of the download are the core's (`core/src/download.rs`), each with a test:
   - Nothing is downloaded before the owner accepted Google's terms on the flow's step for it. Don't add a path round that step, and don't reword what it quotes: those are Google's sentences, marked as Google's.
@@ -36,9 +36,10 @@ cargo clippy
 cargo test
 cargo test -p omamobile-installer-cli --features fake-phone
 web/build.sh selftest && web/build.sh     # needs wasm-bindgen-cli at the version in Cargo.lock
+app/bin/build && app/bin/test             # needs Qt 6; offscreen, no window opens
 ```
 
-If you changed the flow or the page, also run `web/selftest.sh` (a headless Chromium clicks through the page against the pretend phone and a stand-in for Google's server; CI doesn't run it).
+If you changed the flow or the page, also run `web/selftest.sh` (a headless Chromium clicks through the page against the pretend phone and a stand-in for Google's server; CI doesn't run it). If you changed the flow's words or a field of `Screen`, run `app/tests/record-screens/run` and commit the screens it writes.
 
 The toolchain is pinned in `rust-toolchain.toml`, so `cargo` installs the right one.
 
