@@ -641,6 +641,7 @@ impl InstallFlow {
                 FlowOptions {
                     reinstall,
                     maintainer_skip_bootloader_slot_check: slot_override,
+                    ..Default::default()
                 },
             ),
             check: None,

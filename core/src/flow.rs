@@ -11,7 +11,9 @@
 //!   -> Warning        acknowledge_warning / decline_warning
 //!   -> Phone          read_phone / no_phone
 //!   -> Unlock         read_phone again, after the owner unlocked
-//!   -> FactoryImage   factory_zip, then the bytes, then factory_zip_done
+//!   -> GoogleTerms    accept_google_terms / decline_google_terms
+//!   -> FactoryImage   factory_download, the fetch, factory_download_done; or
+//!                     factory_zip, then the bytes, then factory_zip_done
 //!   -> Answers        answers
 //!   -> DryRun         dry_run, then dry_run_done
 //!   -> Done
@@ -28,12 +30,21 @@
 //! `flashing unlock`: the unlock step shows that command for the owner to
 //! run. It never switches slots.
 //!
+//! What the flow has fetched from the internet is one file: Google's factory
+//! image, from the address in the release's signed build index, and only
+//! after the owner accepted Google's terms on the step that shows them
+//! ([`Flow::accept_google_terms`], the maintainer's decision of 2026-11-12).
+//! The front end does the fetching and [`crate::download`] decides every
+//! answer. An owner who doesn't accept, or whose download can't be made,
+//! saves the file from Google's page and hands it in.
+//!
 //! Every end that isn't `Done` is a [`Stop`]: a typed reason, the words for
 //! the person, and a closing line that says what is true of the phone at
 //! that moment and whether starting again can get past it. No stop ends in a
 //! fixed reassurance.
 use crate::build_index::{Build, BuildIndex, Lookup};
 use crate::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
+use crate::download::{Ending, FactoryDownload, FetchFailure, Mismatch, Unavailable};
 use crate::fastboot::{
     probe, unlock_ability, PhoneId, PhoneOptions, PhoneReport, Session, Transport, UnlockAbility,
 };
@@ -44,6 +55,17 @@ use serde::Serialize;
 
 const ISSUES: &str = "https://github.com/derekross/omarchy-mobile/issues";
 const DOWNLOAD: &str = "https://omamobile.org/download";
+/// What Google's factory images page asks a person to accept before it hands
+/// out a file. Google's words, shown as Google's on the terms step.
+pub const GOOGLE_TERMS: [&str; 2] = [
+    "Downloading of the system image and use of the device software is subject to the Google Terms of Service",
+    "By continuing, you agree to the Google Terms of Service and Privacy Policy",
+];
+/// The rest of what Google's page says there, the quoted part in Google's
+/// words.
+pub const GOOGLE_TERMS_THIRD_PARTY: &str = "Google's page also says that the download and use \"may also be subject to certain third-party terms of service, which can be found in Settings > About phone > Legal information\".";
+pub const GOOGLE_TERMS_OF_SERVICE: &str = "https://policies.google.com/terms";
+pub const GOOGLE_PRIVACY_POLICY: &str = "https://policies.google.com/privacy";
 /// The command the owner runs to unlock the bootloader. Shown, never sent:
 /// the one `flashing` command this crate sends is the question
 /// [`crate::fastboot::GET_UNLOCK_ABILITY`], which only reads.
@@ -68,6 +90,90 @@ pub struct FlowOptions {
     /// unless it holds every write back; a version of this flow that writes
     /// must refuse the override the same way before its first write.
     pub maintainer_skip_bootloader_slot_check: bool,
+    /// The owner already has Google's factory image, saved from Google's
+    /// page, and hands that file in. The installer then downloads nothing,
+    /// so the step that shows Google's terms is left out: they were Google's
+    /// to ask on its page.
+    pub owner_has_factory_zip: bool,
+}
+
+/// The owner accepted Google's terms on the terms step: for which build,
+/// and when. Kept in the flow and nowhere else; it is never sent anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermsAccepted {
+    pub build: String,
+    /// Seconds since 1970-01-01 00:00 UTC, by the front end's clock.
+    pub at: u64,
+}
+
+impl TermsAccepted {
+    /// `2026-11-12 at 14:03 UTC`.
+    pub fn when(&self) -> String {
+        let (days, secs) = (self.at / 86400, self.at % 86400);
+        // Days since 1970-01-01 to a date of the Gregorian calendar
+        let z = days + 719_468;
+        let (era, doe) = (z / 146_097, z % 146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let (d, m) = (
+            doy - (153 * mp + 2) / 5 + 1,
+            if mp < 10 { mp + 3 } else { mp - 9 },
+        );
+        let y = yoe + era * 400 + u64::from(m <= 2);
+        format!(
+            "{y:04}-{m:02}-{d:02} at {:02}:{:02} UTC",
+            secs / 3600,
+            secs % 3600 / 60
+        )
+    }
+}
+
+/// How the factory image comes to the installer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageSource {
+    /// The owner accepted Google's terms: the installer downloads the file
+    /// from Google's server. A file the owner hands in is taken as well.
+    Download,
+    /// The owner saves the file from Google's page and hands it in.
+    OwnerFile(OwnerFileWhy),
+}
+
+/// Why the owner fetches the file by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerFileWhy {
+    /// They said up front that they have it ([`FlowOptions::owner_has_factory_zip`]).
+    SaidSo,
+    /// They did not accept Google's terms in the installer.
+    TermsDeclined,
+    /// They accepted, and the installer could not download the file.
+    Unavailable(Unavailable),
+}
+
+/// A download that ended early. The step stays open, and it can be tried
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadTrouble {
+    /// Fewer bytes arrived than the file has. `detail`: what the front end's
+    /// HTTP client said, if anything.
+    Interrupted {
+        got: u64,
+        want: u64,
+        detail: Option<String>,
+    },
+    /// The front end could not keep the bytes.
+    Storage(String),
+}
+
+/// What the front end does with the bytes of a download that ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadEnd {
+    /// The file is complete and is the one the signed index describes.
+    Verified,
+    /// Not complete. What arrived may be kept, to go on from.
+    Kept,
+    /// Not the file. Delete every byte that was kept of it.
+    Discard,
 }
 
 /// Where the install is, and what the front end shows.
@@ -83,13 +189,24 @@ pub enum Step {
     /// `oem_unlocking`: what the phone said when asked whether it would take
     /// the unlock command.
     Unlock { oem_unlocking: UnlockAbility },
-    /// The owner fetches Google's factory image for this build and hands the
-    /// saved file over. `refused`: why the last file wasn't taken.
+    /// What Google's download page asks a person to accept, before anything
+    /// is downloaded. Nothing happens until the owner answers.
+    GoogleTerms {
+        build: Build,
+        /// Other builds with the same bootloader and baseband.
+        same_pair: Vec<String>,
+    },
+    /// Google's factory image for this build: downloaded by the installer,
+    /// or saved by the owner and handed over (`source`). `refused`: why the
+    /// last file handed over wasn't taken. `trouble`: why the last download
+    /// ended early.
     FactoryImage {
         build: Build,
         /// Other builds with the same bootloader and baseband.
         same_pair: Vec<String>,
+        source: ImageSource,
         refused: Option<ZipRefusal>,
+        trouble: Option<DownloadTrouble>,
     },
     /// The owner's answers for the first start.
     Answers,
@@ -136,6 +253,9 @@ pub enum StopKind {
         build: String,
         newer_tested: Option<String>,
     },
+    /// What the installer downloaded from Google's server is not the file
+    /// the release's signed list of Google's builds describes.
+    FactoryDownloadMismatch { build: String, why: Mismatch },
     /// At the dry run the phone's bootloader was locked again.
     LockedAtDryRun,
     /// At the dry run the phone reported another bootloader or baseband than
@@ -241,6 +361,7 @@ impl Stop {
             StopKind::BasebandUnknown => "baseband-unknown",
             StopKind::BuildNotListed { .. } => "build-not-listed",
             StopKind::BuildNotTested { .. } => "build-not-tested",
+            StopKind::FactoryDownloadMismatch { .. } => "factory-download-mismatch",
             StopKind::LockedAtDryRun => "locked-at-dry-run",
             StopKind::BuildChanged => "build-changed",
             StopKind::DryRunRefused(_) => "dry-run-refused",
@@ -281,7 +402,8 @@ impl FactoryZipCheck {
     }
 }
 
-/// Proof that the owner's file is the one Google publishes for the build.
+/// Proof that the file, handed in by the owner or downloaded, is the one
+/// Google publishes for the build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedFactoryZip {
     pub build: String,
@@ -546,8 +668,8 @@ pub struct DryRunPlan {
 /// their own to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Screen {
-    /// `warning`, `phone`, `unlock`, `factory-image`, `answers`, `dry-run`,
-    /// `done` or `stopped`.
+    /// `warning`, `phone`, `unlock`, `google-terms`, `factory-image`,
+    /// `answers`, `dry-run`, `done` or `stopped`.
     pub state: &'static str,
     /// For `stopped`: [`Stop::id`].
     pub stop: Option<&'static str>,
@@ -556,6 +678,8 @@ pub struct Screen {
     /// a check was skipped by the maintainer's override.
     pub notice: Option<String>,
     pub body: Vec<String>,
+    /// Someone else's words, drawn after the body and set apart as theirs.
+    pub quote: Option<Quote>,
     /// Numbered steps for the person.
     pub steps: Vec<ScreenStep>,
     /// A page to open in a browser, when the step has one.
@@ -569,8 +693,28 @@ pub struct Screen {
     /// Closing lines: what is true of the phone, and what comes next.
     pub footer: Vec<String>,
     /// What the front end does next: `acknowledge`, `read-phone`,
-    /// `take-file`, `answers`, `dry-run` or `none`.
+    /// `accept-terms`, `download` (which also takes a file the owner hands
+    /// in), `take-file`, `answers`, `dry-run` or `none`.
     pub action: &'static str,
+}
+
+/// Words that are not Omarchy Mobile's, with whose they are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Quote {
+    /// Whose words follow, in ours.
+    pub intro: String,
+    /// Their words, each drawn as a quotation.
+    pub lines: Vec<String>,
+    /// Ours again, about the rest of what they say.
+    pub after: Vec<String>,
+    /// The pages their words name.
+    pub links: Vec<ScreenLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScreenLink {
+    pub label: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -598,6 +742,8 @@ pub struct Flow {
     asked: bool,
     report: Option<PhoneReport>,
     unlock_shown: bool,
+    /// The owner's acceptance of Google's terms, if they gave it.
+    terms: Option<TermsAccepted>,
     zip: Option<VerifiedFactoryZip>,
     answers: Option<AnswersSummary>,
     dry_run_open: bool,
@@ -641,6 +787,7 @@ impl Flow {
             asked: false,
             report: None,
             unlock_shown: false,
+            terms: None,
             zip: None,
             answers: None,
             dry_run_open: false,
@@ -716,7 +863,12 @@ impl Flow {
     pub fn release(&self) -> Option<&VerifiedRelease> {
         self.release.as_ref()
     }
-    /// The factory image the owner handed over, once it has been checked.
+    /// The owner's acceptance of Google's terms on the terms step, if they
+    /// gave it: which build, and when.
+    pub fn google_terms_accepted(&self) -> Option<&TermsAccepted> {
+        self.terms.as_ref()
+    }
+    /// The factory image, once it has been checked.
     pub fn factory_zip_verified(&self) -> Option<&VerifiedFactoryZip> {
         self.zip.as_ref()
     }
@@ -849,11 +1001,21 @@ impl Flow {
                 self.unlock_shown = true;
                 self.step = Step::Unlock { oem_unlocking };
             }
-            Judged::Ready { build, same_pair } => {
+            // The owner has the file: nothing is downloaded, so there are no
+            // terms for the installer to show
+            Judged::Ready { build, same_pair } if self.options.owner_has_factory_zip => {
                 self.step = Step::FactoryImage {
                     build: *build,
                     same_pair,
+                    source: ImageSource::OwnerFile(OwnerFileWhy::SaidSo),
                     refused: None,
+                    trouble: None,
+                };
+            }
+            Judged::Ready { build, same_pair } => {
+                self.step = Step::GoogleTerms {
+                    build: *build,
+                    same_pair,
                 };
             }
         }
@@ -1062,14 +1224,197 @@ impl Flow {
         }
     }
 
+    fn after_terms(&mut self, source: ImageSource) -> Result<()> {
+        let Step::GoogleTerms { build, same_pair } = &self.step else {
+            return self.out_of_order("an answer to Google's terms");
+        };
+        self.step = Step::FactoryImage {
+            build: build.clone(),
+            same_pair: same_pair.clone(),
+            source,
+            refused: None,
+            trouble: None,
+        };
+        Ok(())
+    }
+
+    /// The owner accepted what Google's download page asks, as the terms
+    /// step shows it. `now`: seconds since 1970-01-01 00:00 UTC by the front
+    /// end's clock (the core has none). Recorded with the build, in this
+    /// flow only. From here the installer may download the factory image.
+    pub fn accept_google_terms(&mut self, now: u64) -> Result<()> {
+        let Step::GoogleTerms { build, .. } = &self.step else {
+            return self.out_of_order("an answer to Google's terms");
+        };
+        self.terms = Some(TermsAccepted {
+            build: build.build.clone(),
+            at: now,
+        });
+        self.after_terms(ImageSource::Download)
+    }
+
+    /// The owner did not accept Google's terms here. Nothing is downloaded,
+    /// in this flow ever; they save the file from Google's page themselves
+    /// and hand it in.
+    pub fn decline_google_terms(&mut self) -> Result<()> {
+        self.after_terms(ImageSource::OwnerFile(OwnerFileWhy::TermsDeclined))
+    }
+
+    /// Start one try at downloading the factory image. Refused unless the
+    /// owner accepted Google's terms for this build on the terms step.
+    /// `have`: how many bytes the front end kept of an earlier try. The
+    /// front end carries out what the [`FactoryDownload`] asks and hands it
+    /// to [`Self::factory_download_done`]; see [`crate::download`].
+    pub fn factory_download(&mut self, have: u64) -> Result<FactoryDownload> {
+        let accepted = self.terms.clone();
+        let release = self
+            .index
+            .as_ref()
+            .map(|i| i.release().to_string())
+            .unwrap_or_default();
+        let Step::FactoryImage {
+            build,
+            source,
+            trouble,
+            ..
+        } = &mut self.step
+        else {
+            return self.out_of_order("a download of the factory image");
+        };
+        if *source != ImageSource::Download || accepted.is_none_or(|t| t.build != build.build) {
+            return Err(Error::Refused(
+                "Google's terms were not accepted for this build in this install, so nothing is downloaded"
+                    .into(),
+            ));
+        }
+        let download = FactoryDownload::new(release, build, have)?;
+        *trouble = None;
+        Ok(download)
+    }
+
+    /// A try at the download is over. `failure`: what kept the front end
+    /// from carrying it out, if anything did. The answer says what to do
+    /// with the bytes it kept; the screen says the rest.
+    pub fn factory_download_done(
+        &mut self,
+        download: FactoryDownload,
+        failure: Option<FetchFailure>,
+    ) -> Result<DownloadEnd> {
+        let ours = self
+            .index
+            .as_ref()
+            .map(|i| i.release().to_string())
+            .unwrap_or_default();
+        let Step::FactoryImage {
+            build,
+            source,
+            refused,
+            trouble,
+            ..
+        } = &mut self.step
+        else {
+            return self.out_of_order("a download of the factory image");
+        };
+        if *source != ImageSource::Download
+            || download.release != ours
+            || download.build != build.build
+            || download.sha256 != build.sha256
+        {
+            return Err(Error::Refused(
+                "the download was started for another build or another install".into(),
+            ));
+        }
+        if failure.is_none() && !download.kept_fed() {
+            return Err(Error::Refused(
+                "the bytes kept earlier were not all handed in".into(),
+            ));
+        }
+        *refused = None;
+        let (got, want) = download.progress();
+        let ending = match (download.ending().cloned(), failure) {
+            (Some(ending), _) => ending,
+            (None, Some(FetchFailure::NoAnswer)) => Ending::Unavailable(Unavailable::NoAnswer),
+            (None, Some(FetchFailure::Network(detail))) => {
+                *trouble = Some(DownloadTrouble::Interrupted {
+                    got,
+                    want,
+                    detail: Some(detail),
+                });
+                return Ok(DownloadEnd::Kept);
+            }
+            (None, Some(FetchFailure::Storage(detail))) => {
+                *trouble = Some(DownloadTrouble::Storage(detail));
+                return Ok(DownloadEnd::Kept);
+            }
+            (None, None) if got < want => {
+                *trouble = Some(DownloadTrouble::Interrupted {
+                    got,
+                    want,
+                    detail: None,
+                });
+                return Ok(DownloadEnd::Kept);
+            }
+            (None, None) => {
+                let name = download.name().to_string();
+                // Over every byte, the kept ones first
+                let (digest, len) = download.finish();
+                if digest == build.sha256 && len == build.size {
+                    self.zip = Some(VerifiedFactoryZip {
+                        build: build.build.clone(),
+                        name,
+                        size: len,
+                    });
+                    self.step = Step::Answers;
+                    return Ok(DownloadEnd::Verified);
+                }
+                Ending::Mismatch(Mismatch::Sha256)
+            }
+        };
+        match ending {
+            // Not a fault of the file: the owner fetches it by hand
+            Ending::Unavailable(why) => {
+                *source = ImageSource::OwnerFile(OwnerFileWhy::Unavailable(why));
+                *trouble = None;
+                Ok(DownloadEnd::Kept)
+            }
+            Ending::Mismatch(why) => {
+                let (id, zip, size) = (build.build.clone(), build.zip.clone(), build.size);
+                let list = "the release's signed list of Google's builds";
+                let first = match &why {
+                    Mismatch::Sha256 => format!("The installer downloaded {zip} from Google's server, and the file is not what {list} says: its SHA-256 is another than the one the list records for build {id}."),
+                    Mismatch::AnnouncedSize { got } => format!("Google's server offered a file of {got} bytes as {zip}, and that is not what {list} says: the list records {size} bytes for build {id}."),
+                    Mismatch::TooManyBytes => format!("Google's server sent more for {zip} than the file has, so what it sent is not what {list} says: the list records {size} bytes for build {id}, and the installer took no more than that."),
+                };
+                self.stop(
+                    StopKind::FactoryDownloadMismatch { build: id, why },
+                    Retry::Whenever,
+                    "The downloaded file is not the one this release lists",
+                    vec![
+                        first,
+                        "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.".into(),
+                        format!("Starting the installer again downloads the file afresh. If it stops here again, Google's file and this release's list do not agree: please tell us at {ISSUES}"),
+                    ],
+                );
+                Ok(DownloadEnd::Discard)
+            }
+        }
+    }
+
     /// The owner picked a file as the factory image: its name and size are
     /// checked here, before a byte is read. `Some`: feed the file's bytes to
     /// the check, then [`Self::factory_zip_done`]. `None`: not taken, and
     /// the screen says why.
     pub fn factory_zip(&mut self, file_name: &str, size: u64) -> Result<Option<FactoryZipCheck>> {
-        let Step::FactoryImage { build, refused, .. } = &mut self.step else {
+        let Step::FactoryImage {
+            build,
+            refused,
+            trouble,
+            ..
+        } = &mut self.step
+        else {
             return self.out_of_order("a factory image");
         };
+        *trouble = None;
         // A browser that saves a file twice adds " (1)" before the ending
         let plain = match file_name
             .strip_suffix(".zip")
@@ -1335,6 +1680,7 @@ impl Flow {
                 .slot_check_skipped
                 .then(|| SLOT_CHECK_SKIPPED.to_string()),
             body: Vec::new(),
+            quote: None,
             steps: Vec::new(),
             link: None,
             file: None,
@@ -1411,16 +1757,47 @@ impl Flow {
                 ]);
                 s.footer = vec!["The installer has only asked the phone what it is and whether it can be unlocked. It has written nothing to it.".into()];
             }
+            Step::GoogleTerms { build, .. } => {
+                s.state = "google-terms";
+                s.action = "accept-terms";
+                s.title = "Google's terms for the factory image".into();
+                s.body = vec![
+                    format!("The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. This phone's bootloader and baseband match Google's build {}, which release {} was tested with, and the installer can download that image for you from Google's own server.", build.build, build.tested_with.as_deref().unwrap_or("")),
+                    "Google's page says these files are for use only on your own Pixel, and Google does not allow them to be redistributed. So the installer downloads them straight from Google to this computer, for this phone, and Omarchy Mobile does not host them or pass them on.".into(),
+                    "Before Google's download page hands out a factory image, it asks you to accept Google's terms. The installer asks you the same here, and downloads nothing until you accept.".into(),
+                ];
+                s.quote = Some(Quote {
+                    intro: "From Google's download page (the link below). These are Google's words, not Omarchy Mobile's:".into(),
+                    lines: GOOGLE_TERMS.iter().map(|l| l.to_string()).collect(),
+                    after: vec![GOOGLE_TERMS_THIRD_PARTY.into()],
+                    links: vec![
+                        ScreenLink {
+                            label: "Google Terms of Service".into(),
+                            url: GOOGLE_TERMS_OF_SERVICE.into(),
+                        },
+                        ScreenLink {
+                            label: "Google Privacy Policy".into(),
+                            url: GOOGLE_PRIVACY_POLICY.into(),
+                        },
+                    ],
+                });
+                s.link = Some(build.page.clone());
+                s.footer = vec![
+                    "If you do not accept here, the installer downloads nothing, and you can still go on: you download the file from Google's page yourself and hand the saved file to the installer.".into(),
+                    "Your answer stays in this run of the installer. It is sent nowhere.".into(),
+                ];
+            }
             Step::FactoryImage {
                 build,
                 same_pair,
+                source,
                 refused,
+                trouble,
             } => {
                 s.state = "factory-image";
-                s.action = "take-file";
                 s.title = "Google's factory image".into();
                 s.body = vec![
-                    "The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. Omarchy Mobile never ships them, and the installer never downloads them: you download the image from Google, and the installer checks the file you saved.".into(),
+                    "The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. Omarchy Mobile does not host them or pass them on.".into(),
                     format!("This phone's bootloader and baseband match Google's build {}, which release {} was tested with.", build.build, build.tested_with.as_deref().unwrap_or("")),
                 ];
                 if !same_pair.is_empty() {
@@ -1430,11 +1807,44 @@ impl Flow {
                         build.build
                     ));
                 }
-                s.steps = vec![
+                let by_hand = vec![
                     step("Open Google's page (the link below) and accept Google's terms there."),
                     step(format!("Find build {} in the list for \"{codename}\" and save its file. It is about {}: {}", build.build, about(build.size), build.zip)),
                     step("Hand the saved file to the installer. It checks the file's size and SHA-256 against the release's signed list."),
                 ];
+                match source {
+                    ImageSource::Download => {
+                        s.action = "download";
+                        if let Some(terms) = &self.terms {
+                            s.body.push(format!("You accepted Google's terms for build {} on {}. The installer keeps that for this run only and sends it nowhere.", terms.build, terms.when()));
+                        }
+                        s.body.push(format!("The installer downloads the image from Google's own server, dl.google.com, to this computer: {}, about {}. It then checks the file's size and SHA-256 against the release's signed list, and uses nothing of the file before that.", build.zip, about(build.size)));
+                        s.body.push("If you already saved that file from Google's page, you can hand it to the installer instead.".into());
+                        s.footer = vec!["The file comes from Google and stays on this computer. Nothing of it is sent anywhere.".into()];
+                    }
+                    ImageSource::OwnerFile(why) => {
+                        s.action = "take-file";
+                        s.body.push(match why {
+                            OwnerFileWhy::SaidSo => "The installer downloads nothing in this run: it checks the file you saved from Google's page.".to_string(),
+                            OwnerFileWhy::TermsDeclined => "You did not accept Google's terms in the installer, so it downloads nothing. You download the image from Google's page yourself, where Google asks you to accept its terms, and the installer checks the file you saved.".to_string(),
+                            OwnerFileWhy::Unavailable(u) => format!(
+                                "The installer could not download the image from Google's server: {} That says nothing against the file. You can still go on: download the image from Google's page yourself, and the installer checks the file you saved.",
+                                match u {
+                                    Unavailable::NoAnswer => "this browser got no answer from dl.google.com that a web page may read. A browser does not tell a page why: either there is no connection to Google's server, or Google's server does not let a web page read its files.".to_string(),
+                                    Unavailable::OffGoogle => "Google's server sent the installer on to another address, and the installer fetches Google's files from https://dl.google.com and nowhere else, so it did not follow.".to_string(),
+                                    Unavailable::TooManyRedirects => "Google's server kept sending the installer on to another address, and the installer stopped following.".to_string(),
+                                    Unavailable::Status(code) => format!("Google's server answered with HTTP status {code} instead of the file."),
+                                    Unavailable::BadAnswer => "Google's server answered in a way that does not fit what the installer asked for.".to_string(),
+                                }
+                            ),
+                        });
+                        s.steps = by_hand;
+                        s.footer = vec![
+                            "The file stays on this computer. Nothing of it is sent anywhere."
+                                .into(),
+                        ];
+                    }
+                }
                 s.link = Some(build.page.clone());
                 s.file = Some(FileWanted {
                     name: build.zip.clone(),
@@ -1446,9 +1856,13 @@ impl Flow {
                     ZipRefusal::WrongSize { name, got, want } if got < want => format!("{name} is {got} bytes, and the file should be {want}: the download isn't complete."),
                     ZipRefusal::WrongSize { name, got, want } => format!("{name} is {got} bytes, and the file should be {want}: it is not the file Google publishes for build {}.", build.build),
                     ZipRefusal::WrongSha256 { name } => format!("{name} is not the file Google publishes for build {} (its SHA-256 differs). Download it again from Google's page.", build.build),
-                });
-                s.footer =
-                    vec!["The file stays on this computer. Nothing of it is sent anywhere.".into()];
+                }).or_else(|| trouble.as_ref().map(|t| match t {
+                    DownloadTrouble::Interrupted { got, want, detail } => format!(
+                        "The download from Google's server stopped before it was complete: {got} of {want} bytes had arrived{}. You can try again.",
+                        detail.as_ref().map(|d| format!(" ({d})")).unwrap_or_default()
+                    ),
+                    DownloadTrouble::Storage(detail) => format!("The installer could not keep the download on this computer ({detail}). You can try again once that is put right."),
+                }));
             }
             Step::Answers => {
                 s.state = "answers";

@@ -19,8 +19,11 @@
 //!   ([`BuildIndex::lookup`]). There is no nearest build: the `tested` mark is
 //!   one per build, earned with that build's own bootloader and baseband.
 //!
-//! The installer never fetches `url`. It is recorded for the day Google's
-//! terms are known to allow a download; `page` is what a front end opens.
+//! `url` is the one address anything of Google's is ever fetched from (the
+//! maintainer's decision of 2026-11-12): once the owner has accepted Google's
+//! terms in the flow, a front end fetches the zip from it, and the core checks
+//! every answer ([`crate::download`]). [`is_download_url`] is the rule for it,
+//! here and on every redirect. `page` is what a front end opens for the owner.
 use crate::hash::is_sha256_hex;
 use crate::manifest::is_calendar_version;
 use crate::{Error, Result};
@@ -69,7 +72,9 @@ pub struct Build {
     pub baseband: String,
     /// The zip's name as Google publishes it.
     pub zip: String,
-    /// On `dl.google.com`. Never fetched by the installer.
+    /// On `https://dl.google.com/`. Fetched only through
+    /// [`crate::flow::Flow::factory_download`], after Google's terms were
+    /// accepted.
     pub url: String,
     /// Google's factory images page, which a front end opens for the owner.
     pub page: String,
@@ -133,6 +138,18 @@ fn is_version(s: &str) -> bool {
         && all(s, |b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
+/// Whether `url` is an address the installer may fetch Google's factory
+/// image from: `https`, the host `dl.google.com` and nothing else. The host
+/// is fixed, and no character that could name another one (@, :, ?, #, %, a
+/// backslash) is allowed after it. The one rule for the index's `url` and for
+/// every redirect a download is sent on.
+pub fn is_download_url(url: &str) -> bool {
+    url.strip_prefix(DOWNLOAD_HOST).is_some_and(|path| {
+        all(path, |c| c.is_ascii_alphanumeric() || b"._/-".contains(&c))
+            && !path.split('/').any(|part| part == ".." || part == ".")
+    })
+}
+
 fn check_build(b: RawBuild, codename: &str) -> Result<Build> {
     if !is_build_id(&b.build) {
         return err("a build id is not valid");
@@ -173,13 +190,7 @@ fn check_build(b: RawBuild, codename: &str) -> Result<Build> {
             format!("{what}: the zip is not named for {codename} and this build")
         });
     }
-    // The host is fixed, and no character that could name another one
-    // (@, :, ?, #, %, a backslash) is allowed after it.
-    let path_ok = b.url.strip_prefix(DOWNLOAD_HOST).is_some_and(|path| {
-        all(path, |c| c.is_ascii_alphanumeric() || b"._/-".contains(&c))
-            && !path.split('/').any(|part| part == ".." || part == ".")
-    });
-    if !path_ok {
+    if !is_download_url(&b.url) {
         return err(format!("{what}: url is not on dl.google.com"));
     }
     if !b.url.ends_with(&format!("/{}", b.zip)) {

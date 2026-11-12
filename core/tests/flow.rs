@@ -108,7 +108,16 @@ fn flow_at(bundle: &TestBundle, phone: &FakePhone, until: &str) -> Flow {
     flow_from(begin(bundle), bundle, phone, until)
 }
 fn flow_from(mut flow: Flow, bundle: &TestBundle, phone: &FakePhone, until: &str) -> Flow {
-    for state in ["warning", "phone", "factory-image", "answers", "dry-run"] {
+    // Google's terms are not accepted here, so the factory image is handed
+    // in by the owner; the tests of the download accept them
+    for state in [
+        "warning",
+        "phone",
+        "google-terms",
+        "factory-image",
+        "answers",
+        "dry-run",
+    ] {
         assert_eq!(flow.screen().state, state);
         if state == until {
             return flow;
@@ -116,6 +125,7 @@ fn flow_from(mut flow: Flow, bundle: &TestBundle, phone: &FakePhone, until: &str
         match state {
             "warning" => flow.acknowledge_warning().unwrap(),
             "phone" => look(&mut flow, phone).unwrap(),
+            "google-terms" => flow.decline_google_terms().unwrap(),
             "factory-image" => {
                 give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap()
             }
@@ -519,9 +529,9 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
         s.vars.insert("current-slot".into(), "a".into());
     });
 
-    // The owner unlocked it: on to the factory image
+    // The owner unlocked it: on to Google's terms for the factory image
     look(&mut flow, &phone).unwrap();
-    assert!(matches!(flow.step(), Step::FactoryImage { build, .. } if build.build == PHONE_BUILD));
+    assert!(matches!(flow.step(), Step::GoogleTerms { build, .. } if build.build == PHONE_BUILD));
     // An unlocked phone is not asked again
     only_reads(&phone, 3);
 }
@@ -641,12 +651,12 @@ fn a_phone_that_does_not_answer_the_unlock_question_gets_the_steps_for_both_case
         }
     );
     only_reads(&phone, 1);
-    // And from there to the factory image once its owner unlocked it
+    // And from there towards the factory image once its owner unlocked it
     phone.edit(|s| {
         s.vars.insert("unlocked".into(), "yes".into());
     });
     look(&mut flow, &phone).unwrap();
-    assert_eq!(flow.screen().state, "factory-image");
+    assert_eq!(flow.screen().state, "google-terms");
 }
 
 #[test]
@@ -754,7 +764,7 @@ fn a_phone_that_reports_one_slots_bootloader_stops_and_no_slot_is_switched() {
     let phone = self::phone("ready");
     let mut flow = flow_at(&allowed, &phone, "phone");
     look(&mut flow, &phone).unwrap();
-    assert_eq!(flow.screen().state, "factory-image");
+    assert_eq!(flow.screen().state, "google-terms");
 
     // Both reported, and different
     let phone = self::phone("slots-differ");
@@ -791,9 +801,12 @@ fn the_maintainers_override_passes_the_one_slot_stop_in_a_dry_run_and_says_so() 
     flow.acknowledge_warning().unwrap();
     assert_eq!(flow.screen().notice, None);
     look(&mut flow, &phone).unwrap();
-    assert_eq!(flow.screen().state, "factory-image");
+    assert_eq!(flow.screen().state, "google-terms");
     // From then on every screen says it, in the same words, before anything else
     assert_eq!(SLOT_CHECK_SKIPPED, "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.");
+    assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+    flow.decline_google_terms().unwrap();
+    assert_eq!(flow.screen().state, "factory-image");
     assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
     give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap();
     assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
@@ -1060,6 +1073,7 @@ fn a_phone_on_slot_b_stops_unless_it_is_a_reinstall() {
     );
     flow.acknowledge_warning().unwrap();
     look(&mut flow, &phone).unwrap();
+    flow.decline_google_terms().unwrap();
     give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap();
     flow.answers(&answers()).unwrap();
     let session = block_on(flow.dry_run(phone.clone())).unwrap().unwrap();
@@ -1250,7 +1264,16 @@ fn a_factory_zip_with_a_wrong_name_size_or_digest_is_not_taken() {
         (file.name.as_str(), file.size, file.build.as_str()),
         (name.as_str(), zip.len() as u64, PHONE_BUILD)
     );
-    assert!(screen.body.join(" ").contains("never downloads them"));
+    // The owner did not accept Google's terms in the installer: it says so,
+    // downloads nothing, and takes the file they save from Google's page
+    let body = screen.body.join(" ");
+    assert!(body
+        .contains("You did not accept Google's terms in the installer, so it downloads nothing."));
+    assert!(body.contains("Omarchy Mobile does not host them or pass them on."));
+    assert!(matches!(
+        flow.factory_download(0),
+        Err(Error::Refused(why)) if why.contains("Google's terms were not accepted")
+    ));
     assert!(
         screen.body.join(" ").contains("TEST.260101.001.A1"),
         "the carrier variant is named"
@@ -1748,21 +1771,27 @@ fn a_screen_is_plain_data_for_any_front_end() {
     assert_eq!(v["file"]["name"], json!(bundle.factory_zip_name));
     assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     assert!(v["stop"].is_null());
-    // The page to open is Google's, from the signed index, and never the download itself
+    // The page to open is Google's, from the signed index. The address of
+    // the download itself is on no screen: a front end gets it only as a
+    // typed request, once Google's terms were accepted
     assert_eq!(
         v["link"],
         "https://developers.google.com/android/images#cheetah"
     );
-    assert!(!v.to_string().contains("dl.google.com"));
+    assert!(!v.to_string().contains("dl.google.com/"));
     // Each state names itself and what the front end does next
     let mut seen = Vec::new();
     let mut flow = begin(&bundle);
-    for _ in 0..5 {
+    for _ in 0..6 {
         let s = flow.screen();
+        assert!(!serde_json::to_string(&s)
+            .unwrap()
+            .contains("dl.google.com/"));
         seen.push((s.state, s.action));
         match s.state {
             "warning" => flow.acknowledge_warning().unwrap(),
             "phone" => look(&mut flow, &phone).unwrap(),
+            "google-terms" => flow.decline_google_terms().unwrap(),
             "factory-image" => {
                 give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap()
             }
@@ -1775,6 +1804,7 @@ fn a_screen_is_plain_data_for_any_front_end() {
         [
             ("warning", "acknowledge"),
             ("phone", "read-phone"),
+            ("google-terms", "accept-terms"),
             ("factory-image", "take-file"),
             ("answers", "answers"),
             ("dry-run", "dry-run")
