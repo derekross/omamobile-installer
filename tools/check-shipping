@@ -1,7 +1,8 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# What a build that ships must not hold: a way to write to a phone, and the
-# pretend phone with the test key it trusts.
+# What a build that ships must not hold: a way to write to a phone anywhere
+# but the command-line tool's `install --write`, and the pretend phone with
+# the test key it trusts.
 #
 #   tools/check-shipping            the sources. Builds nothing, runs nothing
 #   tools/check-shipping --built [--control FAKE_PHONE_TOOL]
@@ -17,10 +18,14 @@
 # leave one at target/debug/omamobile-install): the strings looked for in
 # the shipping tool must be found in that one, or the look proves nothing.
 #
-# This is the state of the main branch: both front ends end at a dry run.
-# When a front end is given a write path, by the maintainer's decision, the
-# checks here for that front end are changed with it, on purpose and in the
-# same pull request; they are not to be loosened to let something through.
+# The web page ends at a dry run. The command-line tool has the one write
+# path, `install --write`, and the checks for it here were changed with it,
+# on purpose and in the same pull request: the flow opens one writing
+# session, in the one function that checks every condition for a write, and
+# the tool sets the flow's write switch in one place, from `--write` alone.
+# When the page is given a write path, by the maintainer's decision, its
+# checks are changed the same way; they are not to be loosened to let
+# something through.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 export LC_ALL=C
@@ -60,13 +65,38 @@ none "the write switch is not a default feature" "^default *=.*$feature" web/Car
 once "the page's direct session is a dry run unless built with that switch" \
   "dry_run: !cfg!(feature = \"$feature\")," web/src/lib.rs
 
-# The command-line tool: its only session is the one the core's flow opens,
-# and that one is a dry run by a literal in the core
+# The command-line tool: its only sessions are the ones the core's flow
+# opens. The flow opens one as a dry run by a literal, and one that writes,
+# in the one function that checks every condition for a write
 none "the command-line tool opens no session of its own and names no session options" \
   'Session::connect|connect_pinned|PhoneOptions|dry_run *: *false' cli/src/*.rs
-once "the flow's session is opened as a dry run" "dry_run: true," core/src/flow.rs
-none "the flow opens no writing session" 'dry_run *: *false' core/src/flow.rs
+once "the flow's dry-run session is opened as a dry run" "dry_run: true," core/src/flow.rs
+# in_fn FILE PCRE: each matching line, with the function it is in
+in_fn() {
+  awk -v pattern="$2" '
+    /^ *(pub )?(async )?fn [a-z_]+/ { at = $0 }
+    $0 ~ pattern { print FILENAME ":" FNR ": in: " at }
+  ' "$1"
+}
+writers=$(in_fn core/src/flow.rs 'dry_run *: *false')
+if [[ $(printf '%s\n' "$writers" | grep -c .) == 1 && $writers == *"pub async fn begin_write<"* ]]; then
+  ok "the flow opens one writing session, in begin_write"
+else
+  bad "the flow opens a writing session outside begin_write, or none" "$writers"
+fi
+switches=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' cli/src/*.rs core/src/*.rs web/src/*.rs /dev/null || true)
+if [[ $switches == "cli/src/main.rs:"*"options.write = write;" ]]; then
+  ok "the flow's write switch is set in one place, by the command-line tool, from --write"
+else
+  bad "the flow's write switch is set somewhere else than the command-line tool's one line" "$switches"
+fi
+once "--write is the one argument that sets it" '"--write" => write = true,' cli/src/main.rs
 
+# The page: it begins every flow as a dry run and reaches none of the
+# flow's write steps
+none "the page and its script reach none of the flow's write steps" \
+  'confirm_install|begin_write|write_done|write_failed|write_path' web/src/*.rs web/static/*
+once "the page begins every flow with the write switch off" "write: false," web/src/lib.rs
 # The page: a writing session only in its self-test function, which exists
 # only in a self-test build and is typed to the pretend phone
 writers=$(awk '
@@ -112,7 +142,7 @@ if (( built )); then
     if (( ${#found[@]} )); then bad "the shipping tool holds the pretend phone" "${found[@]}"
     else ok "the shipping tool holds nothing of the pretend phone or the test key"; fi
     # The refusals a shipping tool answers with are in it
-    for says in "this build has no pretend phone" "this version installs only with --dry-run"; do
+    for says in "this build has no pretend phone" "install needs --dry-run or --write, and has no default"; do
       if holds "$tool" "$says"; then ok "the shipping tool holds the refusal '$says'"
       else bad "the shipping tool does not hold the refusal '$says'"; fi
     done
@@ -137,6 +167,8 @@ if (( built )); then
     else ok "the shipping page's module holds nothing of the pretend phone or the test key"; fi
     none "the shipping page's glue has no pretend phone, no self-test and no override" \
       'fake_phone|selftest|slot_override|maintainer' "$glue"
+    none "what the shipping page loads has none of the flow's write steps" \
+      'confirm_install|begin_write|write_done|write_failed' "$glue" web/dist/*.js web/dist/*.html
     if grep -qF 'cannot write to a phone' web/dist/index.html; then ok "the shipping page says it cannot write to a phone"
     else bad "the shipping page does not say that it cannot write to a phone"; fi
     if ! command -v node >/dev/null; then
