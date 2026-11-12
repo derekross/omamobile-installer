@@ -12,7 +12,7 @@
 #
 # Neither mode runs the command-line tool or opens a USB device. The built
 # tool is read as bytes. The page's module is loaded in node, which has no
-# USB, and asked whether it can write.
+# USB, and asked what it exports.
 #
 # --control names a tool built with the `fake-phone` feature (the tests
 # leave one at target/debug/omamobile-install): the strings looked for in
@@ -23,6 +23,14 @@
 # on purpose and in the same pull request: the flow opens one writing
 # session, in the one function that checks every condition for a write, and
 # the tool sets the flow's write switch in one place, from `--write` alone.
+#
+# That a session writes only if `Flow::begin_write` opened it is held by
+# the compiler, not by this script: a writing session takes a token
+# (`flow::WriteToken`) whose one field is private to the flow's module, and
+# the function that takes it is not public (the core's doctests show that
+# making a token does not compile). What this script adds is what types do
+# not say: that inside the flow's own module the token is made once, in
+# `begin_write`, and that nobody widened the two declarations.
 # When the page is given a write path, by the maintainer's decision, its
 # checks are changed the same way; they are not to be loosened to let
 # something through.
@@ -57,34 +65,68 @@ once() {
 
 # ---- The sources ----------------------------------------------------------
 
-# The one switch that makes the page's older, direct session write
+# The switch that once made the page's direct session write is gone, with
+# that session: nothing names it
 feature='enable-''writes'
-none "nothing builds the web page with its write switch" "$feature" \
-  web/build.sh web/selftest.sh web/serve.py .cargo/config.toml .github/workflows/*.yml
-none "the write switch is not a default feature" "^default *=.*$feature" web/Cargo.toml cli/Cargo.toml core/Cargo.toml usb/Cargo.toml
-once "the page's direct session is a dry run unless built with that switch" \
-  "dry_run: !cfg!(feature = \"$feature\")," web/src/lib.rs
+none "nothing names the web page's old write switch" "$feature|enable_writes" \
+  web/Cargo.toml web/src/*.rs web/static/* web/build.sh web/selftest.sh web/serve.py \
+  cli/Cargo.toml core/Cargo.toml usb/Cargo.toml .cargo/config.toml .github/workflows/*.yml
 
-# The command-line tool: its only sessions are the ones the core's flow
-# opens. The flow opens one as a dry run by a literal, and one that writes,
-# in the one function that checks every condition for a write
-none "the command-line tool opens no session of its own and names no session options" \
-  'Session::connect|connect_pinned|PhoneOptions|dry_run *: *false' cli/src/*.rs
-once "the flow's dry-run session is opened as a dry run" "dry_run: true," core/src/flow.rs
+# A session that writes takes a token only the flow's module can make. The
+# two declarations that the compiler holds everyone else to:
+once "the write token's one field is private to the flow's module" \
+  "pub struct WriteToken(());" core/src/flow.rs
+none "the write token can't be cloned, copied or made by default" \
+  '^#\[derive\(' <(grep -B3 '^pub struct WriteToken' core/src/flow.rs)
+once "the function that opens a writing session is not public" \
+  "pub(crate) async fn connect_writing(" core/src/fastboot.rs
+none "no session option says whether a session writes" \
+  '^\s*pub dry_run\b' core/src/fastboot.rs
 # in_fn FILE PCRE: each matching line, with the function it is in
 in_fn() {
   awk -v pattern="$2" '
-    /^ *(pub )?(async )?fn [a-z_]+/ { at = $0 }
-    $0 ~ pattern { print FILENAME ":" FNR ": in: " at }
+    /^ *(pub )?(pub\(crate\) )?(async )?fn [a-z_]+/ { at = $0 }
+    $0 ~ pattern && $0 !~ /^pub struct / && $0 !~ /^ *\/\// { print FILENAME ":" FNR ": in: " at }
   ' "$1"
 }
-writers=$(in_fn core/src/flow.rs 'dry_run *: *false')
+# Inside the flow's module, where the field can be reached: made once, in
+# the one function that checks every condition for a write, and handed to
+# the one call that opens a writing session
+minted=$(in_fn core/src/flow.rs 'WriteToken[(][(][)][)]')
+if [[ $(printf '%s\n' "$minted" | grep -c .) == 1 && $minted == *"pub async fn begin_write<"* ]]; then
+  ok "the flow makes one write token, in begin_write"
+else
+  bad "the flow makes a write token outside begin_write, or none" "$minted"
+fi
+writers=$(in_fn core/src/flow.rs 'connect_writing[(]')
 if [[ $(printf '%s\n' "$writers" | grep -c .) == 1 && $writers == *"pub async fn begin_write<"* ]]; then
   ok "the flow opens one writing session, in begin_write"
 else
   bad "the flow opens a writing session outside begin_write, or none" "$writers"
 fi
-switches=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' cli/src/*.rs core/src/*.rs web/src/*.rs /dev/null || true)
+dry=$(in_fn core/src/flow.rs 'Session::connect(_pinned)?[(]')
+if [[ $(printf '%s\n' "$dry" | grep -c .) == 1 && $dry == *"pub async fn dry_run<"* ]]; then
+  ok "the flow's other session is the dry run's, which can't write"
+else
+  bad "the flow opens a session somewhere else than dry_run and begin_write" "$dry"
+fi
+# The flow's unit tests are a child of its module and can make a token (they
+# test the writing session's own refusals). They are test code only
+gated=$(grep -B1 -n '^mod tests;' core/src/flow.rs | grep -c '#\[cfg(test)\]' || true)
+[[ $gated == 1 ]] && ok "the flow's unit tests, which can make a token, are built only for tests" ||
+  bad "core/src/flow.rs has a tests module that is not behind cfg(test)"
+# Nowhere else is a token made or a writing session opened: not elsewhere
+# in the core, and not in a front end (where neither would compile)
+elsewhere=$(grep -rnE 'WriteToken\(\(\)\)|connect_writing' core/src cli/src web/src usb/src web/static |
+  grep -vE '^core/src/flow\.rs:|^core/src/flow/tests\.rs:|^core/src/fastboot\.rs:[0-9]+: *(///|//|pub\(crate\) async fn connect_writing\()' || true)
+if [[ -z $elsewhere ]]; then ok "no token is made and no writing session opened anywhere else"
+else bad "a write token or a writing session outside the flow" "$elsewhere"; fi
+
+# The command-line tool: its only sessions are the ones the core's flow
+# opens
+none "the command-line tool opens no session of its own and names no session options" \
+  'Session::connect|connect_pinned|connect_writing|PhoneOptions|WriteToken' cli/src/*.rs
+switches=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' cli/src/*.rs core/src/*.rs usb/src/*.rs web/src/*.rs /dev/null || true)
 if [[ $switches == "cli/src/main.rs:"*"options.write = write;" ]]; then
   ok "the flow's write switch is set in one place, by the command-line tool, from --write"
 else
@@ -103,20 +145,16 @@ none "the page cannot state the other bootloader slot's version for its owner" \
   'bootloader_slots_match|slots[-_]match' web/src/*.rs web/static/*
 once "the command-line tool takes that statement from one argument" \
   'options.bootloader_slots_match = Some(' cli/src/main.rs
-# The page: a writing session only in its self-test function, which exists
-# only in a self-test build and is typed to the pretend phone
-writers=$(awk '
-  /^(pub )?(async )?fn [a-z_]+/ { at = $0 }
-  /dry_run *: *false/ { print FILENAME ":" FNR ": in: " at }
-' web/src/lib.rs)
-if [[ $(printf '%s\n' "$writers" | grep -c .) == 1 && $writers == *"pub async fn selftest()"* ]]; then
-  ok "the page's module opens a writing session only in its self-test, against the pretend phone"
-else
-  bad "the page's module opens a writing session outside its self-test" "$writers"
-fi
+# The page: no session that writes, in any build. Its self-test walks an
+# install against the pretend phone through a session it opens directly,
+# which is a dry run, and exists only in a self-test build
+none "the page's module names no write token and no writing session" \
+  'WriteToken|connect_writing|dry_run *: *false' web/src/*.rs
 selftest_gate=$(grep -B2 -n '^pub async fn selftest()' web/src/lib.rs | grep -c '#\[cfg(feature = "selftest")\]' || true)
-[[ $selftest_gate == 1 ]] && ok "that self-test is built only with the selftest feature" ||
+[[ $selftest_gate == 1 ]] && ok "the page's self-test function is built only with the selftest feature" ||
   bad "the page's self-test function is not behind the selftest feature"
+none "the page's module has no direct session for the page to drive" \
+  '^pub struct Install\b|^pub async fn connect\(|fn writes_enabled' web/src/lib.rs
 none "the page's script calls nothing of the direct session" \
   'core\.connect\(|\.flash_boot\(|\.userdata_(start|feed|end)\(|\.finish\(|new core\.Install\b' web/static/*.js
 
@@ -180,7 +218,8 @@ if (( built )); then
     if ! command -v node >/dev/null; then
       bad "node is needed to load the page's module and ask whether it can write"
     else
-      # Loaded in node, which has no USB; the module is asked, not driven
+      # Loaded in node, which has no USB; the module's exports are listed, and
+      # nothing of it is called
       scratch=$(mktemp -d)
       trap 'rm -rf "$scratch"' EXIT
       cp "$glue" "$scratch/glue.mjs"
@@ -191,13 +230,14 @@ glue.initSync({ module: readFileSync(process.argv[2]) });
 const names = Object.keys(glue).sort();
 const extra = names.filter((n) => /fake|selftest|pretend/i.test(n));
 const statics = Object.getOwnPropertyNames(glue.InstallFlow).filter((n) => /selftest|fake/i.test(n));
-console.log(JSON.stringify({ writes: glue.writes_enabled(), extra, statics, names }));
+const direct = names.filter((n) => /^(connect|Install|RootProof|writes_enabled)$/.test(n));
+console.log(JSON.stringify({ direct, extra, statics, names }));
 JS
       answer=$(node "$scratch/ask.mjs" "$PWD/$wasm" 2>&1) || true
-      if [[ $answer == '{"writes":false,"extra":[],"statics":[],'* ]]; then
-        ok "the shipping page's module, loaded and asked, says it cannot write, and exports no pretend phone and no self-test"
+      if [[ $answer == '{"direct":[],"extra":[],"statics":[],"names":['*'"InstallFlow"'* ]]; then
+        ok "the shipping page's module, loaded, exports the flow, no direct session, no pretend phone and no self-test"
       else
-        bad "the shipping page's module, loaded and asked, did not say that it cannot write and has no pretend phone" "$answer"
+        bad "the shipping page's module, loaded, exports a direct session or a pretend phone, or did not load" "$answer"
       fi
     fi
   fi

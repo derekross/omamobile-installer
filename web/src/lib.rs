@@ -30,22 +30,26 @@
 //! and the bytes back; the core decides the rest. A fetch the browser
 //! refuses falls back to the file the owner saves from Google's page.
 //!
-//! [`Install`] is the older, direct way to a session, kept for the write
-//! path's size and its self-test. On a real phone it is a dry run unless the
-//! module is built with `enable-writes`, which nothing turns on. The write
-//! path is compiled in either way (the flag is read at run time), so the
-//! module's size is the real one.
-use omamobile_installer_core::bundle::{
-    self, ReleaseFiles, RootImageCheck, VerifiedRelease, VerifiedRootImage,
-};
+//! This module cannot open a session that writes, in any build. The core
+//! gives one out in a single place, the flow's step that begins the
+//! writes, which this file does not call; a session opened any other way
+//! holds every write back, and what a writing session must be handed
+//! cannot be made outside the core's flow (DESIGN §11, "One way to a
+//! session that writes"). The older direct session (`connect`, `Install`)
+//! and the cargo feature that could turn it into a writing one are gone,
+//! and with them the question the page asked about it: there is no build
+//! of this module for which the answer could be yes. The self-test's own
+//! install against the pretend phone is therefore a dry run too.
+use omamobile_installer_core::bundle::{self, ReleaseFiles, RootImageCheck, VerifiedRelease};
 use omamobile_installer_core::download::{FactoryDownload, FetchFailure, FetchNext, FetchResponse};
+#[cfg(feature = "selftest")]
+use omamobile_installer_core::fastboot::Session;
 use omamobile_installer_core::fastboot::{
-    PhoneId, PhoneOptions, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
+    PhoneId, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
 use omamobile_installer_core::flow::{
     AnswersInput, DownloadEnd, FactoryZipCheck, Flow, FlowOptions, OwnerAnswers,
 };
-use omamobile_installer_core::install::UserdataStream;
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_usb::UsbTransport;
 use serde_json::json;
@@ -117,21 +121,14 @@ impl RootCheck {
             c.update(chunk);
         }
     }
-    pub fn finish(&mut self) -> Result<RootProof, JsError> {
+    /// Whether the bytes were the root image the signed manifest lists.
+    pub fn finish(&mut self) -> Result<(), JsError> {
         let check = self
             .inner
             .take()
             .ok_or_else(|| JsError::new("already finished"))?;
-        Ok(RootProof {
-            inner: check.finish().map_err(js)?,
-        })
+        check.finish().map(|_| ()).map_err(js)
     }
-}
-
-/// Proof that the root image matched the signed manifest.
-#[wasm_bindgen]
-pub struct RootProof {
-    inner: VerifiedRootImage,
 }
 
 /// Where a phone is: a USB device the person picked in the browser's
@@ -505,136 +502,6 @@ fn describe(release: &VerifiedRelease) -> String {
     .to_string()
 }
 
-/// An install session on one phone: the core's fixed sequence.
-#[wasm_bindgen]
-pub struct Install {
-    session: Session<UsbTransport>,
-    release: VerifiedRelease,
-    stream: Option<UserdataStream>,
-    root: Option<VerifiedRootImage>,
-    begun: bool,
-}
-
-/// Open the phone and run every read-only check. A phone that reports only
-/// one slot's bootloader version is refused: nobody's word is taken for the
-/// other slot.
-#[wasm_bindgen]
-pub async fn connect(release: Release, phone: Phone, reinstall: bool) -> Result<Install, JsError> {
-    // The only kind of link in a build without the pretend phone
-    #[allow(clippy::infallible_destructuring_match)]
-    let device = match &phone.link {
-        Link::Usb(device) => device,
-        #[cfg(feature = "selftest")]
-        Link::Fake(_) => return Err(JsError::new("not a USB phone")),
-    };
-    let transport = UsbTransport::open(device).await.map_err(js)?;
-    let options = PhoneOptions {
-        reinstall,
-        bootloader_slots_confirmed: None,
-        dry_run: !cfg!(feature = "enable-writes"),
-        // Never on a path that can be built to write
-        maintainer_skip_bootloader_slot_check: false,
-    };
-    let session = Session::connect(transport, &release.inner, &phone.serial, options)
-        .await
-        .map_err(js)?;
-    Ok(Install {
-        session,
-        release: release.inner,
-        stream: None,
-        root: None,
-        begun: false,
-    })
-}
-
-#[wasm_bindgen]
-impl Install {
-    pub fn facts(&self) -> String {
-        let f = self.session.facts();
-        json!({"product": f.product, "current_slot": f.current_slot, "bootloader": f.bootloader, "baseband": f.baseband, "max_download_size": f.max_download_size}).to_string()
-    }
-    pub fn plan(&self) -> Vec<String> {
-        self.session.plan()
-    }
-    pub fn log(&self) -> Vec<String> {
-        self.session.log().to_vec()
-    }
-
-    /// The plan's boot image number `index`, as bytes. Checked here, again.
-    pub async fn flash_boot(&mut self, index: usize, bytes: Vec<u8>) -> Result<(), JsError> {
-        let write = self
-            .release
-            .manifest()
-            .boot_writes
-            .get(index)
-            .ok_or_else(|| JsError::new("no such boot image in the plan"))?
-            .clone();
-        let image = self.release.verify_boot_image(&write, &bytes).map_err(js)?;
-        self.session.flash_boot(&image).await.map_err(js)
-    }
-
-    /// `segment_cap`: the largest sparse image to hold in memory, in bytes.
-    pub fn userdata_start(&mut self, proof: RootProof, segment_cap: f64) {
-        let cap = (segment_cap as u64).min(self.session.max_download_size());
-        self.stream = Some(UserdataStream::new(cap));
-        self.root = Some(proof.inner);
-        self.begun = false;
-    }
-
-    /// The next chunk of the compressed root image; flashes what is ready.
-    pub async fn userdata_feed(&mut self, chunk: Vec<u8>) -> Result<f64, JsError> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| JsError::new("userdata_start first"))?;
-        stream.feed(&chunk).map_err(js)?;
-        if !self.begun {
-            if let (Some(len), Some(root)) = (stream.image_len(), self.root.as_ref()) {
-                self.session.begin_userdata(root, len).await.map_err(js)?;
-                self.begun = true;
-            }
-        }
-        while let Some(segment) = stream.next_segment().map_err(js)? {
-            self.session
-                .flash_userdata_segment(&segment)
-                .await
-                .map_err(js)?;
-        }
-        let (done, total) = stream.progress();
-        Ok(if total == 0 {
-            0.0
-        } else {
-            done as f64 / total as f64
-        })
-    }
-
-    pub async fn userdata_end(&mut self) -> Result<(), JsError> {
-        let mut stream = self
-            .stream
-            .take()
-            .ok_or_else(|| JsError::new("userdata_start first"))?;
-        stream.end().map_err(js)?;
-        while let Some(segment) = stream.next_segment().map_err(js)? {
-            self.session
-                .flash_userdata_segment(&segment)
-                .await
-                .map_err(js)?;
-        }
-        self.session.finish_userdata().await.map_err(js)
-    }
-
-    /// Make slot B active and restart.
-    pub async fn finish(&mut self) -> Result<(), JsError> {
-        self.session.activate_and_reboot().await.map_err(js)
-    }
-}
-
-/// Whether this build can write to a real phone.
-#[wasm_bindgen]
-pub fn writes_enabled() -> bool {
-    cfg!(feature = "enable-writes")
-}
-
 #[cfg(feature = "selftest")]
 #[path = "../../core/tests/support/fake.rs"]
 mod fake;
@@ -803,12 +670,21 @@ async fn walk_built_in<T: Transport>(
     session.activate_and_reboot().await
 }
 
-/// A whole install inside the browser against the tests' fake phone, with a
-/// signed test bundle built in, and a zstd timing. No USB. JSON out.
+/// A whole install walked inside the browser against the tests' fake phone,
+/// with a signed test bundle built in, and a zstd timing. No USB. JSON out.
+///
+/// It is a dry run: every image is checked and cut as an install would cut
+/// it, and each write is recorded as held back. A session that writes can
+/// only come from the step of the core's flow that begins the writes,
+/// which the page does not reach, so this module has no way to write even
+/// to the pretend phone. The writes themselves are tested where such a
+/// session can be opened: in the core's tests and through the command-line
+/// tool.
 #[cfg(feature = "selftest")]
 #[wasm_bindgen]
 pub async fn selftest() -> Result<String, JsError> {
     use fake::{FakePhone, SERIAL};
+    use omamobile_installer_core::fastboot::PhoneOptions;
     use omamobile_installer_core::install::flash_userdata_from_reader;
     use omamobile_installer_core::zstd_push::ZstdPush;
     let files = ReleaseFiles {
@@ -833,11 +709,8 @@ pub async fn selftest() -> Result<String, JsError> {
     check.update(root_zst);
     let root = check.finish().map_err(js)?;
     let phone = FakePhone::new("cheetah");
-    // The pretend phone is written to: said here, since the default is a
-    // dry run
     let options = PhoneOptions {
         bootloader_slots_confirmed: Some("fake-1.0".into()),
-        dry_run: false,
         ..Default::default()
     };
     let mut session = Session::connect(phone.clone(), &release, SERIAL, options)
@@ -854,16 +727,13 @@ pub async fn selftest() -> Result<String, JsError> {
         .map_err(js)?;
     session.activate_and_reboot().await.map_err(js)?;
 
-    // What the fake phone holds afterwards
-    let mut raw = Vec::new();
-    ZstdPush::new()
-        .push(root_zst, &mut |d| {
-            raw.extend_from_slice(d);
-            Ok(())
-        })
-        .map_err(js)?;
-    let userdata_ok = phone.partition("userdata")[..raw.len()] == raw[..];
-    let boot_ok = phone.partition("boot_b")[..images[0].len()] == *images[0];
+    // What the session held back, and what the fake phone was sent
+    let would = session
+        .log()
+        .iter()
+        .filter(|l| l.starts_with("would: "))
+        .count();
+    let would_end = session.log().last().map(String::as_str) == Some("would: reboot");
     let wrong_phone = Session::connect(
         FakePhone::new("panther"),
         &release,
@@ -888,7 +758,8 @@ pub async fn selftest() -> Result<String, JsError> {
     let ms = js_sys::Date::now() - start;
 
     Ok(json!({
-        "install_done": session.is_done(), "raw_image_bytes": raw_len, "userdata_matches": userdata_ok, "boot_b_matches": boot_ok,
+        "install_done": session.is_done(), "dry_run": session.is_dry_run(), "raw_image_bytes": raw_len,
+        "writes_held_back": would, "ends_with_reboot_held_back": would_end, "sent_not_a_question": phone.not_reads(),
         "partitions_written": phone.written(), "active_slot": phone.0.borrow().active_slot, "commands": phone.log().len(),
         "wrong_phone_refused": wrong_phone, "test_key_refused_by_release_keys": refused_by_release_keys,
         "zstd_mib": bytes >> 20, "zstd_ms": ms, "zstd_mib_per_s": (bytes as f64 / 1048576.0) / (ms / 1000.0),

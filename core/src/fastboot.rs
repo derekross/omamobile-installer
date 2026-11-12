@@ -27,8 +27,8 @@
 //! [`unlock_ability`], which sends `flashing get_unlock_ability` and changes
 //! nothing on the phone. That list is closed, and checked again at the one
 //! place a command leaves (`Client::allowed`): a `flash:` leaves only for a
-//! partition on the session's own list, which `connect` builds from the
-//! verified release (the descriptor's `BOOT_IMAGES` with `_b`, and
+//! partition on the session's own list, which the session that writes
+//! builds from the verified release (the descriptor's `BOOT_IMAGES` with `_b`, and
 //! `userdata`), and the questions outside a session have an empty list.
 //! There is no code for `erase`, `format`, `oem`, any other `flashing`
 //! command (`flashing unlock` among them), another slot or a caller-chosen
@@ -47,6 +47,7 @@
 //! A session that stops partway says how far it got ([`Session::reach`]),
 //! from what the phone confirmed: the flow's stop is worded from that.
 use crate::bundle::{VerifiedImage, VerifiedRelease, VerifiedRootImage};
+use crate::flow::WriteToken;
 use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
 use crate::sparse;
@@ -466,8 +467,25 @@ fn parse_size(text: &str) -> Option<u64> {
 
 /// What the person running the install has said about the phone.
 ///
-/// The default is a dry run ([`PhoneOptions::default`]): a session that
-/// writes is one whose maker wrote `dry_run: false`.
+/// Nothing here says whether a session writes. That is not an option: a
+/// session opened with [`Session::connect`] or [`Session::connect_pinned`]
+/// holds every write back, whatever its options, and the one that writes is
+/// opened by [`crate::flow::Flow::begin_write`] alone, with a
+/// [`WriteToken`] only that function can make. The field that used to say
+/// it is gone, and with it the way for a caller to ask for a writing
+/// session:
+///
+/// ```compile_fail
+/// use omamobile_installer_core::fastboot::PhoneOptions;
+/// let options = PhoneOptions { dry_run: false, ..Default::default() };
+/// ```
+///
+/// The control, which compiles: the same lines with a field there is.
+///
+/// ```
+/// use omamobile_installer_core::fastboot::PhoneOptions;
+/// let options = PhoneOptions { reinstall: true, ..Default::default() };
+/// ```
 #[derive(Debug, Clone)]
 pub struct PhoneOptions {
     /// Slot B is the current slot and holds Omarchy Mobile. Without it a
@@ -477,25 +495,20 @@ pub struct PhoneOptions {
     /// When the bootloader reports no per-slot versions: the version the
     /// owner checked on the other slot. It must equal the current slot's.
     pub bootloader_slots_confirmed: Option<String>,
-    /// Do every check, send no write: each is recorded in the log as
-    /// `would: ...` instead. On by default.
-    pub dry_run: bool,
     /// The maintainer's override, for a dry run only: go on when the
     /// bootloader reports only the current slot's version, without knowing
     /// the other. It never passes two versions that are known to differ.
-    /// Without `dry_run` the session is refused before anything is sent
+    /// The session that writes is refused with it before anything is sent
     /// ([`Error::OverrideOutsideDryRun`]).
     pub maintainer_skip_bootloader_slot_check: bool,
 }
 
 impl Default for PhoneOptions {
-    /// A dry run, with nothing said about the phone. Options that write are
-    /// never what a caller gets without asking for them.
+    /// Nothing said about the phone, and no check skipped.
     fn default() -> Self {
         PhoneOptions {
             reinstall: false,
             bootloader_slots_confirmed: None,
-            dry_run: true,
             maintainer_skip_bootloader_slot_check: false,
         }
     }
@@ -531,9 +544,12 @@ pub struct Session<T: Transport> {
     serial: String,
     facts: PhoneFacts,
     state: State,
-    dry_run: bool,
+    /// What lets this session write: the token `Flow::begin_write` made
+    /// for it. `None` in every other session, which holds every write back
+    /// (a dry run).
+    token: Option<WriteToken>,
     /// The bootloader-slot check was skipped by the maintainer's override.
-    /// Only ever true together with `dry_run`.
+    /// Only ever true in a dry run.
     slot_check_skipped: bool,
     /// The phone's size for each boot image's partition, in the plan's order.
     boot_partition_sizes: Vec<u64>,
@@ -556,7 +572,9 @@ impl<T: Transport> core::fmt::Debug for Session<T> {
 
 impl<T: Transport> Session<T> {
     /// Open a session on one phone and run every read-only check. Nothing is
-    /// written. `expected_serial` is the serial number of the USB device the
+    /// written, by this call or through the session it gives: it is a dry
+    /// run, which records each write as `would: ...` in its log and sends
+    /// none. `expected_serial` is the serial number of the USB device the
     /// person chose; the phone must report the same one.
     pub async fn connect(
         transport: T,
@@ -570,16 +588,41 @@ impl<T: Transport> Session<T> {
     }
 
     /// As [`Self::connect`], for a phone already known by its [`PhoneId`]
-    /// (the one an earlier step looked at).
+    /// (the one an earlier step looked at). A dry run, like it.
     pub async fn connect_pinned(
         transport: T,
         release: &VerifiedRelease,
         expected: &PhoneId,
         options: PhoneOptions,
     ) -> Result<Self> {
+        Self::open(transport, release, expected, options, None).await
+    }
+
+    /// The session that writes. It takes a [`WriteToken`], which only
+    /// [`crate::flow::Flow::begin_write`] can make, after it has checked
+    /// every condition of a write; and it is not public, so no other crate
+    /// can call it even with one. The checks are the same as a dry run's.
+    pub(crate) async fn connect_writing(
+        transport: T,
+        release: &VerifiedRelease,
+        expected: &PhoneId,
+        options: PhoneOptions,
+        token: WriteToken,
+    ) -> Result<Self> {
+        Self::open(transport, release, expected, options, Some(token)).await
+    }
+
+    async fn open(
+        transport: T,
+        release: &VerifiedRelease,
+        expected: &PhoneId,
+        options: PhoneOptions,
+        token: Option<WriteToken>,
+    ) -> Result<Self> {
+        let dry_run = token.is_none();
         // The override exists for dry runs. A session that could write
         // refuses it whole, before a question is asked of the phone.
-        if options.maintainer_skip_bootloader_slot_check && !options.dry_run {
+        if options.maintainer_skip_bootloader_slot_check && !dry_run {
             return Err(Error::OverrideOutsideDryRun);
         }
         let m: &Manifest = release.manifest();
@@ -592,7 +635,7 @@ impl<T: Transport> Session<T> {
             .map(|w| w.partition.name().to_string())
             .collect();
         flashable.push(m.root_image.partition.name().to_string());
-        let mut client = Client::for_session(transport, flashable, options.dry_run);
+        let mut client = Client::for_session(transport, flashable, dry_run);
         let serial = client.getvar("serialno").await?;
         if PhoneId::of_serial(&serial).as_ref() != Some(expected) {
             return Err(Error::Refused(
@@ -644,7 +687,7 @@ impl<T: Transport> Session<T> {
             (_, _, Some(confirmed)) if *confirmed == bootloader => {}
             (_, _, Some(confirmed)) => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
             // Only the unknown case, and only in a dry run (checked above too)
-            _ if options.maintainer_skip_bootloader_slot_check && options.dry_run => {
+            _ if options.maintainer_skip_bootloader_slot_check && dry_run => {
                 slot_check_skipped = true;
                 client.log.push("skipped: the bootloader-slot check (maintainer override, dry run only)".into());
             }
@@ -706,7 +749,7 @@ impl<T: Transport> Session<T> {
             serial,
             facts,
             state: State::Boot(0),
-            dry_run: options.dry_run,
+            token,
             slot_check_skipped,
             boot_partition_sizes,
             userdata_preflight: None,
@@ -801,7 +844,7 @@ impl<T: Transport> Session<T> {
     }
     /// Whether this session holds every write back.
     pub fn is_dry_run(&self) -> bool {
-        self.dry_run
+        self.token.is_none()
     }
     /// Whether the maintainer's override skipped the bootloader-slot check.
     /// Such a session is a dry run, and says nothing about a real install.
@@ -848,7 +891,7 @@ impl<T: Transport> Session<T> {
             )));
         }
         self.still_pinned().await?;
-        if self.dry_run {
+        if self.is_dry_run() {
             self.client.log.push(format!(
                 "would: download {} bytes, flash:{}",
                 data.len(),
@@ -1002,7 +1045,7 @@ impl<T: Transport> Session<T> {
         match self.state {
             State::Userdata { segments, .. } if segments > 0 => {
                 self.state = State::UserdataDone;
-                if !self.dry_run {
+                if !self.is_dry_run() {
                     self.reach = WriteReach::Written;
                 }
                 Ok(())
@@ -1021,7 +1064,7 @@ impl<T: Transport> Session<T> {
         if let Err(e) = self.still_pinned().await {
             return self.fail(e);
         }
-        if self.dry_run {
+        if self.is_dry_run() {
             self.client.log.push("would: set_active:b".into());
             self.client.log.push("would: reboot".into());
             self.state = State::Rebooted;
@@ -1366,11 +1409,15 @@ mod tests {
     }
 
     #[test]
-    fn the_default_options_are_a_dry_run() {
-        let options = PhoneOptions::default();
-        assert!(options.dry_run);
-        assert!(!options.reinstall && !options.maintainer_skip_bootloader_slot_check);
-        assert_eq!(options.bootloader_slots_confirmed, None);
+    fn the_default_options_say_nothing_and_skip_nothing() {
+        // Whether a session writes is not among them: see `WriteToken`
+        let PhoneOptions {
+            reinstall,
+            bootloader_slots_confirmed,
+            maintainer_skip_bootloader_slot_check,
+        } = PhoneOptions::default();
+        assert!(!reinstall && !maintainer_skip_bootloader_slot_check);
+        assert_eq!(bootloader_slots_confirmed, None);
     }
 
     /// A phone that answers every command with the packets it was given.

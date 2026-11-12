@@ -3,11 +3,12 @@
 mod support;
 use omamobile_installer_core::bundle::VerifiedRelease;
 use omamobile_installer_core::fastboot::{PhoneOptions, Session};
-use omamobile_installer_core::install::flash_userdata_from_reader;
+use omamobile_installer_core::flow::FlowOptions;
 use omamobile_installer_core::Error;
 use pollster::block_on;
 use serde_json::json;
 use support::bundle::TestBundle;
+use support::drive::{walk, writing_session};
 use support::fake::{FakePhone, SENTINEL, SERIAL};
 
 const OURS: [&str; 6] = [
@@ -19,35 +20,63 @@ const OURS: [&str; 6] = [
     "vendor_kernel_boot_b",
 ];
 
-/// A session that writes, on a phone whose other slot was confirmed. The
-/// default options are a dry run: writing is said, here.
+/// What the owner said of a phone that tells one bootloader slot, for a
+/// session opened directly. Such a session is a dry run: [`Session::connect`]
+/// opens no other kind.
 fn options() -> PhoneOptions {
     PhoneOptions {
         bootloader_slots_confirmed: Some("fake-1.0".into()),
-        dry_run: false,
         ..Default::default()
     }
 }
 
-/// The whole install, as a front end drives it.
-async fn install(
+/// The same statement, for a flow that writes.
+fn stated() -> FlowOptions {
+    FlowOptions {
+        write: true,
+        bootloader_slots_match: Some("fake-1.0".into()),
+        ..Default::default()
+    }
+}
+
+/// The whole install through a session opened directly: a dry run.
+async fn dry_install(
     bundle: &TestBundle,
     release: &VerifiedRelease,
     phone: &FakePhone,
     options: PhoneOptions,
 ) -> Result<Vec<String>, Error> {
-    let mut check = release.root_image_check();
-    check.update(&bundle.root_zst);
-    let root = check.finish()?;
     let mut session = Session::connect(phone.clone(), release, SERIAL, options).await?;
-    for write in &release.manifest().boot_writes {
-        let image = release.verify_boot_image(write, bundle.image(&write.image))?;
-        session.flash_boot(&image).await?;
-    }
-    flash_userdata_from_reader(&mut session, &root, &bundle.root_zst[..], None).await?;
-    session.activate_and_reboot().await?;
+    assert!(session.is_dry_run());
+    walk(&mut session, bundle, release).await?;
     assert!(session.is_done());
     Ok(session.log().to_vec())
+}
+
+/// The whole install through the session that writes. Only the flow opens
+/// one (`Flow::begin_write`), so the flow is taken to its write step first;
+/// `then` runs on the phone once that session is open, for a fault that is
+/// to meet the writes and not the flow's questions before them.
+fn install_then(
+    bundle: &TestBundle,
+    phone: &FakePhone,
+    options: FlowOptions,
+    then: impl FnOnce(&FakePhone),
+) -> Result<Vec<String>, Error> {
+    let (flow, mut session) = writing_session(bundle, phone, options);
+    assert!(!session.is_dry_run());
+    then(phone);
+    block_on(walk(&mut session, bundle, flow.release().unwrap()))?;
+    assert!(session.is_done());
+    Ok(session.log().to_vec())
+}
+
+fn install(
+    bundle: &TestBundle,
+    phone: &FakePhone,
+    options: FlowOptions,
+) -> Result<Vec<String>, Error> {
+    install_then(bundle, phone, options, |_| {})
 }
 
 fn writes_in(log: &[String]) -> Vec<&String> {
@@ -57,9 +86,8 @@ fn writes_in(log: &[String]) -> Vec<&String> {
 #[test]
 fn an_install_writes_slot_b_and_userdata_and_nothing_else() {
     let bundle = TestBundle::new();
-    let release = bundle.verify().unwrap();
     let phone = FakePhone::new("cheetah");
-    block_on(install(&bundle, &release, &phone, options())).unwrap();
+    install(&bundle, &phone, stated()).unwrap();
 
     assert_eq!(phone.written(), OURS);
     for (name, size, _) in support::bundle::IMAGES {
@@ -121,16 +149,7 @@ fn a_dry_run_checks_everything_and_writes_nothing() {
     let bundle = TestBundle::new();
     let release = bundle.verify().unwrap();
     let phone = FakePhone::new("cheetah");
-    let log = block_on(install(
-        &bundle,
-        &release,
-        &phone,
-        PhoneOptions {
-            dry_run: true,
-            ..options()
-        },
-    ))
-    .unwrap();
+    let log = block_on(dry_install(&bundle, &release, &phone, options())).unwrap();
     assert!(phone.written().is_empty());
     assert!(writes_in(&phone.log()).is_empty(), "a dry run sent a write");
     assert!(!phone.0.borrow().rebooted);
@@ -143,6 +162,9 @@ fn a_dry_run_checks_everything_and_writes_nothing() {
     );
 }
 
+/// The checks a session starts with are one function for both kinds of
+/// session, and the kind that writes can't be opened from here: these go
+/// through a dry run's.
 fn refused_before_any_write(phone: &FakePhone, options: PhoneOptions, serial: &str) -> Error {
     let bundle = TestBundle::new();
     let release = bundle.verify().unwrap();
@@ -242,13 +264,13 @@ fn slots_the_bootloader_reports_as_equal_need_no_confirmation() {
         s.vars
             .insert("version-bootloader-b".into(), "fake-1.0".into());
     });
-    let writing = PhoneOptions {
-        dry_run: false,
+    let writing = FlowOptions {
+        write: true,
         ..Default::default()
     };
-    block_on(install(&bundle, &release, &phone, writing)).unwrap();
+    install(&bundle, &phone, writing).unwrap();
     assert_eq!(phone.written(), OURS);
-    // The default options, on the same kind of phone: a dry run
+    // A session opened directly, on the same kind of phone: a dry run
     let untouched = FakePhone::new("cheetah");
     untouched.edit(|s| {
         s.vars
@@ -256,7 +278,7 @@ fn slots_the_bootloader_reports_as_equal_need_no_confirmation() {
         s.vars
             .insert("version-bootloader-b".into(), "fake-1.0".into());
     });
-    block_on(install(
+    block_on(dry_install(
         &bundle,
         &release,
         &untouched,
@@ -271,16 +293,16 @@ fn slots_the_bootloader_reports_as_equal_need_no_confirmation() {
     phone.edit(|s| {
         s.vars.insert("current-slot".into(), "b".into());
     });
-    block_on(install(
+    install(
         &bundle,
-        &release,
         &phone,
-        PhoneOptions {
+        FlowOptions {
             reinstall: true,
-            ..options()
+            ..stated()
         },
-    ))
+    )
     .unwrap();
+    assert_eq!(phone.written(), OURS);
 }
 
 #[test]
@@ -324,13 +346,11 @@ fn a_partition_off_the_allowlist_is_refused_even_when_signed() {
 #[test]
 fn the_session_only_takes_this_releases_bytes_in_order() {
     let bundle = TestBundle::new();
-    let release = bundle.verify().unwrap();
     let phone = FakePhone::new("cheetah");
+    let (flow, mut session) = writing_session(&bundle, &phone, stated());
+    let release = flow.release().unwrap().clone();
     let writes = &release.manifest().boot_writes;
     block_on(async {
-        let mut session = Session::connect(phone.clone(), &release, SERIAL, options())
-            .await
-            .unwrap();
         // Bytes that aren't the signed image never become a VerifiedImage
         let mut wrong = bundle.image("boot").to_vec();
         wrong[5] ^= 1;
@@ -403,7 +423,7 @@ fn a_phone_that_answers_fail_stops_the_install() {
     let release = bundle.verify().unwrap();
     let phone = FakePhone::new("cheetah");
     phone.edit(|s| s.fail_on.push("flash:init_boot_b".into()));
-    let err = block_on(install(&bundle, &release, &phone, options())).unwrap_err();
+    let err = install(&bundle, &phone, stated()).unwrap_err();
     assert!(
         matches!(&err, Error::DeviceFail { command, message } if command == "flash:init_boot_b" && message == "injected failure"),
         "{err}"
@@ -419,10 +439,8 @@ fn a_phone_that_answers_fail_stops_the_install() {
     // After a failure the session sends no more writes
     let phone = FakePhone::new("cheetah");
     phone.edit(|s| s.fail_on.push("download:".into()));
+    let (_flow, mut session) = writing_session(&bundle, &phone, stated());
     block_on(async {
-        let mut session = Session::connect(phone.clone(), &release, SERIAL, options())
-            .await
-            .unwrap();
         let first = release
             .verify_boot_image(&release.manifest().boot_writes[0], bundle.image("boot"))
             .unwrap();
@@ -448,7 +466,7 @@ fn a_phone_that_answers_fail_stops_the_install() {
     let phone = FakePhone::new("cheetah");
     phone.edit(|s| s.fail_on.push("set_active".into()));
     assert!(matches!(
-        block_on(install(&bundle, &release, &phone, options())),
+        install(&bundle, &phone, stated()),
         Err(Error::DeviceFail { .. })
     ));
     assert!(!phone.0.borrow().rebooted);
@@ -457,11 +475,10 @@ fn a_phone_that_answers_fail_stops_the_install() {
 #[test]
 fn a_short_download_is_refused() {
     let bundle = TestBundle::new();
-    let release = bundle.verify().unwrap();
     // The phone offers to take fewer bytes than the image has
     let phone = FakePhone::new("cheetah");
     phone.edit(|s| s.short_data = true);
-    let err = block_on(install(&bundle, &release, &phone, options())).unwrap_err();
+    let err = install(&bundle, &phone, stated()).unwrap_err();
     assert_eq!(
         err,
         Error::ShortDownload {
@@ -478,7 +495,7 @@ fn a_short_download_is_refused() {
     // The USB write itself comes up short
     let phone = FakePhone::new("cheetah");
     phone.edit(|s| s.take_at_most = Some(1000));
-    let err = block_on(install(&bundle, &release, &phone, options())).unwrap_err();
+    let err = install(&bundle, &phone, stated()).unwrap_err();
     assert_eq!(
         err,
         Error::ShortDownload {
@@ -496,11 +513,13 @@ fn a_short_download_is_refused() {
 #[test]
 fn a_phone_swapped_mid_install_gets_nothing_more() {
     let bundle = TestBundle::new();
-    let release = bundle.verify().unwrap();
     let phone = FakePhone::new("cheetah");
-    // The checks pass on one phone; later another serial number answers
-    phone.edit(|s| s.swap_serial_after = Some(30));
-    let err = block_on(install(&bundle, &release, &phone, options())).unwrap_err();
+    // The checks pass on one phone; later, among the boot images, another
+    // serial number answers
+    let err = install_then(&bundle, &phone, stated(), |phone| {
+        phone.edit(|s| s.swap_serial_after = Some(s.log.len() + 10));
+    })
+    .unwrap_err();
     assert!(
         matches!(&err, Error::Refused(why) if why.contains("changed during the install")),
         "{err}"
@@ -510,18 +529,24 @@ fn a_phone_swapped_mid_install_gets_nothing_more() {
         .iter()
         .any(|c| c == "set_active:b" || c == "reboot"));
     assert_eq!(phone.0.borrow().active_slot, "a");
+    // It was the session that writes, and it had begun: three images in
+    assert_eq!(phone.written(), ["boot_b", "init_boot_b", "vendor_boot_b"]);
 }
 
 #[test]
 fn a_root_image_larger_than_userdata_is_refused() {
     let bundle = TestBundle::new();
-    let release = bundle.verify().unwrap();
     let phone = FakePhone::new("cheetah");
-    phone.edit(|s| {
-        s.partitions
-            .insert("userdata".into(), vec![SENTINEL; 1 << 20]);
-    });
-    let err = block_on(install(&bundle, &release, &phone, options())).unwrap_err();
+    // The flow checks this before the first write, and stops there
+    // (write_path.rs). Here userdata shrinks after that check, so the one
+    // the session makes when userdata's turn comes is what refuses
+    let err = install_then(&bundle, &phone, stated(), |phone| {
+        phone.edit(|s| {
+            s.partitions
+                .insert("userdata".into(), vec![SENTINEL; 1 << 20]);
+        });
+    })
+    .unwrap_err();
     assert!(
         matches!(&err, Error::Phone(why) if why.contains("larger than userdata")),
         "{err}"

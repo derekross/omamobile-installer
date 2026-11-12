@@ -1014,33 +1014,19 @@ fn the_maintainers_override_passes_no_other_stop() {
 fn the_maintainers_override_is_refused_where_a_write_could_follow() {
     let bundle = TestBundle::new();
     let release = bundle.verify().unwrap();
-    // A session that would write, asked to skip the check: a typed refusal,
-    // before a single question reaches the phone. On a one-slot phone...
+    // A session that would write, asked to skip the check, is refused
+    // before a single question reaches the phone. No test here can open
+    // one to try: that test is in core/src/flow/tests.rs
+    // (`the_session_that_writes_refuses_the_maintainers_override_before_anything_is_sent`).
+    assert!(Error::OverrideOutsideDryRun
+        .to_string()
+        .contains("in a dry run only"));
     let phone = phone("one-slot");
-    let writing = PhoneOptions {
-        maintainer_skip_bootloader_slot_check: true,
-        dry_run: false,
-        ..Default::default()
-    };
-    let err = block_on(Session::connect(
-        phone.clone(),
-        &release,
-        SERIAL,
-        writing.clone(),
-    ))
-    .unwrap_err();
-    assert_eq!(err, Error::OverrideOutsideDryRun);
-    assert!(err.to_string().contains("in a dry run only"));
-    assert!(phone.log().is_empty());
-    // ...and on any other, where it would have skipped nothing
     let ready = self::phone("ready");
-    let err = block_on(Session::connect(ready.clone(), &release, SERIAL, writing)).unwrap_err();
-    assert_eq!(err, Error::OverrideOutsideDryRun);
-    assert!(ready.log().is_empty());
-    // With every write held back it is taken, and the session says so
+    // A session opened directly holds every write back. There the override
+    // is taken, and the session says so
     let dry = PhoneOptions {
         maintainer_skip_bootloader_slot_check: true,
-        dry_run: true,
         ..Default::default()
     };
     let session = block_on(Session::connect(
@@ -1065,10 +1051,7 @@ fn the_maintainers_override_is_refused_where_a_write_could_follow() {
     let err = block_on(Session::connect(differ.clone(), &release, SERIAL, dry)).unwrap_err();
     assert!(matches!(&err, Error::Phone(why) if why.contains("slots differ")));
     // Without the override a one-slot phone is refused in a dry run too
-    let plain = PhoneOptions {
-        dry_run: true,
-        ..Default::default()
-    };
+    let plain = PhoneOptions::default();
     let err = block_on(Session::connect(phone.clone(), &release, SERIAL, plain)).unwrap_err();
     assert!(matches!(&err, Error::Phone(why) if why.contains("other slot")));
     for p in [&phone, &ready, &differ] {

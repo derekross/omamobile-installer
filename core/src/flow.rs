@@ -123,6 +123,52 @@ pub const SLOT_CHECK_SKIPPED: &str = "The bootloader-slot check was skipped by a
 /// ([`FlowOptions::bootloader_slots_match`]), the confirmation among them.
 pub const SLOTS_ON_THE_OWNERS_WORD: &str = "This phone tells the version of only one of its two bootloader copies. The installer has not read the other copy's version and cannot: it goes on because this run was started with the statement that someone read it from the phone and that it is the same version. If that is not so, the phone may not start from slot B.";
 
+/// What a session must hold to write to a phone, and proof of where it was
+/// made: [`Flow::begin_write`], after every condition of a write was checked
+/// there (the run was begun to write and is not a dry run, the maintainer's
+/// override was not used, the release and its build index verified, the
+/// phone's codename typed in this run, the release's images checked, and
+/// the phone, asked once more, the pinned one, past every stop, unlocked
+/// and on the build the factory image was chosen for).
+///
+/// Its one field is private to this module, so no other module of this
+/// crate and no other crate can make one, and it can be neither copied nor
+/// cloned: the session that takes it keeps it. A function can ask for one,
+/// which is all another crate can do with the name:
+///
+/// ```
+/// use omamobile_installer_core::flow::WriteToken;
+/// fn a_session_that_writes_needs(_token: WriteToken) {}
+/// ```
+///
+/// Making one is a compile error, here by its constructor:
+///
+/// ```compile_fail
+/// use omamobile_installer_core::flow::WriteToken;
+/// fn a_session_that_writes_needs(_token: WriteToken) {}
+/// a_session_that_writes_needs(WriteToken(()));
+/// ```
+///
+/// and it has no other: no `Default`, no `Clone`, no function that returns
+/// one.
+///
+/// ```compile_fail
+/// use omamobile_installer_core::flow::WriteToken;
+/// fn a_session_that_writes_needs(_token: WriteToken) {}
+/// a_session_that_writes_needs(WriteToken::default());
+/// ```
+///
+/// The function that opens a writing session with it is not public either,
+/// so a front end has one way to such a session: the flow's steps, to
+/// `begin_write`.
+pub struct WriteToken(());
+
+impl core::fmt::Debug for WriteToken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("WriteToken")
+    }
+}
+
 /// What the person running the install said up front.
 #[derive(Debug, Clone, Default)]
 pub struct FlowOptions {
@@ -1927,8 +1973,8 @@ impl Flow {
             // The owner's statement, if one was made: the session compares
             // it with the phone again, as `judge` just did
             bootloader_slots_confirmed: self.options.bootloader_slots_match.clone(),
-            // Always: the session refuses the override below without it
-            dry_run: true,
+            // Taken only by a session that holds every write back, which
+            // is the only kind `connect_pinned` opens
             maintainer_skip_bootloader_slot_check: self.slot_check_skipped,
         };
         match Session::connect_pinned(transport, &release, &report.id, options).await {
@@ -2196,16 +2242,19 @@ impl Flow {
             // As in the dry run: compared with the phone once more, by the
             // session that writes, before its first write
             bootloader_slots_confirmed: self.options.bootloader_slots_match.clone(),
-            dry_run: false,
             maintainer_skip_bootloader_slot_check: false,
         };
-        let opened = match Session::connect_pinned(transport, &release, &pinned, options).await {
-            Ok(mut session) => match session.preflight_userdata(image_len).await {
-                Ok(()) => Ok(session),
+        // Every condition above held: the one token there is, for the one
+        // session that writes. Nothing else in any crate can make one.
+        let token = WriteToken(());
+        let opened =
+            match Session::connect_writing(transport, &release, &pinned, options, token).await {
+                Ok(mut session) => match session.preflight_userdata(image_len).await {
+                    Ok(()) => Ok(session),
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
-            },
-            Err(e) => Err(e),
-        };
+            };
         match opened {
             Ok(session) => {
                 self.write_open = true;

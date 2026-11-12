@@ -444,7 +444,7 @@ async function selftest() {
   // 1. The whole flow, with every way the factory image and the answers are refused
   await begin("ready");
   const seen = [state()];
-  check("the page says it is a preview that cannot write", $("banner").textContent.includes("cannot write to a phone") && !core.writes_enabled());
+  check("the page says it is a preview that cannot write", $("banner").textContent.includes("cannot write to a phone") && !("writes_enabled" in core) && !("connect" in core) && !("Install" in core));
   check("the warning comes first, and nothing is asked of the phone before it", state() === "warning" && sent().commands === 0 && !$("look"));
   await click("accept");
   seen.push(state());
@@ -708,11 +708,14 @@ async function selftest() {
   published[3][100] ^= 1;
   check("the published release with one changed byte is refused", JSON.parse(core.InstallFlow.begin(...published, undefined, false).screen()).stop === "release-not-verified");
 
-  // 7. The write path against the pretend phone, and zstd (as before)
+  // 7. An install walked against the pretend phone, and zstd. A dry run:
+  // this module has no way to a session that writes, in any build
   const install = JSON.parse(await core.selftest());
   check(
-    "an install against the pretend phone writes slot B and userdata only, and the release keys refuse the test bundle",
-    install.install_done && install.userdata_matches && install.boot_b_matches && install.partitions_written.length === 6 && install.test_key_refused_by_release_keys && install.wrong_phone_refused,
+    "an install walked against the pretend phone holds every write back, and the release keys refuse the test bundle",
+    install.install_done && install.dry_run && install.writes_held_back > 7 && install.ends_with_reboot_held_back &&
+      install.sent_not_a_question.length === 0 && install.partitions_written.length === 0 && install.active_slot === "a" &&
+      install.test_key_refused_by_release_keys && install.wrong_phone_refused,
     JSON.stringify(install),
   );
   result.zstd_mib_per_s = Math.round(install.zstd_mib_per_s);
@@ -728,12 +731,11 @@ async function selftest() {
 async function main() {
   try {
     await init();
-    show("core", `loaded${core.writes_enabled() ? "" : " (this build can't write to a phone)"}`, "ok");
+    show("core", "loaded (no build of this page can write to a phone)", "ok");
   } catch (e) {
     show("core", `the installer did not load: ${e.message ?? e}`, "bad");
     return;
   }
-  if (core.writes_enabled()) $("banner").textContent = "This build can write to a phone.";
   const selftesting = query.has("selftest");
   if (query.has("pretend") || selftesting) {
     if (!core.fake_phone) {

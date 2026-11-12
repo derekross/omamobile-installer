@@ -76,8 +76,9 @@ jobs:
       # What ships, as built: the command-line tool without features and the
       # page without the self-test. The tool is read as bytes, with the
       # tool the tests built with the pretend phone as the control; the
-      # page's module is loaded in node and asked whether it can write, and
-      # what the page loads is read for the flow's write steps.
+      # page's module is loaded in node and its exports are listed (the
+      # flow, no direct session, no pretend phone), and what the page loads
+      # is read for the flow's write steps.
       - name: What ships holds no pretend phone, and the page no way to write
         run: |
           cargo build --release --locked -p omamobile-installer-cli

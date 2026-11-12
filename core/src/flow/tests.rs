@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! What only this module can reach: the backstops in `begin_write`.
+//! What only this module can reach: the backstops in `begin_write`, and
+//! the session that writes, which takes a [`WriteToken`] that nothing
+//! outside this module can make.
 //!
 //! `begin_write` checks every condition of a write again, whatever the
 //! steps before it did. Two of those conditions cannot be taken away
@@ -80,4 +82,67 @@ fn begin_write_opens_the_writing_session_when_every_condition_holds() {
     assert!(!session.is_dry_run());
     assert_eq!(session.may_flash().len(), 6);
     assert!(phone.changes().is_empty());
+}
+
+/// The session that writes refuses the maintainer's override whole, before
+/// a question is asked of the phone, whatever the phone would have said.
+/// `begin_write` never passes it; this is the session's own refusal, which
+/// only a holder of a token can reach.
+#[test]
+fn the_session_that_writes_refuses_the_maintainers_override_before_anything_is_sent() {
+    let bundle = TestBundle::new();
+    let release = bundle.verify().unwrap();
+    for scenario in ["one-slot", "ready"] {
+        let phone = FakePhone::scenario(scenario).unwrap();
+        let options = PhoneOptions {
+            maintainer_skip_bootloader_slot_check: true,
+            ..Default::default()
+        };
+        let err = block_on(Session::connect_writing(
+            phone.clone(),
+            &release,
+            &support::drive::id(),
+            options,
+            WriteToken(()),
+        ))
+        .unwrap_err();
+        assert_eq!(err, Error::OverrideOutsideDryRun, "{scenario}");
+        assert!(phone.log().is_empty(), "{scenario}: {:?}", phone.log());
+    }
+}
+
+/// A session writes if and only if it holds a token: with the same options
+/// on the same phone, the one opened without is a dry run with an empty
+/// flash list, and sends no write.
+#[test]
+fn a_session_writes_only_with_a_token() {
+    let bundle = TestBundle::new();
+    let release = bundle.verify().unwrap();
+    let id = support::drive::id();
+    let phone = FakePhone::scenario("ready").unwrap();
+    let options = PhoneOptions::default();
+    let mut dry = block_on(Session::connect_pinned(
+        phone.clone(),
+        &release,
+        &id,
+        options.clone(),
+    ))
+    .unwrap();
+    assert!(dry.is_dry_run() && dry.may_flash().is_empty());
+    block_on(support::drive::walk(&mut dry, &bundle, &release)).unwrap();
+    assert!(phone.not_reads().is_empty(), "{:?}", phone.not_reads());
+    assert!(phone.written().is_empty());
+
+    let mut writing = block_on(Session::connect_writing(
+        phone.clone(),
+        &release,
+        &id,
+        options,
+        WriteToken(()),
+    ))
+    .unwrap();
+    assert!(!writing.is_dry_run());
+    assert_eq!(writing.may_flash().len(), 6);
+    block_on(support::drive::walk(&mut writing, &bundle, &release)).unwrap();
+    assert_eq!(phone.written().len(), 6);
 }
