@@ -411,6 +411,121 @@ fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
     assert!(!out.contains("4812") && !out.contains("FAKESERIAL"));
 }
 
+const SLOTS_MATCH: &str = "--bootloader-slots-match";
+const ON_YOUR_WORD: &str = "!! This phone tells the version of only one of its two bootloader copies. The installer has not read the other copy's version and cannot: it goes on because this run was started with the statement that someone read it from the phone and that it is the same version. If that is not so, the phone may not start from slot B.";
+
+#[test]
+fn a_phone_that_tells_one_bootloader_slot_is_written_on_the_owners_statement_only() {
+    let zip = factory_zip();
+    let zip = zip.to_str().unwrap();
+    // Without the statement the one-slot phone stops, as it always did, and
+    // the stop hands out no option
+    let (code, out, _) = flow(
+        "one-slot",
+        &["--write", "--factory-zip", zip],
+        &typed_install("cheetah\n"),
+    );
+    assert_eq!(code, 2);
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "The installer can't check the phone's second bootloader copy"
+    );
+    assert!(!out.contains("--") && out.contains(ONLY_GETVAR), "{out}");
+
+    // With it, and the version the pretend phone reports: the install runs.
+    // The confirmation says whose word it rests on, before the codename
+    let stated = ["--write", "--factory-zip", zip, SLOTS_MATCH, "fake-1.0"];
+    let (code, out, err) = flow("one-slot", &stated, &typed_install("cheetah\n"));
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "Omarchy Mobile is written, and the phone is restarting"
+    );
+    let asked = out.find("Codename: ").unwrap();
+    let confirmation = &out[out
+        .find("==> This is what the installer will write")
+        .unwrap()..asked];
+    assert!(flat(confirmation).contains(ON_YOUR_WORD), "{out}");
+    assert!(!out[..asked].contains("flash:") && !out[..asked].contains("download:"));
+    assert_eq!(others(&out).len(), 10 + 2 * 6 + 2);
+    assert!(out.contains("(partitions written: boot_b, dtbo_b, init_boot_b, userdata, vendor_boot_b, vendor_kernel_boot_b)"));
+    // Without the codename, the statement writes nothing either
+    let (code, out, _) = flow("one-slot", &stated, &typed_install("yes\n"));
+    assert_eq!(code, 2);
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+
+    // Another version than the phone reports: a stop that names both
+    let (code, out, err) = flow(
+        "one-slot",
+        &["--write", "--factory-zip", zip, SLOTS_MATCH, "fake-0.9"],
+        &typed_install("cheetah\n"),
+    );
+    assert_eq!(code, 2, "{out}\n{err}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "The bootloader version that was stated is not this phone's"
+    );
+    assert!(flat(&out).contains("is fake-0.9, the same as the copy in use. The copy in use has another version: the phone reports fake-1.0."));
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+
+    // A dry run takes it too, so the rehearsal of a write passes the same
+    // stops as the write
+    let (code, out, err) = flow(
+        "one-slot",
+        &["--factory-zip", zip, SLOTS_MATCH, "fake-1.0"],
+        &format!("yes\n{ANSWERS}"),
+    );
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "The dry run passed. Nothing was written"
+    );
+    assert!(flat(&out).contains(ON_YOUR_WORD));
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+
+    // It is said once, with a version: refused from the arguments alone,
+    // before any USB device is listed or opened
+    let dir = fixture();
+    let dir = dir.to_str().unwrap();
+    let install = ["install", dir, "--serial", "<SERIAL>", "--write"];
+    for (more, says) in [
+        (
+            vec![SLOTS_MATCH],
+            "takes the bootloader version that was read from the phone's other slot",
+        ),
+        (
+            vec![SLOTS_MATCH, ""],
+            "takes the bootloader version that was read from the phone's other slot",
+        ),
+        (
+            vec![SLOTS_MATCH, "fake-1.0", SLOTS_MATCH, "fake-1.0"],
+            "--bootloader-slots-match is given once",
+        ),
+        // With the maintainer's override, a write is still refused
+        (
+            vec![SLOTS_MATCH, "fake-1.0", SLOT_OVERRIDE],
+            "in a dry run only",
+        ),
+    ] {
+        let args: Vec<&str> = install.iter().copied().chain(more).collect();
+        let (code, out, err) = run(&args, "");
+        assert_eq!(code, 1, "{args:?}");
+        assert!(err.contains(says) && out.is_empty(), "{args:?}: {err}");
+    }
+
+    // And help says what it is: a statement the installer cannot check
+    let (_, out, _) = run(&["help"], "");
+    let help = flat(&out);
+    for said in [
+        "install ... --bootloader-slots-match VERSION",
+        "your statement that the other copy's version was read from the phone and is VERSION",
+        "It cannot check your statement and never switches the phone's slots to try",
+        "Without it, such a phone stops before anything is written.",
+    ] {
+        assert!(help.contains(said), "help does not say: {said}\n{out}");
+    }
+}
+
 #[test]
 fn without_the_codename_or_without_write_nothing_is_written() {
     let zip = factory_zip();
@@ -557,6 +672,8 @@ fn install_needs_dry_run_or_write_and_the_test_key_is_for_the_pretend_phone() {
     let (code, _, err) = run(&["install", dir, "--fake-phone", "ready", "--dry-run"], "");
     assert_eq!(code, 1);
     assert!(err.contains("install is for a real phone"));
+    // (`--bootloader-slots-match` was an unknown argument here until the
+    // write path: what it is now has its own test above.)
     let (code, _, err) = run(
         &[
             "install",
@@ -564,13 +681,13 @@ fn install_needs_dry_run_or_write_and_the_test_key_is_for_the_pretend_phone() {
             "--serial",
             "<SERIAL>",
             "--dry-run",
-            "--bootloader-slots-match",
+            "--slots-match",
             "x",
         ],
         "",
     );
     assert_eq!(code, 1);
-    assert!(err.contains("unknown argument --bootloader-slots-match"));
+    assert!(err.contains("unknown argument --slots-match"));
     let (code, _, err) = run(&["flow", dir, "--serial", "<SERIAL>"], "");
     assert_eq!(code, 1);
     assert!(err.contains("pretend phone only"));

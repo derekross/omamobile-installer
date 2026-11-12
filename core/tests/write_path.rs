@@ -11,7 +11,7 @@ use omamobile_installer_core::bundle::VerifiedRelease;
 use omamobile_installer_core::fastboot::{PhoneId, Session, Transport, WriteReach};
 use omamobile_installer_core::flow::{
     AnswersInput, Flow, FlowOptions, OwnerAnswers, PhoneFact, Step, Stop, StopKind, NO_INSTALL_YET,
-    NO_USABLE_PHONE_YET,
+    NO_USABLE_PHONE_YET, SLOTS_ON_THE_OWNERS_WORD,
 };
 use omamobile_installer_core::install::flash_userdata_from_reader;
 use omamobile_installer_core::Error;
@@ -793,6 +793,179 @@ fn the_maintainers_override_never_reaches_a_write() {
         stop(&run(&bundle, &phone, writing())).id(),
         "bootloader-slots-unknown"
     );
+    nothing_written(&phone);
+}
+
+/// A run that writes, with the owner's statement about the other slot.
+fn stating(version: &str) -> FlowOptions {
+    FlowOptions {
+        write: true,
+        bootloader_slots_match: Some(version.into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_phone_that_tells_one_bootloader_slot_is_written_only_on_the_owners_statement() {
+    let bundle = TestBundle::new();
+    let one_slot = || FakePhone::scenario("one-slot").unwrap();
+    // Nothing stated: the stop there always was
+    let phone = one_slot();
+    assert_eq!(
+        stop(&run(&bundle, &phone, writing())).id(),
+        "bootloader-slots-unknown"
+    );
+    nothing_written(&phone);
+
+    // Stated, and it is the version the phone reports for the slot in use
+    // (tools/install-phone's --bootloader-slots-match): the install runs,
+    // and every screen from the look at the phone on says whose word it
+    // rests on, the confirmation among them
+    let phone = one_slot();
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        stating("fake-1.0"),
+    );
+    let mut said_at = Vec::new();
+    loop {
+        let screen = flow.screen();
+        if screen.notice.as_deref() == Some(SLOTS_ON_THE_OWNERS_WORD) {
+            said_at.push(screen.state);
+        } else {
+            assert_eq!(screen.notice, None, "{}", screen.state);
+        }
+        if screen.action == "none" {
+            break;
+        }
+        let next = match screen.state {
+            "warning" => "phone",
+            "phone" => "google-terms",
+            "google-terms" => "factory-image",
+            "factory-image" => "answers",
+            "answers" => "dry-run",
+            "dry-run" => "confirm",
+            "confirm" => "write",
+            _ => "",
+        };
+        drive(&mut flow, &bundle, &phone, "cheetah", next);
+    }
+    assert_eq!(
+        said_at,
+        [
+            "google-terms",
+            "factory-image",
+            "answers",
+            "dry-run",
+            "confirm",
+            "write",
+            "installed"
+        ]
+    );
+    assert_eq!(flow.screen().state, "installed");
+    holds_the_release(&bundle, &phone);
+    only_our_commands(&phone);
+
+    // Stated, and not the version the phone reports: a stop that names
+    // both, at the first look, with only questions sent
+    let phone = one_slot();
+    let flow = run(&bundle, &phone, stating("fake-0.9"));
+    let stopped = stop(&flow);
+    assert_eq!(stopped.id(), "bootloader-slots-stated-other");
+    assert_eq!(
+        stopped.kind,
+        StopKind::BootloaderSlotsStatedOther {
+            stated: "fake-0.9".into(),
+            phone: "fake-1.0".into()
+        }
+    );
+    assert!(
+        stopped.message[0].contains("is fake-0.9")
+            && stopped.message[0].contains("reports fake-1.0")
+    );
+    assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
+    nothing_written(&phone);
+
+    // It is compared again at the write: a phone whose bootloader is
+    // another one by then gets nothing
+    let phone = one_slot();
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        stating("fake-1.0"),
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "write");
+    assert_eq!(flow.screen().state, "write");
+    phone.edit(|s| {
+        s.vars
+            .insert("version-bootloader".into(), "fake-0.9".into());
+    });
+    drive(&mut flow, &bundle, &phone, "cheetah", "");
+    assert_eq!(stop(&flow).id(), "bootloader-slots-stated-other");
+    nothing_written(&phone);
+
+    // A phone that reports both slots is judged by what it reports, as
+    // install-phone does: a statement neither saves two that differ nor
+    // stops two that match, and no screen mentions it
+    let phone = FakePhone::scenario("slots-differ").unwrap();
+    assert_eq!(
+        stop(&run(&bundle, &phone, stating("fake-1.0"))).id(),
+        "bootloader-slots-differ"
+    );
+    nothing_written(&phone);
+    let phone = ready();
+    let flow = run(&bundle, &phone, stating("fake-0.9"));
+    assert_eq!(flow.screen().state, "installed");
+    assert_eq!(flow.screen().notice, None);
+
+    // It passes that one stop and no other
+    let phone = one_slot();
+    phone.edit(|s| {
+        s.vars.insert("current-slot".into(), "b".into());
+    });
+    assert_eq!(
+        stop(&run(&bundle, &phone, stating("fake-1.0"))).id(),
+        "runs-from-slot-b"
+    );
+    nothing_written(&phone);
+
+    // With the maintainer's override too, in a dry run: the statement is
+    // what the run rests on, and a wrong one still stops
+    let both = |version: &str| FlowOptions {
+        maintainer_skip_bootloader_slot_check: true,
+        bootloader_slots_match: Some(version.into()),
+        ..Default::default()
+    };
+    let phone = one_slot();
+    let flow = run(&bundle, &phone, both("fake-1.0"));
+    assert_eq!(flow.screen().state, "done");
+    assert_eq!(
+        flow.screen().notice.as_deref(),
+        Some(SLOTS_ON_THE_OWNERS_WORD)
+    );
+    let phone = one_slot();
+    assert_eq!(
+        stop(&run(&bundle, &phone, both("fake-0.9"))).id(),
+        "bootloader-slots-stated-other"
+    );
+
+    // A locked phone: the unlock screen says that the second copy was not
+    // read, before the owner erases anything
+    let phone = one_slot();
+    phone.edit(|s| {
+        s.vars.insert("unlocked".into(), "no".into());
+    });
+    let flow = run(&bundle, &phone, stating("fake-1.0"));
+    let screen = flow.screen();
+    assert_eq!(screen.state, "unlock");
+    assert_eq!(
+        screen.notice,
+        Some(format!("{NO_USABLE_PHONE_YET} {SLOTS_ON_THE_OWNERS_WORD}"))
+    );
+    assert!(screen.body[1].contains("was not read by the installer"));
+    assert!(!screen.body[1].contains("its two bootloader copies match"));
     nothing_written(&phone);
 }
 

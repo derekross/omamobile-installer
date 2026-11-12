@@ -9,6 +9,7 @@
 //!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the install flow up to the dry run, read-only
 //!   omamobile-install install BUNDLE_DIR --serial SERIAL --write [--reinstall]
+//!                             [--bootloader-slots-match VERSION]
 //!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the install flow, and the writes
 //!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--write] [--reinstall]
@@ -1111,7 +1112,10 @@ fn cmd_fake(
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | help";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | help";
+
+/// What `help` says about [`SLOTS_MATCH`].
+const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written.";
 
 /// `omamobile-install help`: the commands, and what `--write` does to a
 /// phone, in the core's words.
@@ -1132,6 +1136,12 @@ fn cmd_help() {
         "                       ",
     );
     println!("\n  install needs --dry-run or --write, one of them: there is no default.");
+    println!("\n  install ... {SLOTS_MATCH} VERSION");
+    wrap(
+        SLOTS_MATCH_HELP,
+        "                       ",
+        "                       ",
+    );
 }
 
 fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
@@ -1155,6 +1165,10 @@ fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
 /// The maintainer's override for the bootloader-slot stop, in a dry run
 /// only. Deliberately not in [`USAGE`].
 const SLOT_OVERRIDE: &str = "--maintainer-skip-bootloader-slot-check";
+/// The owner's statement for a phone that reports one bootloader slot's
+/// version: the other slot's was read from the phone and is VERSION. The
+/// core compares it with the phone ([`FlowOptions::bootloader_slots_match`]).
+const SLOTS_MATCH: &str = "--bootloader-slots-match";
 
 /// `Ok(false)`: the install flow stopped, and has said why.
 fn run() -> Res<bool> {
@@ -1180,6 +1194,19 @@ fn run() -> Res<bool> {
                     "--write" => write = true,
                     "--reinstall" => options.reinstall = true,
                     SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
+                    // The owner's statement about the other bootloader
+                    // slot, as tools/install-phone takes it: said once,
+                    // with the version that was read from the phone
+                    SLOTS_MATCH => {
+                        let version = it.next().copied().filter(|v| !v.is_empty());
+                        let Some(version) = version else {
+                            return Err(format!("{SLOTS_MATCH} takes the bootloader version that was read from the phone's other slot").into());
+                        };
+                        if options.bootloader_slots_match.is_some() {
+                            return Err(format!("{SLOTS_MATCH} is given once").into());
+                        }
+                        options.bootloader_slots_match = Some(version.to_string());
+                    }
                     "--factory-zip" => own_file = it.next().map(PathBuf::from),
                     "--work-dir" => work_dir = it.next().map(PathBuf::from),
                     // The one way a proxy is used: named here, by the owner

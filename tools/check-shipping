@@ -97,6 +97,12 @@ once "--write is the one argument that sets it" '"--write" => write = true,' cli
 none "the page and its script reach none of the flow's write steps" \
   'confirm_install|begin_write|write_done|write_failed|write_path' web/src/*.rs web/static/*
 once "the page begins every flow with the write switch off" "write: false," web/src/lib.rs
+# The owner's statement about the other bootloader slot is the command
+# line's: typed there, by the owner. The page's source never names it
+none "the page cannot state the other bootloader slot's version for its owner" \
+  'bootloader_slots_match|slots[-_]match' web/src/*.rs web/static/*
+once "the command-line tool takes that statement from one argument" \
+  'options.bootloader_slots_match = Some(' cli/src/main.rs
 # The page: a writing session only in its self-test function, which exists
 # only in a self-test build and is typed to the pretend phone
 writers=$(awk '
@@ -166,7 +172,7 @@ if (( built )); then
     if (( ${#found[@]} )); then bad "the shipping page's module holds the pretend phone" "${found[@]}"
     else ok "the shipping page's module holds nothing of the pretend phone or the test key"; fi
     none "the shipping page's glue has no pretend phone, no self-test and no override" \
-      'fake_phone|selftest|slot_override|maintainer' "$glue"
+      'fake_phone|selftest|slot_override|maintainer|slots_match' "$glue"
     none "what the shipping page loads has none of the flow's write steps" \
       'confirm_install|begin_write|write_done|write_failed' "$glue" web/dist/*.js web/dist/*.html
     if grep -qF 'cannot write to a phone' web/dist/index.html; then ok "the shipping page says it cannot write to a phone"

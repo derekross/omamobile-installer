@@ -1,6 +1,6 @@
 # The install flow: design
 
-Status (2026-11-12): **built and tested against a pretend phone only; never run against a real one.** That includes the write path (§11): it is built, every rule of it has a test that reads the pretend phone's record of what it was sent, and it has never sent a command to a real phone. Its first real use is the maintainer's own attended run. The command-line tool is the one front end that can write, and only with `--write` and the typed codename; the web page cannot. The owner's answers do not reach the phone yet (§12), so an install made by this version starts with no user account. A Pixel 7 Pro can't get as far as a write at all today: it stops at the bootloader-slot rule (§6), and the override that passes that stop is for dry runs only.
+Status (2026-11-12): **built and tested against a pretend phone only; never run against a real one.** That includes the write path (§11): it is built, every rule of it has a test that reads the pretend phone's record of what it was sent, and it has never sent a command to a real phone. Its first real use is the maintainer's own attended run. The command-line tool is the one front end that can write, and only with `--write` and the typed codename; the web page cannot. The owner's answers do not reach the phone yet (§12), so an install made by this version starts with no user account. A Pixel 7 Pro reaches a write only on its owner's statement about the bootloader slot it does not report, given on the command line (§6, "The owner's statement"); the maintainer's override that passes the same stop is for dry runs only. The first attended run is laid out in [WRITE-RUNBOOK.md](WRITE-RUNBOOK.md).
 
 This is the design of the installer's flow: the steps of an install as one state machine in the core (`core/src/flow.rs`), which the command-line tool and the web page both drive. It follows Omarchy Mobile's [install experience plan](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-EXPERIENCE-PLAN.md) (M3, M4) and the maintainer's decisions of 2026-11-10 and 2026-11-12, listed in §2. How the shell-script installer does each step today is in that project's `docs/INSTALL-GUIDED.md`.
 
@@ -29,7 +29,7 @@ Made by the maintainer on 2026-11-10:
 2. **The match is exact, and tested.** The build whose bootloader *and* baseband equal the phone's, marked tested, or the install stops. There is no nearest build.
 3. **The installer never sends `fastboot flashing unlock`.** It shows the command and the steps on the phone.
 4. **One warning, before the unlock steps,** acknowledged once.
-5. **No slot switching.** Reading the other bootloader slot by making it active is off for every device unless its descriptor says `BOOTLOADER_SLOT_PROBE=yes`. None does. Where fastboot reports only the current slot's version (the Pixel 7 Pro), the install stops and explains.
+5. **No slot switching.** Reading the other bootloader slot by making it active is off for every device unless its descriptor says `BOOTLOADER_SLOT_PROBE=yes`. None does. Where fastboot reports only the current slot's version (the Pixel 7 Pro), the install stops and explains. (Changed in one respect with the write path, for the command line only, and **for the maintainer to confirm when that pull request is reviewed**: the stop can be passed by the owner's statement about the other slot, which is `tools/install-phone`'s rule. The installer still switches no slot. §6, "The owner's statement".)
 6. **Every step is tied to one phone,** pinned by its serial number in fastboot.
 7. **Only slot B's boot images and `userdata` are ever written, nothing before the release is verified, and unsigned bundles are not supported.** The flow adds no write at all. (That last sentence was true until the write path of §11. The rule itself is unchanged, and §11 is how the flow keeps it.)
 
@@ -133,6 +133,7 @@ Each is a `StopKind` with a short id (`Screen.stop`), a title and a message.
 | `runs-from-slot-b` | The current slot is B and this is not a reinstall | stops again |
 | `bootloader-slots-unknown` | Only the current slot's bootloader version is reported | stops again |
 | `bootloader-slots-differ` | Both reported, and different | stops again |
+| `bootloader-slots-stated-other` | Only the current slot's version is reported, and the version the owner stated for the other slot is not that one | stops again (with the same statement) |
 | `baseband-unknown` | No `version-baseband` | stops again |
 | `build-not-listed` | No build has both the phone's versions | after an Android update |
 | `build-not-tested` | The build is listed, not marked tested | after an Android update, if a newer build was tested; else stops again ("not tested yet") |
@@ -183,7 +184,32 @@ Setting slot B active runs slot B's bootloader, so both slots' versions must mat
 
 - both reported and equal: go on;
 - both reported and different: stop;
-- only the current slot's reported: **stop.** The flow never takes the owner's word for the other slot (`PhoneOptions::bootloader_slots_confirmed` is always `None` on this path, and the command-line option that set it is gone), and never switches slots.
+- only the current slot's reported, and nothing stated about the other: **stop** (`bootloader-slots-unknown`);
+- only the current slot's reported, and the owner stated the other slot's version: go on if it is the version the phone reports, **stop** if it is not (`bootloader-slots-stated-other`). Below.
+
+The flow never switches slots, on any of these paths.
+
+### The owner's statement
+
+Added with the write path, because without it no Pixel 7 Pro can be written at all, and the write path's first real run is on one. It reverses, for the command line only, what this section said until then ("the flow never takes the owner's word for the other slot, and the command-line option that set it is gone"), so **it is the maintainer's to confirm at review.** Nothing was invented for it: it is the rule of Omarchy Mobile's `tools/install-phone`, the shell installer that installs this phone today.
+
+That rule, read from `tools/install-phone` (its phone checks) and `tools/install-guided` (`slots_check`):
+
+1. If the bootloader reports both slots' versions, they must be equal. The statement is not looked at.
+2. Otherwise, with `--bootloader-slots-match VERSION`: VERSION must equal the phone's `version-bootloader` (the slot in use), or the install stops. `install-phone`'s help says what VERSION asserts: "you checked the other slot carries VERSION too". `install-guided` calls it "a statement that someone read it from the phone".
+3. Otherwise the install stops.
+4. `install-guided` compares the statement before the unlock steps as well as at the write, so that a wrong one stops a locked phone before it is erased, and its stop for case 3 prints no option and no command: the option is not handed out.
+
+Here:
+
+- `FlowOptions::bootloader_slots_match` is the statement. `Flow::judge` applies 1 to 3 at every look at the phone: the first one (so before the unlock steps), the dry run's and the write's. Each session is given it too (`PhoneOptions::bootloader_slots_confirmed`) and compares it again at `connect`, with the version it reads then.
+- **The command line only.** `--bootloader-slots-match VERSION`, for `install --dry-run`, `install --write` and `flow`; said once, with a version, or the tool refuses its arguments before any USB device is looked for. `omamobile-install help` says what it asserts and that the installer cannot check it. The stop for a phone that reports one slot does not mention it (4 above).
+- **Not the web page.** The page makes its flow's options in one function, which does not set it, and `tools/check-shipping` fails if the page's source or the shipping module names it. A statement like this is typed by the phone's owner at their own keyboard, and the page ends at a dry run anyway.
+- **Said on every screen once it was used** (`Screen.notice`, `SLOTS_ON_THE_OWNERS_WORD`): "This phone tells the version of only one of its two bootloader copies. The installer has not read the other copy's version and cannot: it goes on because this run was started with the statement that someone read it from the phone and that it is the same version. If that is not so, the phone may not start from slot B." The confirmation before a write carries it, and a locked phone's unlock screen says that the second copy was not read, where it otherwise says the two match.
+- **It passes that stop and no other,** and is not a way round two versions that are known to differ.
+- **What it cannot do** is make the statement true. If slot A's and slot B's bootloaders differ on such a phone, the phone may not start from slot B, and the way back is the bootloader's own fallback to slot A. That is the risk `install-phone` carries today, no smaller here.
+
+Test: `a_phone_that_tells_one_bootloader_slot_is_written_only_on_the_owners_statement` (`core/tests/write_path.rs`), and `a_phone_that_tells_one_bootloader_slot_is_written_on_the_owners_statement_only` in `cli/tests/flow_fake_phone.rs`.
 
 ### The maintainer's override
 
@@ -197,7 +223,7 @@ Decided on 2026-11-12, because the rule above stops the maintainer's own Pixel 7
 - **Said, in the core's words, on every screen from the moment a check was skipped** (`Screen.notice`, which both front ends draw right under the title and set apart): "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed." The last screen's title is "The dry run finished with one check skipped. Nothing was written", not "The dry run passed", and the plan records it (`DryRunPlan::slot_check_skipped`). A locked phone's unlock screen says its second bootloader copy was not checked, where it otherwise says the two match.
 - **Nothing is said when nothing was skipped.** On a phone that reports both slots the override changes nothing, and no screen mentions it.
 
-It is not a way to install on such a phone. That still needs the probe below, or another way to know slot B's bootloader.
+It is not a way to install on such a phone. That takes the owner's statement above, or the probe below.
 
 ### The slot probe
 
@@ -273,7 +299,7 @@ Not built, in the order a real install needs them:
 - **What the installer does with the factory image after checking it.** Nothing yet: the flow ends at the dry run. The page reads the file the owner picked a piece at a time and keeps none of it.
 - **Restarting an Android phone into Fastboot Mode** (adb). The phone screen gives the key combination.
 - **How the owner unlocks from the web page.** The command needs Android's fastboot tool on the computer, which the plan says a person should never have to install.
-- **A phone the write path can reach.** The Pixel 7 Pro stops at `bootloader-slots-unknown` (§6), and the override is refused wherever a write could follow. So the one phone `WRITE_DEVICES` names can't be written by this flow until the slot question is decided: the probe, or another way to know slot B's bootloader. The write path's tests use a pretend phone that reports both slots.
+- **Knowing the other bootloader slot without anyone's word.** The Pixel 7 Pro, the one phone `WRITE_DEVICES` names, is written only on its owner's statement about the slot it does not report (§6). The probe, or another way to measure slot B's bootloader, is what would retire the statement; Omarchy Mobile's decision of 2026-11-10 (its plan's D4) is that `install-phone` will measure it on a first install.
 - **Delivering the owner's answers** (`firstboot.conf`): §12. This document said "until then no front end may write". The command-line tool now can, because the write path was asked for before that question is settled; the confirmation says, before anything is written, that the phone will start with no user account. Whether `--write` should be held back until §12 is settled is the maintainer's call.
 - **The install link** and every step after the write: the first start, the radio backup, firmware, the check.
 - **A record of how far an install got**, so a second run goes on instead of starting over. Today a rerun writes everything again (§11).
@@ -320,7 +346,7 @@ Before each `download:` and `flash:` pair, and before `set_active:b`, the sessio
 
 Tests are in `core/tests/write_path.rs` unless another file is named.
 
-1. **Only slot B's boot images and `userdata`.** The partitions come from the verified release: `manifest.json`'s writes, which must be the descriptor's `BOOT_IMAGES` with `_b`, then `userdata` (`manifest.rs`). A session builds its list of what a `flash:` may name from those at `connect`, and the one place a command is sent compares against it whole (`fastboot.rs`, `allowed`). No function takes a partition name from a caller, a person or a phone. Tests: `a_flash_leaves_only_for_a_partition_on_the_sessions_list` (in `fastboot.rs`: each forbidden name and made-up ones, at the command layer), `the_flash_list_is_the_releases_descriptor_and_nothing_else` (a three-image descriptor writes three; a signed release naming any other partition is no release), `an_install_sends_these_commands_in_this_order_and_nothing_else`.
+1. **Only slot B's boot images and `userdata`.** The partitions come from the verified release: `manifest.json`'s writes, which must be the descriptor's `BOOT_IMAGES` with `_b`, then `userdata` (`manifest.rs`). A session builds its list of what a `flash:` may name from those at `connect`, and the one place a command is sent compares against it whole (`fastboot.rs`, `allowed`): the gate that was closed on the main branch before the write path was put on it. That gate also holds a fixed list of its own (slot B's five images and `userdata`), lets a `download:` through only with eight hex digits, and gives a dry-run session an empty list, with which no `flash:`, `download:`, `set_active:b` or `reboot` passes at all. Every command of the write path leaves through it; there is no second list beside it. The only session with a list is the one `Flow::begin_write` opens (`Session::may_flash`). No function takes a partition name from a caller, a person or a phone. Tests: `a_flash_leaves_only_for_a_partition_on_the_sessions_list` (in `fastboot.rs`: each forbidden name and made-up ones, at the command layer), `the_flash_list_is_the_releases_descriptor_and_nothing_else` (a three-image descriptor writes three; a signed release naming any other partition is no release), `an_install_sends_these_commands_in_this_order_and_nothing_else`, `the_one_gate_has_the_releases_list_only_in_the_session_that_writes` (the dry run of a flow that will write has an empty list; the writing session has the release's six names, and no more); in `fastboot.rs` also `the_gate_holds_without_the_partition_type` and `a_dry_run_sessions_client_sends_no_command_that_writes`.
 2. **Nothing is written unless all of these hold,** checked together in `Flow::begin_write`, the one place the flow opens a session that can write:
    - the release and its build index were verified: `nothing_is_written_for_a_release_or_an_index_that_did_not_verify`;
    - the phone passed every stop in this run, and passes them again when asked at the write: `nothing_is_written_to_a_phone_that_does_not_pass_every_stop`;
@@ -328,7 +354,8 @@ Tests are in `core/tests/write_path.rs` unless another file is named.
    - it is the pinned phone, at the write and before every command pair after it: `nothing_is_written_to_another_phone_than_the_pinned_one`;
    - the owner typed the codename in this run: `nothing_is_written_without_the_typed_codename`;
    - the flow is not a dry run: `a_dry_run_has_no_way_to_a_write`;
-   - the maintainer's override was not used: `the_maintainers_override_never_reaches_a_write`.
+   - the maintainer's override was not used: `the_maintainers_override_never_reaches_a_write`;
+   - a phone that reports one bootloader slot was stated to match by its owner, and the statement is that slot's version when asked at the write: `a_phone_that_tells_one_bootloader_slot_is_written_only_on_the_owners_statement`.
 
    Also: the phone is one the write path was written for (`a_release_for_another_phone_model_is_not_written`), and every image was checked in this run (`a_write_needs_every_image_checked_in_this_run`).
 3. **Sizes, before the first write.** Each boot image must fit its partition, an `AVB_FOOTERS` image exactly (its footer is read from the partition's end), and be no larger than `max-download-size`: checked by the dry run's session and again by the writing session at `connect`. The root image's unpacked size is checked against `userdata` by the dry run, and again by `Session::preflight_userdata` before the first write. Test: `every_image_is_checked_against_its_partition_before_the_first_write`.
@@ -336,7 +363,7 @@ Tests are in `core/tests/write_path.rs` unless another file is named.
 5. **The slot.** `set_active:b`, once, after the last write was confirmed, then `reboot`. That is all install-phone does about slots, and all the core has: no `set_active:a`, no command that marks a slot good or bad, no `reboot-bootloader`. (The phone's own `omamobile-boot-success` marks slot B good after a start; that is not the installer's.) Test: `an_install_sends_these_commands_in_this_order_and_nothing_else`; `nothing_off_the_list_is_sent` in `fastboot.rs`.
 6. **The owner's answers:** not delivered. §12.
 7. **After the last write:** `reboot`, and the `installed` screen. Nothing else is sent, and the installer does nothing after the restart. Test: the same as rule 5, which reads the last screen.
-8. **The web page has no write path.** `cli/tests/flow_fake_phone.rs` covers the tool's `--write`; CI's greps cover the page (`.github/workflows/checks.yml`).
+8. **The web page has no write path.** `cli/tests/flow_fake_phone.rs` covers the tool's `--write`; `tools/check-shipping` covers the page, in its source and in the shipping build, and the tool's one switch: the flow opens a writing session in `begin_write` and nowhere else, and its write switch is set in one line of the command-line tool, from `--write`.
 9. **The owner's words are the core's.** The `confirm` screen lists each partition with the image's size and the partition's size on this phone, the two commands that follow, what is erased and what is never written. Test: `the_confirmation_lists_every_partition_its_size_and_what_is_erased`, which compares the screen whole.
 
 ### Interrupted
@@ -357,7 +384,7 @@ A rerun is a new flow: it verifies the release, judges the phone and asks for th
 
 ### Where this differs from install-phone
 
-- **Checks first, and more of them.** install-phone leaves the root image's size to `fastboot flash`, after slot B is already written; here it is checked before the first write. The slot and build-index checks come before the unlock (§3). There is no `--bootloader-slots-match`: nobody's word is taken for the other slot (§6, decision 5).
+- **Checks first, and more of them.** install-phone leaves the root image's size to `fastboot flash`, after slot B is already written; here it is checked before the first write. The slot and build-index checks come before the unlock (§3). `--bootloader-slots-match` is install-phone's, with its rule (§6); here every screen of a run that used it says so, the confirmation among them, where install-phone prints one line.
 - **The dry run is part of the run that writes,** not a separate invocation, so what the owner confirms was computed on this phone minutes before.
 - **Other phones are refused.** install-phone sends the same commands to every device with an `android-v4` descriptor. What `set_active:b` costs and what a failed start falls back to differ by phone (Omarchy Mobile's AGENTS.md records for the Pixel 9a that a flash of slot B clears its "successful" mark, and that a fallback to slot A cost `userdata`), so `WRITE_DEVICES` names the Pixel 7 Pro alone and a release for another phone stops a flow that writes. Adding a phone is a decision, with its notes read.
 - **A stop says where it stopped.** install-phone says "the phone is still in fastboot. Slot A is untouched; fix the cause and rerun" wherever a command fails, including after `userdata` was partly written, when Android's data is gone.

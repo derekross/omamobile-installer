@@ -118,6 +118,11 @@ pub const NO_USABLE_PHONE_YET: &str = "This version of the installer can install
 /// bootloader-slot check, so both front ends say it in the same words.
 pub const SLOT_CHECK_SKIPPED: &str = "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.";
 
+/// Shown on every screen once the flow has gone past a phone that reports
+/// one bootloader slot's version on the owner's statement about the other
+/// ([`FlowOptions::bootloader_slots_match`]), the confirmation among them.
+pub const SLOTS_ON_THE_OWNERS_WORD: &str = "This phone tells the version of only one of its two bootloader copies. The installer has not read the other copy's version and cannot: it goes on because this run was started with the statement that someone read it from the phone and that it is the same version. If that is not so, the phone may not start from slot B.";
+
 /// What the person running the install said up front.
 #[derive(Debug, Clone, Default)]
 pub struct FlowOptions {
@@ -135,6 +140,28 @@ pub struct FlowOptions {
     /// [`Error::OverrideOutsideDryRun`] unless it holds every write back;
     /// and [`Flow::begin_write`] refuses a run in which a check was skipped.
     pub maintainer_skip_bootloader_slot_check: bool,
+    /// The owner's statement about a phone that reports one bootloader
+    /// slot's version only: the other slot's version was read from the
+    /// phone, and it is this one. It is the rule of Omarchy Mobile's
+    /// `tools/install-phone` (`--bootloader-slots-match VERSION`), which
+    /// `tools/install-guided` applies before the unlock steps too:
+    ///
+    /// - both slots reported: they are compared, and this is not used;
+    /// - one reported, and this equals it: the flow goes on, and says on
+    ///   every screen whose word it rests on
+    ///   ([`SLOTS_ON_THE_OWNERS_WORD`]);
+    /// - one reported, and this differs from it: a stop that names both
+    ///   ([`StopKind::BootloaderSlotsStatedOther`]);
+    /// - one reported and nothing stated: the stop there always was
+    ///   ([`StopKind::BootloaderSlotsUnknown`]).
+    ///
+    /// The installer has no way to check the statement, and never switches
+    /// slots to try. It is compared with the phone at every look: the
+    /// first, the dry run's and the write's, and by each session at
+    /// `connect` ([`PhoneOptions::bootloader_slots_confirmed`]). Only a
+    /// front end whose owner typed it may set it: the command line's
+    /// `--bootloader-slots-match`. The web page has no way to.
+    pub bootloader_slots_match: Option<String>,
     /// The owner already has Google's factory image, saved from Google's
     /// page, and hands that file in. The installer then downloads nothing,
     /// so the step that shows Google's terms is left out: they were Google's
@@ -317,6 +344,10 @@ pub enum StopKind {
     BootloaderSlotsUnknown { probe_declared: bool },
     /// The two slots' bootloaders differ.
     BootloaderSlotsDiffer { a: String, b: String },
+    /// The bootloader reports only the current slot's version, and the
+    /// version the owner stated for the other slot
+    /// ([`FlowOptions::bootloader_slots_match`]) is not that one.
+    BootloaderSlotsStatedOther { stated: String, phone: String },
     /// The phone reports no baseband version to look up.
     BasebandUnknown,
     /// No build in the index has both the phone's bootloader and baseband.
@@ -459,6 +490,7 @@ impl Stop {
             StopKind::RunsFromSlotB => "runs-from-slot-b",
             StopKind::BootloaderSlotsUnknown { .. } => "bootloader-slots-unknown",
             StopKind::BootloaderSlotsDiffer { .. } => "bootloader-slots-differ",
+            StopKind::BootloaderSlotsStatedOther { .. } => "bootloader-slots-stated-other",
             StopKind::BasebandUnknown => "baseband-unknown",
             StopKind::BuildNotListed { .. } => "build-not-listed",
             StopKind::BuildNotTested { .. } => "build-not-tested",
@@ -956,6 +988,9 @@ pub struct Flow {
     dry_run_open: bool,
     /// The maintainer's override let a phone past the bootloader-slot stop.
     slot_check_skipped: bool,
+    /// A look at the phone went past the one-slot stop on the owner's
+    /// statement ([`FlowOptions::bootloader_slots_match`]).
+    slots_on_owners_word: bool,
     /// The owner typed the phone's codename at the confirmation, in this run.
     confirmed: bool,
     write_open: bool,
@@ -1005,6 +1040,7 @@ impl Flow {
             answers: None,
             dry_run_open: false,
             slot_check_skipped: false,
+            slots_on_owners_word: false,
             confirmed: false,
             write_open: false,
             write_reach: None,
@@ -1371,6 +1407,37 @@ impl Flow {
                     vec![
                         format!("The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omarchy Mobile starts from slot B, so both have to be the same version, and they are not (A: {a}, B: {b})."),
                         "With different versions the phone may not start from slot B. Google's own tools put the same version on both: the install guide says how.".into(),
+                    ],
+                );
+                return Judged::Stopped;
+            }
+            // The owner's statement about the other slot, which is
+            // install-phone's rule: it must be the version this slot
+            // reports. Looked at before the override, so a run that has
+            // both rests on the stricter one.
+            None if self
+                .options
+                .bootloader_slots_match
+                .as_ref()
+                .is_some_and(|stated| *stated == report.bootloader) =>
+            {
+                self.slots_on_owners_word = true;
+            }
+            None if self.options.bootloader_slots_match.is_some() => {
+                let stated = self
+                    .options
+                    .bootloader_slots_match
+                    .clone()
+                    .unwrap_or_default();
+                let phone = report.bootloader.clone();
+                self.stop(
+                    StopKind::BootloaderSlotsStatedOther { stated: stated.clone(), phone: phone.clone() },
+                    Retry::StopsAgain,
+                    "The bootloader version that was stated is not this phone's",
+                    vec![
+                        format!("This run was started with the statement that the bootloader version read from the phone's other system copy is {stated}, the same as the copy in use. The copy in use has another version: the phone reports {phone}."),
+                        "If the version was mistyped, start the installer again with the version that was read from the phone.".into(),
+                        format!("If {stated} is what was read from the other copy, the two copies differ, and Omarchy Mobile can't be installed on this phone as it is. Don't write a bootloader by hand: a wrong one can leave the phone unable to start. Ask at {ISSUES}"),
                     ],
                 );
                 return Judged::Stopped;
@@ -1857,8 +1924,9 @@ impl Flow {
             .expect("a flow past the warning has a release");
         let options = PhoneOptions {
             reinstall: self.options.reinstall,
-            // Never the owner's word for the other slot: the flow stops instead
-            bootloader_slots_confirmed: None,
+            // The owner's statement, if one was made: the session compares
+            // it with the phone again, as `judge` just did
+            bootloader_slots_confirmed: self.options.bootloader_slots_match.clone(),
             // Always: the session refuses the override below without it
             dry_run: true,
             maintainer_skip_bootloader_slot_check: self.slot_check_skipped,
@@ -2125,7 +2193,9 @@ impl Flow {
         self.report = Some(report);
         let options = PhoneOptions {
             reinstall: self.options.reinstall,
-            bootloader_slots_confirmed: None,
+            // As in the dry run: compared with the phone once more, by the
+            // session that writes, before its first write
+            bootloader_slots_confirmed: self.options.bootloader_slots_match.clone(),
             dry_run: false,
             maintainer_skip_bootloader_slot_check: false,
         };
@@ -2235,9 +2305,13 @@ impl Flow {
             state: "",
             stop: None,
             title: String::new(),
-            notice: self
-                .slot_check_skipped
-                .then(|| SLOT_CHECK_SKIPPED.to_string()),
+            notice: if self.slot_check_skipped {
+                Some(SLOT_CHECK_SKIPPED.to_string())
+            } else if self.slots_on_owners_word {
+                Some(SLOTS_ON_THE_OWNERS_WORD.to_string())
+            } else {
+                None
+            },
             body: Vec::new(),
             quote: None,
             steps: Vec::new(),
@@ -2295,6 +2369,8 @@ impl Flow {
                     format!("The {name} is in Fastboot Mode, and its bootloader is still locked."),
                     if self.slot_check_skipped {
                         "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, and this release was tested with its Android build. Its second bootloader copy was not checked.".into()
+                    } else if self.slots_on_owners_word {
+                        "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, and this release was tested with its Android build. Its second bootloader copy was not read by the installer: that it matches the first is the statement this run was started with.".into()
                     } else {
                         "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, its two bootloader copies match, and this release was tested with its Android build.".into()
                     },
