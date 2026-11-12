@@ -1030,6 +1030,77 @@ fn an_interrupted_download_goes_on_from_what_was_kept_and_is_hashed_from_the_fir
 }
 
 #[test]
+fn a_download_that_stalls_is_an_interrupted_one_that_keeps_its_bytes_and_can_be_tried_again() {
+    let bundle = TestBundle::new();
+    let phone = phone();
+    let zip = &bundle.factory_zip;
+    let size = zip.len() as u64;
+    let mut flow = accepted(&bundle, &phone);
+    let mut download = flow.factory_download(0).unwrap();
+    download.response(&ok(size)).unwrap();
+    assert!(feed(&mut download, &zip[..10_000]));
+    // The front end waited a minute for the next byte, and gave up
+    assert_eq!(
+        flow.factory_download_done(download, Some(FetchFailure::Stalled { seconds: 60 }))
+            .unwrap(),
+        DownloadEnd::Kept
+    );
+    assert_eq!(
+        trouble(&flow),
+        Some(DownloadTrouble::Interrupted {
+            got: 10_000,
+            want: size,
+            detail: Some("Google's server sent nothing for 60 seconds".into()),
+        })
+    );
+    // Not a stop and not a fallback: the download is still on offer
+    assert_eq!(source(&flow), ImageSource::Download);
+    let screen = flow.screen();
+    assert_eq!((screen.state, screen.action), ("factory-image", "download"));
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(format!("The download from Google's server stopped before it was complete: 10000 of {size} bytes had arrived (Google's server sent nothing for 60 seconds). You can try again.").as_str())
+    );
+    // The next try goes on from what was kept, hashed from the first byte
+    let mut download = flow.factory_download(10_000).unwrap();
+    download.kept(&zip[..10_000]).unwrap();
+    assert_eq!(
+        download.request().unwrap().range().as_deref(),
+        Some("bytes=10000-")
+    );
+    let range = format!("bytes 10000-{}/{size}", size - 1);
+    let answer = FetchResponse {
+        status: 206,
+        content_range: Some(&range),
+        ..Default::default()
+    };
+    assert_eq!(
+        download.response(&answer).unwrap(),
+        FetchNext::Body { at: 10_000 }
+    );
+    assert!(feed(&mut download, &zip[10_000..]));
+    assert_eq!(
+        flow.factory_download_done(download, None).unwrap(),
+        DownloadEnd::Verified
+    );
+    assert_eq!(flow.step(), &Step::Answers);
+
+    // Silence before the first byte of the body is the same, with nothing kept
+    let mut flow = accepted(&bundle, &phone);
+    let mut download = flow.factory_download(0).unwrap();
+    download.response(&ok(size)).unwrap();
+    assert_eq!(
+        flow.factory_download_done(download, Some(FetchFailure::Stalled { seconds: 60 }))
+            .unwrap(),
+        DownloadEnd::Kept
+    );
+    assert!(flow.screen().problem.unwrap().contains(&format!(
+        "0 of {size} bytes had arrived (Google's server sent nothing for 60 seconds)"
+    )));
+    only_getvar(&phone);
+}
+
+#[test]
 fn a_download_that_cannot_be_made_falls_back_to_the_owners_own_download() {
     let bundle = TestBundle::new();
     let phone = phone();

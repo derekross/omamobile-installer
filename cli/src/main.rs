@@ -503,6 +503,15 @@ enum Fetcher {
     Nowhere,
 }
 
+/// How long the tool waits for the next bytes of Google's file before it
+/// ends a try. The connect and response timeouts below cover the time
+/// before the body; ureq's own body timeout is for the whole transfer,
+/// which no number fits for a file of several gigabytes on any connection.
+const BODY_IDLE: Duration = Duration::from_secs(60);
+/// The same for the stand-in of a pretend run, which is on this computer.
+#[cfg(feature = "fake-phone")]
+const STAND_IN_BODY_IDLE: Duration = Duration::from_secs(2);
+
 fn agent(https_only: bool) -> ureq::Agent {
     ureq::Agent::config_builder()
         // The core is shown every redirect and every status, and decides
@@ -520,6 +529,15 @@ fn agent(https_only: bool) -> ureq::Agent {
 impl Fetcher {
     fn google() -> Self {
         Fetcher::Google(agent(true))
+    }
+
+    /// How long a body may stay silent before the try is ended.
+    fn body_idle(&self) -> Duration {
+        match self {
+            Fetcher::Google(_) => BODY_IDLE,
+            #[cfg(feature = "fake-phone")]
+            _ => STAND_IN_BODY_IDLE,
+        }
     }
 
     /// One GET, as the core asked for it. Redirects are not followed here.
@@ -561,6 +579,55 @@ fn default_work_dir() -> Option<PathBuf> {
         .or_else(|| var("LOCALAPPDATA"))
         .or_else(|| var("HOME").map(|home| home.join(".cache")))
         .map(|dir| dir.join("omamobile-installer"))
+}
+
+/// What became of a wait for the next piece of a body.
+enum Piece {
+    Bytes(Vec<u8>),
+    /// The body is over.
+    End,
+    /// Nothing arrived in time.
+    Silent,
+    Broke(String),
+}
+
+/// A response's body, read on a thread of its own, so that the wait for
+/// each piece can be given up: a server that stops sending without closing
+/// the connection would otherwise hold a blocking read, and the tool, for
+/// good. After a silence the thread is left behind, blocked on a connection
+/// nobody listens to; it touches no file and ends with the connection or
+/// the tool.
+struct Pieces(std::sync::mpsc::Receiver<io::Result<Vec<u8>>>);
+
+impl Pieces {
+    fn of(mut body: impl Read + Send + 'static) -> Self {
+        // A couple of pieces ahead at most: the reader waits for the file
+        let (pieces, taken) = std::sync::mpsc::sync_channel(2);
+        std::thread::spawn(move || loop {
+            let mut buf = vec![0u8; 64 << 10];
+            let piece = body.read(&mut buf).map(|n| {
+                buf.truncate(n);
+                buf
+            });
+            let over = !matches!(&piece, Ok(bytes) if !bytes.is_empty());
+            if pieces.send(piece).is_err() || over {
+                break;
+            }
+        });
+        Pieces(taken)
+    }
+
+    /// The next piece, waiting at most `idle` for it.
+    fn next(&self, idle: Duration) -> Piece {
+        use std::sync::mpsc::RecvTimeoutError;
+        match self.0.recv_timeout(idle) {
+            Ok(Ok(bytes)) if bytes.is_empty() => Piece::End,
+            Ok(Ok(bytes)) => Piece::Bytes(bytes),
+            Ok(Err(e)) => Piece::Broke(e.to_string()),
+            Err(RecvTimeoutError::Timeout) => Piece::Silent,
+            Err(RecvTimeoutError::Disconnected) => Piece::End,
+        }
+    }
 }
 
 /// Carry out what one try at the download asks: the kept bytes first, then
@@ -623,17 +690,26 @@ fn fetch(
             FetchNext::Body { at } => {
                 file.set_len(at).map_err(storage)?;
                 file.seek(SeekFrom::Start(at)).map_err(storage)?;
-                let mut body = response.into_body().into_reader();
+                let idle = fetcher.body_idle();
+                let body = Pieces::of(response.into_body().into_reader());
                 let mut shown = None;
                 loop {
-                    let n = body
-                        .read(&mut buf)
-                        .map_err(|e| FetchFailure::Network(e.to_string()))?;
+                    let piece = match body.next(idle) {
+                        Piece::Bytes(piece) => piece,
+                        Piece::End => break,
+                        // What arrived so far is in the file, for the next try
+                        Piece::Silent => {
+                            return Err(FetchFailure::Stalled {
+                                seconds: idle.as_secs(),
+                            })
+                        }
+                        Piece::Broke(why) => return Err(FetchFailure::Network(why)),
+                    };
                     // The core takes no byte past the file's size
-                    if n == 0 || !download.body(&buf[..n]) {
+                    if !download.body(&piece) {
                         break;
                     }
-                    file.write_all(&buf[..n]).map_err(storage)?;
+                    file.write_all(&piece).map_err(storage)?;
                     let (done, total) = download.progress();
                     let tenth = done * 10 / total.max(1);
                     if shown != Some(tenth) {

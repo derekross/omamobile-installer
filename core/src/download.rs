@@ -102,6 +102,11 @@ pub enum FetchFailure {
     NoAnswer,
     /// The connection could not be made, or broke.
     Network(String),
+    /// The transfer went quiet: no byte of the body arrived for this many
+    /// seconds, and the front end ended the try. A front end that fetches
+    /// must have such a limit, or a server that stops sending holds it for
+    /// good. What had arrived is kept, as after any transfer that broke off.
+    Stalled { seconds: u64 },
     /// The bytes could not be kept on this computer.
     Storage(String),
 }

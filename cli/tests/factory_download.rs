@@ -15,6 +15,8 @@ const ZIP_PATH: &str = "/dl/android/aosp/cheetah-test.260101.001-factory-31c2322
 const ANSWERS: &str = "alex\n4812\n4812\n\nEurope/Paris\n\n";
 const TERMS: &str = "Google's terms for the factory image";
 const MISMATCH: &str = "The downloaded file is not the one this release lists";
+/// How long the stand-in holds a stalled connection open, in seconds.
+const STALL_HELD: u64 = 45;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/selftest")
@@ -40,6 +42,9 @@ struct Reply {
     headers: Vec<(&'static str, String)>,
     length: Option<u64>,
     body: Vec<u8>,
+    /// After the body: say nothing more and keep the connection open, as a
+    /// transfer that stalls.
+    stall: bool,
 }
 
 impl Reply {
@@ -49,6 +54,7 @@ impl Reply {
             headers: vec![],
             length: Some(body.len() as u64),
             body: body.to_vec(),
+            stall: false,
         }
     }
     fn status(status: u16) -> Self {
@@ -57,6 +63,7 @@ impl Reply {
             headers: vec![],
             length: Some(0),
             body: vec![],
+            stall: false,
         }
     }
     fn redirect(to: &str) -> Self {
@@ -83,6 +90,7 @@ impl Reply {
             )],
             length: Some((file.len() - from) as u64),
             body: file[from..].to_vec(),
+            stall: false,
         }
     }
 }
@@ -143,6 +151,13 @@ impl StandIn {
                 let _ = stream.write_all(out.as_bytes());
                 let _ = stream.write_all(&reply.body);
                 let _ = stream.flush();
+                if reply.stall {
+                    // Held open, silent, far longer than the tool waits
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(STALL_HELD));
+                        drop(stream);
+                    });
+                }
             }
         });
         StandIn { at, asked }
@@ -444,6 +459,67 @@ fn a_download_that_broke_off_goes_on_in_a_later_run_and_in_the_same_one() {
     let (code, out, err) = flow(&work, Some(&google), &[], &typed);
     assert_eq!(code, 0, "{out}\n{err}");
     assert_eq!(google.asked().len(), 1);
+}
+
+#[test]
+fn a_download_that_stalls_ends_the_try_keeps_the_part_and_can_be_tried_again() {
+    let file = zip();
+    let half = file.len() / 2;
+    // The whole length said, half of it sent, and then silence with the
+    // connection held open. Later answers know Range
+    let stalling = |file: Vec<u8>| {
+        StandIn::start(move |asked, nth| {
+            if nth == 0 {
+                Reply {
+                    body: file[..half].to_vec(),
+                    stall: true,
+                    ..Reply::whole(&file)
+                }
+            } else {
+                Reply::ranged(&file, asked)
+            }
+        })
+    };
+    let said = format!("! The download from Google's server stopped before it was complete: {half} of {} bytes had arrived (Google's server sent nothing for 2 seconds). You can try again.", file.len());
+
+    // The input ends where the tool asks whether to try again: the tool is
+    // back long before the server lets go of the connection
+    let work = work("stalled");
+    let google = stalling(file.clone());
+    let started = std::time::Instant::now();
+    let (code, out, err) = flow(&work, Some(&google), &[], "yes\nyes\n");
+    let took = started.elapsed().as_secs();
+    assert!(
+        took < STALL_HELD / 2,
+        "the tool waited {took} s on a silent server"
+    );
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(flat(&out).contains(&said), "{out}");
+    assert!(out.contains(
+        "Press Enter to try the download again, or type where you saved the file yourself: "
+    ));
+    assert_eq!(*titles(&out).last().unwrap(), "Google's factory image");
+    // What arrived is kept, as a part, and it is a true start of the file
+    assert_eq!(kept(&work), [(format!("{ZIP}.part"), half as u64)]);
+    assert_eq!(
+        std::fs::read(work.join("factory").join(format!("{ZIP}.part"))).unwrap(),
+        file[..half]
+    );
+
+    // In one run: Enter at the question goes on from the part
+    let work = self::work("stalled-same-run");
+    let google = stalling(file.clone());
+    let typed = format!("yes\nyes\n\n{ANSWERS}");
+    let started = std::time::Instant::now();
+    let (code, out, err) = flow(&work, Some(&google), &[], &typed);
+    assert!(started.elapsed().as_secs() < STALL_HELD / 2);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(flat(&out).contains(&said), "{out}");
+    let asked = google.asked();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1].range, Some(format!("bytes={half}-")));
+    assert_eq!(kept(&work), [(ZIP.to_string(), file.len() as u64)]);
+    assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
 }
 
 #[test]

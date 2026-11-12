@@ -1388,6 +1388,18 @@ impl Flow {
                 });
                 return Ok(DownloadEnd::Kept);
             }
+            // A server that went quiet: ended by the front end, and open
+            // to another try like any transfer that broke off
+            (None, Some(FetchFailure::Stalled { seconds })) => {
+                *trouble = Some(DownloadTrouble::Interrupted {
+                    got,
+                    want,
+                    detail: Some(format!(
+                        "Google's server sent nothing for {seconds} seconds"
+                    )),
+                });
+                return Ok(DownloadEnd::Kept);
+            }
             (None, Some(FetchFailure::Storage(detail))) => {
                 *trouble = Some(DownloadTrouble::Storage(detail));
                 return Ok(DownloadEnd::Kept);
