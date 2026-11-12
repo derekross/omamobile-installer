@@ -246,12 +246,12 @@ fn run_with(args: &[&str], typed: &str, env: &[(&str, &str)]) -> (i32, String, S
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(typed.as_bytes())
-        .unwrap();
+    // A tool that refuses its arguments exits without reading its input,
+    // and writing to it then fails: that is not this test's failure
+    match child.stdin.take().unwrap().write_all(typed.as_bytes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => panic!("{e}"),
+        _ => {}
+    }
     let out = child.wait_with_output().unwrap();
     (
         out.status.code().unwrap(),
