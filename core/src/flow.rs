@@ -16,19 +16,36 @@
 //!                     factory_zip, then the bytes, then factory_zip_done
 //!   -> Answers        answers
 //!   -> DryRun         dry_run, then dry_run_done
-//!   -> Done
+//!   -> Done           a dry run ends here ([`FlowOptions::write`] not set)
+//!
+//!   -> Confirm        confirm_install: the owner types the phone's codename
+//!   -> Write          begin_write, then write_done or write_failed
+//!   -> Installed
 //! ```
 //!
-//! This version ends at the dry run. It has no step that writes to a phone.
+//! A flow is a dry run unless it was begun with [`FlowOptions::write`], and a
+//! dry run has no step that writes to a phone. One that writes goes through
+//! the same dry run first, with every image of the release walked through
+//! it, then lists exactly what it will write and what is erased, and waits
+//! for the phone's codename to be typed. What is written, and in which order,
+//! is what Omarchy Mobile's `tools/install-phone` writes: slot B's boot
+//! images, `userdata`, then `set_active:b` and `reboot`.
 //!
-//! What the flow sends to a phone is `getvar:` and, to a locked phone it is
-//! about to show the unlock steps for, the one question
+//! [`Flow::begin_write`] is the one place a session that can write is
+//! opened, and it checks every condition again there: the release and its
+//! build index verified, this phone past every stop in this run and looked
+//! at once more, unlocked, the same phone, the codename typed in this run,
+//! not a dry run, and the maintainer's bootloader-slot override not used.
+//!
+//! Until then, what the flow sends to a phone is `getvar:` and, to a locked
+//! phone it is about to show the unlock steps for, the one question
 //! `flashing get_unlock_ability` ([`unlock_ability`]): both read, and nothing
 //! else is sent. They go through the transport a front end lends it:
 //! [`Flow::read_phone`] asks the phone what it is, and [`Flow::dry_run`]
 //! opens a [`Session`] that holds every write back. It never sends
 //! `flashing unlock`: the unlock step shows that command for the owner to
-//! run. It never switches slots.
+//! run. It never switches slots to look at one, and the only slot command
+//! it has is the install's own `set_active:b`, after the last write.
 //!
 //! What the flow has fetched from the internet is one file: Google's factory
 //! image, from the address in the release's signed build index, and only
@@ -47,6 +64,7 @@ use crate::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
 use crate::download::{Ending, FactoryDownload, FetchFailure, Mismatch, Unavailable};
 use crate::fastboot::{
     probe, unlock_ability, PhoneId, PhoneOptions, PhoneReport, Session, Transport, UnlockAbility,
+    WriteReach,
 };
 use crate::hash::StreamHasher;
 use crate::signature::TrustedKeys;
@@ -72,6 +90,16 @@ pub const GOOGLE_PRIVACY_POLICY: &str = "https://policies.google.com/privacy";
 pub const UNLOCK_COMMAND: &str = "fastboot flashing unlock";
 /// Shown on every screen once the maintainer's override has skipped the
 /// bootloader-slot check, so both front ends say it in the same words.
+/// The phones whose slot handling this write path was written for: what
+/// `set_active:b` costs and what a failed start falls back to differ from
+/// phone to phone, and only these were read up on. A release for another
+/// phone stops a flow that writes ([`StopKind::WritesNotForDevice`]).
+pub const WRITE_DEVICES: [&str; 1] = ["cheetah"];
+/// What a front end says where it offers the switch that makes a flow write
+/// (the command line's `--write`): exactly what is written and erased.
+pub const WRITE_HELP: &str = "Writes to the phone: slot B's boot partitions (the release's boot images, each to its partition with the _b suffix) and userdata, then makes slot B the active slot and restarts the phone. userdata is ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again. Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. The run first does everything a dry run does, then lists each partition with its size and waits for you to type the phone's codename; nothing is written before that. This version cannot put your answers (user name, PIN or password, Wi-Fi) on the phone, so the phone it installs starts with no user account.";
+/// Why an install made by this version leaves a phone nobody can sign in to.
+const NO_ANSWERS: &str = "This version of the installer cannot put your answers on the phone: it has no way yet to write them into the system image. So the phone starts Omarchy Mobile with no user account, no PIN or password and no Wi-Fi set up, and there is nothing to unlock it with. An install made with this version shows that the install itself works; it does not give you a phone you can use.";
 pub const SLOT_CHECK_SKIPPED: &str = "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.";
 
 /// What the person running the install said up front.
@@ -95,6 +123,12 @@ pub struct FlowOptions {
     /// so the step that shows Google's terms is left out: they were Google's
     /// to ask on its page.
     pub owner_has_factory_zip: bool,
+    /// This run may write to the phone. Without it the flow is a dry run and
+    /// ends at [`Step::Done`]. With it, the dry run is followed by the list
+    /// of what will be written, the typed confirmation and the writes. It
+    /// can't be combined with the maintainer's override, and it is refused
+    /// for a phone the write path was not written for ([`WRITE_DEVICES`]).
+    pub write: bool,
 }
 
 /// The owner accepted Google's terms on the terms step: for which build,
@@ -212,8 +246,17 @@ pub enum Step {
     Answers,
     /// Everything is in hand for the dry run.
     DryRun,
-    /// The dry run passed. The flow ends here in this version.
+    /// The dry run passed. A dry run ends here.
     Done(DryRunPlan),
+    /// A flow that writes, after its dry run: exactly what will be written
+    /// and what is erased. Nothing happens until the owner types the phone's
+    /// codename.
+    Confirm(DryRunPlan),
+    /// The codename was typed. The next thing is the writes themselves.
+    Write(DryRunPlan),
+    /// Every write was confirmed by the phone, slot B is active and the
+    /// phone was told to restart. The flow ends here.
+    Installed(DryRunPlan),
     /// The install stopped. Nothing more is accepted; a new flow starts over.
     Stopped(Stop),
 }
@@ -263,6 +306,23 @@ pub enum StopKind {
     BuildChanged,
     /// The dry run's own checks refused the phone.
     DryRunRefused(Error),
+    /// A flow that writes was begun with the maintainer's bootloader-slot
+    /// override, which is for dry runs only.
+    OverrideInInstall,
+    /// A flow that writes, for a phone this write path was not written for.
+    WritesNotForDevice { codename: String },
+    /// A flow that writes needs every image of the release on this
+    /// computer, checked, before it asks for the confirmation.
+    ImagesNotChecked,
+    /// What was typed at the confirmation was not the phone's codename.
+    NotConfirmed,
+    /// After the confirmation the phone's bootloader was locked again.
+    LockedAtWrite,
+    /// The checks a write starts with refused the phone, or the link was
+    /// lost, before anything was written.
+    WriteRefused(Error),
+    /// The writes began and did not run through.
+    WriteInterrupted(Error),
 }
 
 /// What is true of the phone when the install stops.
@@ -278,6 +338,10 @@ pub enum PhoneFact {
     OnlyReadUnlockShown,
     /// Two phones answered in turn. Each was only asked what it is.
     TwoPhones { unlock_shown: bool },
+    /// The writes began and did not run through. `reach`: how far they got,
+    /// from what the phone confirmed. `on_slot_b`: the phone ran from slot B
+    /// when they began (a reinstall), so slot B is the one it starts from.
+    WriteStopped { reach: WriteReach, on_slot_b: bool },
 }
 
 /// Whether starting the installer again can get past a stop.
@@ -332,6 +396,10 @@ impl Stop {
                 }
                 v
             }
+            // Says what a rerun does itself, for each place a write can stop
+            PhoneFact::WriteStopped { reach, on_slot_b } => {
+                return write_stopped_footer(reach, on_slot_b)
+            }
         };
         out.push(
             match self.retry {
@@ -365,8 +433,75 @@ impl Stop {
             StopKind::LockedAtDryRun => "locked-at-dry-run",
             StopKind::BuildChanged => "build-changed",
             StopKind::DryRunRefused(_) => "dry-run-refused",
+            StopKind::OverrideInInstall => "override-in-an-install",
+            StopKind::WritesNotForDevice { .. } => "writes-not-for-this-device",
+            StopKind::ImagesNotChecked => "images-not-checked",
+            StopKind::NotConfirmed => "not-confirmed",
+            StopKind::LockedAtWrite => "locked-at-write",
+            StopKind::WriteRefused(_) => "write-refused",
+            StopKind::WriteInterrupted(_) => "write-interrupted",
         }
     }
+}
+
+/// The closing lines of a stop after the writes began: what is on the phone
+/// now, what the owner should do, and what starting again does. Derived from
+/// how far the phone confirmed the writes, never fixed.
+fn write_stopped_footer(reach: WriteReach, on_slot_b: bool) -> Vec<String> {
+    let again = "Bring the phone to Fastboot Mode and start the installer again: it checks the phone again and writes every image again, from the first.";
+    let slot_a = "Slot A, where Android is, was not written, and it is still the slot the phone starts from.";
+    let slot_b_broken = "The phone was running from slot B, which is the slot being written, so it may not start until an install has run through.";
+    let erased = "What Android had stored on the phone is erased. If the phone starts Android now, Android finds its data gone and asks for a factory reset.";
+    let reinstall = "If the installer then says that the phone runs from slot B, that is this install: start it again and say that this is a reinstall.";
+    let lines: Vec<&str> = match reach {
+        WriteReach::Nothing => vec![
+            "No write reached the phone: the installer sent it nothing that changes it.",
+            "You can start the installer again at any time.",
+        ],
+        WriteReach::BootImages { done, of, in_doubt } => {
+            let first = format!(
+                "The install stopped while it was writing slot B's boot images: {done} of {of} were written{}.",
+                if in_doubt { ", and the next one may be partly written" } else { "" }
+            );
+            let mut v = vec![first, "userdata was not written: what the phone had stored is still there.".to_string()];
+            v.push(if on_slot_b { slot_b_broken } else { slot_a }.to_string());
+            v.push(again.to_string());
+            return v;
+        }
+        WriteReach::Userdata { pieces } => {
+            let first = format!(
+                "The install stopped while it was writing userdata: slot B's boot images are written, and {pieces} pieces of the system image, with one more that may be partly written."
+            );
+            let mut v = vec![first];
+            v.push(if on_slot_b { slot_b_broken } else { slot_a }.to_string());
+            v.push(erased.to_string());
+            v.push(again.to_string());
+            return v;
+        }
+        WriteReach::Written if on_slot_b => vec![
+            "Every image was written and the phone confirmed each one. The command that makes slot B the active slot was not sent or was refused; the phone was running from slot B already.",
+            again,
+        ],
+        WriteReach::Written => vec![
+            "Every image was written and the phone confirmed each one, but slot B was not made the active slot.",
+            slot_a,
+            erased,
+            again,
+        ],
+        WriteReach::SlotInDoubt => vec![
+            "Every image was written and the phone confirmed each one. The command that makes slot B the active slot was sent, and the phone's answer did not arrive: the installer does not know which slot is active.",
+            erased,
+            again,
+            reinstall,
+        ],
+        WriteReach::SlotSet | WriteReach::Rebooted => vec![
+            "Every image was written, the phone confirmed each one, and slot B is the active slot. Only the restart was not confirmed.",
+            "Restart the phone from its Fastboot Mode screen (Start): it then starts Omarchy Mobile from slot B.",
+            "Or start the installer again, with the phone in Fastboot Mode: it writes every image again, from the first.",
+            reinstall,
+        ],
+    };
+    lines.into_iter().map(str::to_string).collect()
 }
 
 /// Why a file was not taken as the factory image. The flow stays at the
@@ -662,6 +797,41 @@ pub struct DryRunPlan {
     /// The maintainer's override skipped the bootloader-slot check: this
     /// plan is not evidence that an install would be allowed.
     pub slot_check_skipped: bool,
+    /// Each partition an install writes, in order, with its sizes as the
+    /// dry run found them on this phone. Empty unless the images were
+    /// walked.
+    pub writes: Vec<PlannedWrite>,
+}
+
+/// One partition an install writes: what goes there and whether it fits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedWrite {
+    /// The partition's name, from the verified release.
+    pub partition: String,
+    /// The release's file that is written to it.
+    pub source: String,
+    /// Bytes written: the image's size, or the root image's unpacked.
+    pub bytes: u64,
+    /// The partition's size on this phone.
+    pub partition_bytes: u64,
+    /// For `userdata`: how many sparse images the root image is sent in.
+    pub pieces: Option<u32>,
+}
+
+impl PlannedWrite {
+    /// One line of the list the owner confirms.
+    pub fn line(&self) -> String {
+        match self.pieces {
+            None => format!(
+                "{}: {}, {} bytes (the partition holds {} bytes)",
+                self.partition, self.source, self.bytes, self.partition_bytes
+            ),
+            Some(pieces) => format!(
+                "{}: {}, {} bytes unpacked, sent in {pieces} pieces (the partition holds {} bytes). ERASES userdata",
+                self.partition, self.source, self.bytes, self.partition_bytes
+            ),
+        }
+    }
 }
 
 /// One screen, as text. Both front ends render this and add nothing of
@@ -669,7 +839,8 @@ pub struct DryRunPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Screen {
     /// `warning`, `phone`, `unlock`, `google-terms`, `factory-image`,
-    /// `answers`, `dry-run`, `done` or `stopped`.
+    /// `answers`, `dry-run`, `done`, `confirm`, `write`, `installed` or
+    /// `stopped`.
     pub state: &'static str,
     /// For `stopped`: [`Stop::id`].
     pub stop: Option<&'static str>,
@@ -694,7 +865,8 @@ pub struct Screen {
     pub footer: Vec<String>,
     /// What the front end does next: `acknowledge`, `read-phone`,
     /// `accept-terms`, `download` (which also takes a file the owner hands
-    /// in), `take-file`, `answers`, `dry-run` or `none`.
+    /// in), `take-file`, `answers`, `dry-run`, `confirm` (hand in what the
+    /// owner typed), `write` or `none`.
     pub action: &'static str,
 }
 
@@ -749,6 +921,12 @@ pub struct Flow {
     dry_run_open: bool,
     /// The maintainer's override let a phone past the bootloader-slot stop.
     slot_check_skipped: bool,
+    /// The owner typed the phone's codename at the confirmation, in this run.
+    confirmed: bool,
+    write_open: bool,
+    /// How far the writes got when they stopped, and whether the phone ran
+    /// from slot B.
+    write_reach: Option<(WriteReach, bool)>,
 }
 
 fn step(text: impl Into<String>) -> ScreenStep {
@@ -792,7 +970,24 @@ impl Flow {
             answers: None,
             dry_run_open: false,
             slot_check_skipped: false,
+            confirmed: false,
+            write_open: false,
+            write_reach: None,
         };
+        // The override exists for dry runs: a flow that could write refuses
+        // it whole, before a release is read or a phone is asked anything
+        if flow.options.write && flow.options.maintainer_skip_bootloader_slot_check {
+            flow.stop(
+                StopKind::OverrideInInstall,
+                Retry::AfterFix,
+                "The bootloader-slot check can't be skipped in an install",
+                vec![
+                    "This run was started to write to a phone, and with the maintainer's override that skips the bootloader-slot check. The override is for dry runs only: nothing is ever written to a phone whose second bootloader copy was not checked.".into(),
+                    "Start the installer again without the override, or as a dry run.".into(),
+                ],
+            );
+            return flow;
+        }
         let release = match verify_release(files, trusted) {
             Ok(r) => r,
             Err(e) => {
@@ -813,6 +1008,23 @@ impl Flow {
             .device_name
             .clone()
             .unwrap_or_else(|| release.manifest().codename.clone());
+        let codename = release.manifest().codename.clone();
+        // What making slot B active costs, and what a failed start falls
+        // back to, differ by phone: writes only where that was read up on
+        if flow.options.write && !WRITE_DEVICES.contains(&codename.as_str()) {
+            flow.stop(
+                StopKind::WritesNotForDevice { codename: codename.clone() },
+                Retry::StopsAgain,
+                "This version of the installer can't install on this phone model",
+                vec![
+                    format!("This release is for the {name} ({codename}). This version of the installer writes only to: {}.", WRITE_DEVICES.join(", ")),
+                    "An install ends by making slot B the phone's active slot. What that costs, and what the phone falls back to when a start fails, differ from model to model, and for this model they have not been worked into this installer.".into(),
+                    format!("A dry run works for this phone. To install, use the installer that comes with the release ({DOWNLOAD}), or ask at {ISSUES}"),
+                ],
+            );
+            flow.release = Some(release);
+            return flow;
+        }
         let listed = release.has_build_index();
         let index = match index {
             _ if !listed => Err(None),
@@ -874,6 +1086,9 @@ impl Flow {
     }
 
     fn phone_fact(&self) -> PhoneFact {
+        if let Some((reach, on_slot_b)) = self.write_reach {
+            return PhoneFact::WriteStopped { reach, on_slot_b };
+        }
         match (self.asked, self.unlock_shown) {
             (false, _) => PhoneFact::NotAsked,
             (true, false) => PhoneFact::OnlyRead,
@@ -1648,8 +1863,31 @@ impl Flow {
         let (Some(factory_zip), Some(answers)) = (self.zip.clone(), self.answers.clone()) else {
             return self.out_of_order("the dry run's end");
         };
+        // Each partition with its sizes on this phone, for the confirmation
+        let mut writes = Vec::new();
+        if let (true, Some(release), Some(walk)) =
+            (walked, self.release.as_ref(), session.userdata_walk())
+        {
+            let m = release.manifest();
+            for (w, size) in m.boot_writes.iter().zip(session.boot_partition_sizes()) {
+                writes.push(PlannedWrite {
+                    partition: w.partition.name().to_string(),
+                    source: w.source.clone(),
+                    bytes: w.size,
+                    partition_bytes: *size,
+                    pieces: None,
+                });
+            }
+            writes.push(PlannedWrite {
+                partition: m.root_image.partition.name().to_string(),
+                source: m.root_image.name.clone(),
+                bytes: walk.image_len,
+                partition_bytes: walk.partition_size,
+                pieces: Some(walk.pieces),
+            });
+        }
         self.dry_run_open = false;
-        self.step = Step::Done(DryRunPlan {
+        let plan = DryRunPlan {
             product: facts.product,
             current_slot: facts.current_slot,
             bootloader: facts.bootloader,
@@ -1659,7 +1897,237 @@ impl Flow {
             would,
             images_walked: walked,
             slot_check_skipped: self.slot_check_skipped,
-        });
+            writes,
+        };
+        if !self.options.write {
+            self.step = Step::Done(plan);
+        } else if self.slot_check_skipped {
+            // Not reachable while `begin` refuses the two together; kept so
+            // that no later change can lead a skipped check to a write
+            self.stop(
+                StopKind::OverrideInInstall,
+                Retry::AfterFix,
+                "The bootloader-slot check can't be skipped in an install",
+                vec!["The bootloader-slot check was skipped in this run, and nothing is ever written to a phone whose second bootloader copy was not checked.".into()],
+            );
+        } else if plan.writes.is_empty() {
+            self.stop(
+                StopKind::ImagesNotChecked,
+                Retry::AfterFix,
+                "The release's images are not all on this computer",
+                vec![
+                    "An install writes the release's boot images and its system image. They were not all found beside the release's other files, so none of them was checked, and the installer does not ask you to confirm a write it has not checked.".into(),
+                    format!("Fetch the whole release from {DOWNLOAD}: its images directory, and the system image (.img.zst) beside it."),
+                ],
+            );
+        } else {
+            self.step = Step::Confirm(plan);
+        }
+        Ok(session.into_transport())
+    }
+
+    /// The owner's answer to the list of what will be written: what they
+    /// typed, as typed. Only the phone's codename goes on; anything else
+    /// stops the install, with nothing written.
+    pub fn confirm_install(&mut self, typed: &str) -> Result<()> {
+        let Step::Confirm(plan) = &self.step else {
+            return self.out_of_order("the confirmation");
+        };
+        let plan = plan.clone();
+        let (_, codename) = self.names();
+        if typed != codename {
+            self.stop(
+                StopKind::NotConfirmed,
+                Retry::Whenever,
+                "Not confirmed",
+                vec![format!("What was typed is not the phone's codename ({codename}), so the install stops here. Nothing was written.")],
+            );
+            return Ok(());
+        }
+        self.confirmed = true;
+        self.step = Step::Write(plan);
+        Ok(())
+    }
+
+    /// Open the one session that can write, on the phone at `transport`.
+    /// Every condition is checked again here, whatever the steps before
+    /// did: this run may write; the override was not used; the release and
+    /// its build index are verified; the codename was typed in this run;
+    /// and the phone, asked once more, is the pinned one, passes every stop,
+    /// is unlocked, and has the build the factory image was chosen for.
+    /// Then the session's own checks run (each boot image against its
+    /// partition, a footer image exactly), and the root image's size is
+    /// checked against `userdata`, all before the first write.
+    ///
+    /// `Some(session)`: the front end writes the release's images through
+    /// it, in the plan's order, then hands it to [`Self::write_done`], or to
+    /// [`Self::write_failed`] with the error that ended it. `None`: the flow
+    /// stopped, and nothing was written.
+    pub async fn begin_write<T: Transport>(
+        &mut self,
+        mut transport: T,
+    ) -> Result<Option<Session<T>>> {
+        let Step::Write(plan) = &self.step else {
+            return self.out_of_order("a write");
+        };
+        if self.write_open {
+            return self.out_of_order("a write");
+        }
+        if !self.options.write {
+            return Err(Error::Refused(
+                "this run is a dry run: nothing is written".into(),
+            ));
+        }
+        if self.options.maintainer_skip_bootloader_slot_check || self.slot_check_skipped {
+            return Err(Error::OverrideOutsideDryRun);
+        }
+        if !self.confirmed {
+            return Err(Error::Refused(
+                "the phone's codename was not typed in this run: nothing is written".into(),
+            ));
+        }
+        let (Some(release), Some(_), Some(pinned)) = (
+            self.release.clone(),
+            self.index.as_ref(),
+            self.pinned.clone(),
+        ) else {
+            return Err(Error::Refused(
+                "no verified release, no verified build index or no phone looked at in this run: nothing is written".into(),
+            ));
+        };
+        let Some(image_len) = plan.writes.last().map(|w| w.bytes) else {
+            return Err(Error::Refused(
+                "the release's images were not checked in this run: nothing is written".into(),
+            ));
+        };
+        let report = probe(&mut transport).await?;
+        match self.judge(&report) {
+            Judged::Stopped => return Ok(None),
+            Judged::Locked => {
+                self.stop(
+                    StopKind::LockedAtWrite,
+                    Retry::AfterFix,
+                    "The phone's bootloader is locked",
+                    vec![
+                        "The phone's bootloader was unlocked when the installer first looked, and it is locked now. Nothing can be written to a locked phone, and nothing was.".into(),
+                        "Unlocking it again erases the phone again.".into(),
+                    ],
+                );
+                return Ok(None);
+            }
+            Judged::Ready { build, .. } => {
+                if self.zip.as_ref().is_none_or(|z| z.build != build.build) {
+                    self.stop(
+                        StopKind::BuildChanged,
+                        Retry::AfterFix,
+                        "The phone's firmware changed",
+                        vec![
+                            "The phone reports another bootloader or baseband than when the factory image was chosen, so that file is no longer known to be the right one.".into(),
+                            "Start the installer again: it finds the build for the phone as it is now.".into(),
+                        ],
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+        let on_slot_b = report.current_slot == "b";
+        self.report = Some(report);
+        let options = PhoneOptions {
+            reinstall: self.options.reinstall,
+            bootloader_slots_confirmed: None,
+            dry_run: false,
+            maintainer_skip_bootloader_slot_check: false,
+        };
+        let opened = match Session::connect_pinned(transport, &release, &pinned, options).await {
+            Ok(mut session) => match session.preflight_userdata(image_len).await {
+                Ok(()) => Ok(session),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        match opened {
+            Ok(session) => {
+                self.write_open = true;
+                // From here a stop says how far the writes got
+                self.write_reach = Some((WriteReach::Nothing, on_slot_b));
+                Ok(Some(session))
+            }
+            Err(e) => {
+                let lost = matches!(e, Error::Transport(_));
+                self.stop(
+                    StopKind::WriteRefused(e.clone()),
+                    if lost { Retry::AfterFix } else { Retry::StopsAgain },
+                    "The install stopped before anything was written",
+                    vec![
+                        format!("The checks a write starts with did not pass ({e})."),
+                        if lost {
+                            "The connection to the phone was lost. Check the cable and keep the phone in Fastboot Mode.".into()
+                        } else {
+                            format!("If this looks wrong for your phone, tell us at {ISSUES}")
+                        },
+                    ],
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    fn our_write<T: Transport>(&self, session: &Session<T>) -> Result<()> {
+        if !matches!(self.step, Step::Write(_)) || !self.write_open {
+            return self.out_of_order("a write's end");
+        }
+        let ours = self.release.as_ref().map(|r| r.id());
+        if session.is_dry_run() || Some(session.release_id()) != ours {
+            return Err(Error::Refused("not the write this install opened".into()));
+        }
+        Ok(())
+    }
+
+    /// The session [`Self::begin_write`] opened returned `error`: the
+    /// install stops, and the stop says how far the phone confirmed the
+    /// writes, what state that leaves it in, and what starting again does.
+    pub fn write_failed<T: Transport>(&mut self, session: Session<T>, error: &Error) -> Result<T> {
+        self.our_write(&session)?;
+        let on_slot_b = self.write_reach.is_some_and(|(_, b)| b);
+        let reach = session.reach();
+        self.write_reach = Some((reach, on_slot_b));
+        self.write_open = false;
+        let lost = matches!(error, Error::Transport(_));
+        self.stop(
+            StopKind::WriteInterrupted(error.clone()),
+            Retry::Whenever,
+            if reach == WriteReach::Nothing {
+                "The install stopped before anything was written"
+            } else {
+                "The install stopped partway"
+            },
+            vec![
+                format!("The install did not run through ({error})."),
+                if lost {
+                    "The connection to the phone was lost. Check the cable, and don't unplug the phone or press its keys while the installer writes.".into()
+                } else {
+                    format!("If it stops the same way again, tell us at {ISSUES}")
+                },
+            ],
+        );
+        Ok(session.into_transport())
+    }
+
+    /// Every write went through the session: the phone confirmed each one,
+    /// slot B is active and the phone was told to restart.
+    pub fn write_done<T: Transport>(&mut self, session: Session<T>) -> Result<T> {
+        self.our_write(&session)?;
+        if !session.is_done() || session.reach() != WriteReach::Rebooted {
+            return Err(Error::Refused(
+                "the writes have not run through: hand the session in as failed".into(),
+            ));
+        }
+        let Step::Write(plan) = &self.step else {
+            return self.out_of_order("a write's end");
+        };
+        self.write_open = false;
+        self.write_reach = None;
+        self.step = Step::Installed(plan.clone());
         Ok(session.into_transport())
     }
 
@@ -1872,15 +2340,25 @@ impl Flow {
                     "A user name, a PIN or password to unlock the phone (digits only gives a PIN pad), the phone's name, the time zone and, if you like, a Wi-Fi network.".into(),
                     "This version of the installer checks your answers and keeps them nowhere: it has no way yet to put them on the phone.".into(),
                 ];
+                if self.options.write {
+                    s.body.push("So the phone this run installs starts with no user account. The list of what will be written says so again, before anything is written.".into());
+                }
             }
             Step::DryRun => {
                 s.state = "dry-run";
                 s.action = "dry-run";
                 s.title = "The dry run".into();
-                s.body = vec![
-                    "The installer now asks the phone every question an install starts with, and lists what an install would write.".into(),
-                    "A dry run sends no write: it reads.".into(),
-                ];
+                s.body = if self.options.write {
+                    vec![
+                        "The installer now asks the phone every question an install starts with, checks every image of the release against its signed checksum, and works out exactly what it will write.".into(),
+                        "This step sends no write: it reads. Nothing is written before you have seen the list and typed the phone's codename.".into(),
+                    ]
+                } else {
+                    vec![
+                        "The installer now asks the phone every question an install starts with, and lists what an install would write.".into(),
+                        "A dry run sends no write: it reads.".into(),
+                    ]
+                };
                 s.footer = vec!["Keep the phone connected, in Fastboot Mode.".into()];
             }
             Step::Done(plan) => {
@@ -1923,7 +2401,88 @@ impl Flow {
                 s.plan = plan.would.clone();
                 s.footer = vec![
                     "The dry run only asked the phone questions. It has written nothing to it.".into(),
-                    "This version of the installer ends here: it has no step that writes to a phone.".into(),
+                    "This run was a dry run, and it ends here: a dry run has no step that writes to a phone.".into(),
+                ];
+            }
+            Step::Confirm(plan) => {
+                s.state = "confirm";
+                s.action = "confirm";
+                s.title = "This is what the installer will write".into();
+                let a = &plan.answers;
+                s.body = vec![
+                    format!(
+                        "The {name} ({}) is unlocked and runs from slot {}; bootloader {}{}.",
+                        plan.product,
+                        plan.current_slot,
+                        plan.bootloader,
+                        plan.baseband
+                            .as_ref()
+                            .map(|b| format!(", baseband {b}"))
+                            .unwrap_or_default()
+                    ),
+                    format!(
+                        "Google's factory image for build {} is the right file ({}).",
+                        plan.factory_zip.build, plan.factory_zip.name
+                    ),
+                    format!(
+                        "Your answers: user {} ({}), phone name {}, time zone {}, Wi-Fi {}.",
+                        a.username,
+                        if a.pin { "PIN" } else { "password" },
+                        a.hostname,
+                        a.timezone,
+                        if a.wifi { "set" } else { "not set" }
+                    ),
+                    "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
+                ];
+                s.plan = plan.writes.iter().map(PlannedWrite::line).collect();
+                s.plan
+                    .push("then: make slot B the active slot (set_active:b)".into());
+                s.plan.push("then: restart the phone (reboot)".into());
+                s.footer = vec![
+                    "userdata will be ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again.".into(),
+                    if plan.current_slot == "b" {
+                        "Slot B's boot partitions, listed above, are overwritten: the Omarchy Mobile that is on the phone now is replaced.".into()
+                    } else {
+                        "Slot B's boot partitions, listed above, are overwritten.".into()
+                    },
+                    "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.".into(),
+                    NO_ANSWERS.into(),
+                    format!("To go ahead, type the phone's codename: {codename}"),
+                    "Anything else stops the install here, with nothing written.".into(),
+                ];
+            }
+            Step::Write(plan) => {
+                s.state = "write";
+                s.action = "write";
+                s.title = "Writing to the phone".into();
+                s.body = vec![
+                    format!(
+                        "The installer now writes the {} partitions that were listed, then makes slot B the active slot and restarts the phone.",
+                        plan.writes.len()
+                    ),
+                    "Keep the phone connected and in Fastboot Mode until it restarts by itself. Don't unplug it and don't press its keys.".into(),
+                ];
+                s.footer = vec!["Before the first write the installer asks the phone once more what it is, and checks each image against its partition again.".into()];
+            }
+            Step::Installed(plan) => {
+                s.state = "installed";
+                s.title = "Omarchy Mobile is written, and the phone is restarting".into();
+                s.body = vec![
+                    format!(
+                        "Every image was written, and the phone confirmed each one: {}.",
+                        plan.writes
+                            .iter()
+                            .map(|w| w.partition.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    "Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B. At its first start the system grows to fill the phone's storage, which can take a few minutes.".into(),
+                    NO_ANSWERS.into(),
+                    "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone either: this version of the installer does nothing after the restart.".into(),
+                ];
+                s.footer = vec![
+                    "Android is still on slot A, unused. Its data was erased with userdata, so it needs a factory reset if it is ever started again.".into(),
+                    "The install guide's \"Going back to Android\" has the steps to put the phone back as it was sold.".into(),
                 ];
             }
             Step::Stopped(stop) => {
