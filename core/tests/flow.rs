@@ -6,11 +6,11 @@
 mod support;
 use omamobile_installer_core::bundle::ReleaseFiles;
 use omamobile_installer_core::fastboot::{
-    PhoneId, Session, Transport, UnlockAbility, GET_UNLOCK_ABILITY,
+    PhoneId, PhoneOptions, Session, Transport, UnlockAbility, GET_UNLOCK_ABILITY,
 };
 use omamobile_installer_core::flow::{
     AnswerField, AnswersInput, Flow, FlowOptions, OwnerAnswers, PhoneFact, Retry, Step, Stop,
-    StopKind, ZipRefusal, UNLOCK_COMMAND,
+    StopKind, ZipRefusal, SLOT_CHECK_SKIPPED, UNLOCK_COMMAND,
 };
 use omamobile_installer_core::install::flash_userdata_from_reader;
 use omamobile_installer_core::Error;
@@ -91,9 +91,23 @@ fn only_reads(phone: &FakePhone, questions: usize) {
     assert_eq!(phone.0.borrow().active_slot, "a");
     assert!(!phone.0.borrow().rebooted);
 }
+/// The maintainer's override for the bootloader-slot stop.
+fn begin_overridden(bundle: &TestBundle) -> Flow {
+    Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        FlowOptions {
+            maintainer_skip_bootloader_slot_check: true,
+            ..Default::default()
+        },
+    )
+}
 /// A flow taken to the given step on a ready phone.
 fn flow_at(bundle: &TestBundle, phone: &FakePhone, until: &str) -> Flow {
-    let mut flow = begin(bundle);
+    flow_from(begin(bundle), bundle, phone, until)
+}
+fn flow_from(mut flow: Flow, bundle: &TestBundle, phone: &FakePhone, until: &str) -> Flow {
     for state in ["warning", "phone", "factory-image", "answers", "dry-run"] {
         assert_eq!(flow.screen().state, state);
         if state == until {
@@ -757,6 +771,245 @@ fn a_phone_that_reports_one_slots_bootloader_stops_and_no_slot_is_switched() {
     assert_eq!(s.retry, Retry::StopsAgain);
     footer_is_honest(s);
     only_getvar(&phone);
+}
+
+/// Walk a dry run to its end without the release's images.
+fn finish_dry_run(flow: &mut Flow, phone: &FakePhone) {
+    let session = block_on(flow.dry_run(phone.clone())).unwrap().unwrap();
+    assert!(session.is_dry_run());
+    flow.dry_run_done(session).unwrap();
+}
+
+#[test]
+fn the_maintainers_override_passes_the_one_slot_stop_in_a_dry_run_and_says_so() {
+    let bundle = TestBundle::new();
+    // Without it, this phone stops (the test above); with it, the flow goes on
+    let phone = phone("one-slot");
+    let mut flow = begin_overridden(&bundle);
+    // Nothing is said before a check was skipped
+    assert_eq!(flow.screen().notice, None);
+    flow.acknowledge_warning().unwrap();
+    assert_eq!(flow.screen().notice, None);
+    look(&mut flow, &phone).unwrap();
+    assert_eq!(flow.screen().state, "factory-image");
+    // From then on every screen says it, in the same words, before anything else
+    assert_eq!(SLOT_CHECK_SKIPPED, "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.");
+    assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+    give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap();
+    assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+    flow.answers(&answers()).unwrap();
+    assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+
+    // The dry run: a session that holds every write back, and records the skip
+    let release = flow.release().unwrap().clone();
+    let mut session = block_on(flow.dry_run(phone.clone())).unwrap().unwrap();
+    assert!(session.is_dry_run() && session.slot_check_skipped());
+    assert!(session
+        .log()
+        .iter()
+        .any(|l| l.starts_with("skipped: the bootloader-slot check")));
+    block_on(async {
+        for write in &release.manifest().boot_writes {
+            let image = release
+                .verify_boot_image(write, bundle.image(&write.image))
+                .unwrap();
+            session.flash_boot(&image).await.unwrap();
+        }
+        let mut check = release.root_image_check();
+        check.update(&bundle.root_zst);
+        let root = check.finish().unwrap();
+        flash_userdata_from_reader(&mut session, &root, &bundle.root_zst[..], None)
+            .await
+            .unwrap();
+        session.activate_and_reboot().await.unwrap();
+    });
+    flow.dry_run_done(session).unwrap();
+    // The plan records it, and the last screen says it where it can't be missed
+    let Step::Done(plan) = flow.step() else {
+        panic!("{:?}", flow.step())
+    };
+    assert!(plan.slot_check_skipped && plan.images_walked);
+    let screen = flow.screen();
+    assert_eq!(screen.state, "done");
+    assert_eq!(screen.notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+    assert_eq!(
+        screen.title,
+        "The dry run finished with one check skipped. Nothing was written"
+    );
+    assert!(!screen.title.contains("passed"));
+    let v: Value = serde_json::to_value(&screen).unwrap();
+    assert_eq!(v["notice"], json!(SLOT_CHECK_SKIPPED));
+    // Still only questions: nothing was written, no slot was switched
+    only_getvar(&phone);
+
+    // The same phone and the same steps without the override: stopped, no notice
+    let mut flow = flow_at(&bundle, &phone, "phone");
+    look(&mut flow, &phone).unwrap();
+    assert_eq!(stop(&flow).id(), "bootloader-slots-unknown");
+    assert_eq!(flow.screen().notice, None);
+
+    // A locked one-slot phone: the unlock screen doesn't claim the copies match
+    let locked = self::phone("one-slot");
+    locked.edit(|s| {
+        s.vars.insert("unlocked".into(), "no".into());
+    });
+    let mut flow = begin_overridden(&bundle);
+    flow.acknowledge_warning().unwrap();
+    look(&mut flow, &locked).unwrap();
+    let screen = flow.screen();
+    assert_eq!(screen.state, "unlock");
+    assert_eq!(screen.notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+    let body = screen.body.join(" ");
+    assert!(!body.contains("two bootloader copies match"), "{body}");
+    assert!(body.contains("Its second bootloader copy was not checked."));
+    // A later stop on that flow keeps the notice
+    locked.edit(|s| {
+        s.vars.insert("current-slot".into(), "b".into());
+    });
+    look(&mut flow, &locked).unwrap();
+    assert_eq!(stop(&flow).id(), "runs-from-slot-b");
+    assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
+}
+
+#[test]
+fn the_maintainers_override_passes_no_other_stop() {
+    let bundle = TestBundle::new();
+    // Two versions that are known to differ still stop, at the first look...
+    let phone = phone("slots-differ");
+    let mut flow = begin_overridden(&bundle);
+    flow.acknowledge_warning().unwrap();
+    look(&mut flow, &phone).unwrap();
+    let s = stop(&flow).clone();
+    assert_eq!(
+        s.kind,
+        StopKind::BootloaderSlotsDiffer {
+            a: "fake-1.0".into(),
+            b: "fake-0.9".into()
+        }
+    );
+    assert_eq!(s.retry, Retry::StopsAgain);
+    // No check was skipped, so nothing says one was
+    assert_eq!(flow.screen().notice, None);
+    only_getvar(&phone);
+    // ...and at the dry run, when they differ only by then
+    let phone = self::phone("ready");
+    let mut flow = flow_from(begin_overridden(&bundle), &bundle, &phone, "dry-run");
+    assert_eq!(flow.screen().notice, None);
+    phone.edit(|s| {
+        s.vars
+            .insert("version-bootloader-b".into(), "fake-0.9".into());
+    });
+    assert!(block_on(flow.dry_run(phone.clone())).unwrap().is_none());
+    assert_eq!(stop(&flow).id(), "bootloader-slots-differ");
+    only_getvar(&phone);
+    // Every other stop is where it was
+    for (scenario, kind) in [
+        ("slot-b", "runs-from-slot-b"),
+        ("unknown-build", "build-not-listed"),
+        ("untested-build", "build-not-tested"),
+        ("untested-old-build", "build-not-tested"),
+        ("other-model", "wrong-model"),
+    ] {
+        let phone = self::phone(scenario);
+        let mut flow = begin_overridden(&bundle);
+        flow.acknowledge_warning().unwrap();
+        look(&mut flow, &phone).unwrap();
+        assert_eq!(stop(&flow).id(), kind, "{scenario}");
+        assert_eq!(flow.screen().notice, None, "{scenario}");
+    }
+    // A one-slot phone gets past its own stop and no further: its build
+    // must still be the tested one
+    let phone = self::phone("one-slot");
+    phone.edit(|s| {
+        s.vars
+            .insert("version-bootloader".into(), "fake-1.2".into());
+        s.vars
+            .insert("version-baseband".into(), "fake-radio-1.2".into());
+    });
+    let mut flow = begin_overridden(&bundle);
+    flow.acknowledge_warning().unwrap();
+    look(&mut flow, &phone).unwrap();
+    assert_eq!(stop(&flow).id(), "build-not-tested");
+    // A phone that reports both slots, the same: the override does nothing,
+    // and the dry run is an ordinary one
+    let phone = self::phone("ready");
+    let mut flow = flow_from(begin_overridden(&bundle), &bundle, &phone, "dry-run");
+    finish_dry_run(&mut flow, &phone);
+    let Step::Done(plan) = flow.step() else {
+        panic!("{:?}", flow.step())
+    };
+    assert!(!plan.slot_check_skipped);
+    assert_eq!(flow.screen().notice, None);
+    assert_eq!(
+        flow.screen().title,
+        "The dry run passed. Nothing was written"
+    );
+}
+
+#[test]
+fn the_maintainers_override_is_refused_where_a_write_could_follow() {
+    let bundle = TestBundle::new();
+    let release = bundle.verify().unwrap();
+    // A session that would write, asked to skip the check: a typed refusal,
+    // before a single question reaches the phone. On a one-slot phone...
+    let phone = phone("one-slot");
+    let writing = PhoneOptions {
+        maintainer_skip_bootloader_slot_check: true,
+        dry_run: false,
+        ..Default::default()
+    };
+    let err = block_on(Session::connect(
+        phone.clone(),
+        &release,
+        SERIAL,
+        writing.clone(),
+    ))
+    .unwrap_err();
+    assert_eq!(err, Error::OverrideOutsideDryRun);
+    assert!(err.to_string().contains("in a dry run only"));
+    assert!(phone.log().is_empty());
+    // ...and on any other, where it would have skipped nothing
+    let ready = self::phone("ready");
+    let err = block_on(Session::connect(ready.clone(), &release, SERIAL, writing)).unwrap_err();
+    assert_eq!(err, Error::OverrideOutsideDryRun);
+    assert!(ready.log().is_empty());
+    // With every write held back it is taken, and the session says so
+    let dry = PhoneOptions {
+        maintainer_skip_bootloader_slot_check: true,
+        dry_run: true,
+        ..Default::default()
+    };
+    let session = block_on(Session::connect(
+        phone.clone(),
+        &release,
+        SERIAL,
+        dry.clone(),
+    ))
+    .unwrap();
+    assert!(session.is_dry_run() && session.slot_check_skipped());
+    // It skips nothing on a phone that reports both slots...
+    let session = block_on(Session::connect(
+        ready.clone(),
+        &release,
+        SERIAL,
+        dry.clone(),
+    ))
+    .unwrap();
+    assert!(!session.slot_check_skipped());
+    // ...and never passes two that differ
+    let differ = self::phone("slots-differ");
+    let err = block_on(Session::connect(differ.clone(), &release, SERIAL, dry)).unwrap_err();
+    assert!(matches!(&err, Error::Phone(why) if why.contains("slots differ")));
+    // Without the override a one-slot phone is refused in a dry run too
+    let plain = PhoneOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let err = block_on(Session::connect(phone.clone(), &release, SERIAL, plain)).unwrap_err();
+    assert!(matches!(&err, Error::Phone(why) if why.contains("other slot")));
+    for p in [&phone, &ready, &differ] {
+        only_getvar(p);
+    }
 }
 
 #[test]

@@ -18,6 +18,12 @@
 //! The flow ends at the dry run, and `install` runs only with `--dry-run`:
 //! nothing here can write to a phone. All that reaches one is `getvar` and,
 //! for a locked phone, the one question `flashing get_unlock_ability`.
+//!
+//! Not in the usage text, and for the maintainer only: `install` and `flow`
+//! take `--maintainer-skip-bootloader-slot-check`, which lets a dry run go on
+//! past a phone that reports one bootloader slot's version (docs/DESIGN.md
+//! §6). The core says on every screen that the check was skipped; without
+//! `--dry-run` it is refused here, before any USB device is looked for.
 use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
 use omamobile_installer_core::fastboot::{
     PhoneId, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
@@ -318,6 +324,10 @@ fn wrap(text: &str, indent: &str, first: &str) {
 /// One screen of the flow, as text. Every word is the core's.
 fn show(screen: &Screen) {
     println!("\n==> {}", screen.title);
+    if let Some(notice) = &screen.notice {
+        println!();
+        wrap(notice, "        ", "    !!  ");
+    }
     for p in &screen.body {
         println!();
         wrap(p, "    ", "    ");
@@ -615,6 +625,10 @@ fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
     Ok(())
 }
 
+/// The maintainer's override for the bootloader-slot stop, in a dry run
+/// only. Deliberately not in [`USAGE`].
+const SLOT_OVERRIDE: &str = "--maintainer-skip-bootloader-slot-check";
+
 /// `Ok(false)`: the install flow stopped, and has said why.
 fn run() -> Res<bool> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -635,11 +649,18 @@ fn run() -> Res<bool> {
                     "--fake-phone" => fake = it.next().copied(),
                     "--dry-run" => dry_run = true,
                     "--reinstall" => options.reinstall = true,
+                    SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
                     "--factory-zip" => zip = it.next().map(PathBuf::from),
                     other => return Err(format!("unknown argument {other}").into()),
                 }
             }
             let dir = Path::new(dir);
+            // `flow` is always a dry run on a pretend phone. `install` is
+            // one only when told so, and the override is for nothing else:
+            // refused from the arguments alone, with no USB device opened.
+            if options.maintainer_skip_bootloader_slot_check && *command == "install" && !dry_run {
+                return Err(Box::new(Error::OverrideOutsideDryRun));
+            }
             return match (*command, serial, fake) {
                 ("flow", None, Some(scenario)) => cmd_fake(dir, scenario, options, zip),
                 ("flow", ..) => {

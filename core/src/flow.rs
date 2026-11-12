@@ -48,6 +48,9 @@ const DOWNLOAD: &str = "https://omamobile.org/download";
 /// the one `flashing` command this crate sends is the question
 /// [`crate::fastboot::GET_UNLOCK_ABILITY`], which only reads.
 pub const UNLOCK_COMMAND: &str = "fastboot flashing unlock";
+/// Shown on every screen once the maintainer's override has skipped the
+/// bootloader-slot check, so both front ends say it in the same words.
+pub const SLOT_CHECK_SKIPPED: &str = "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.";
 
 /// What the person running the install said up front.
 #[derive(Debug, Clone, Default)]
@@ -55,6 +58,16 @@ pub struct FlowOptions {
     /// Slot B already holds Omarchy Mobile and this installs it again.
     /// Without it a phone running from slot B stops the install.
     pub reinstall: bool,
+    /// The maintainer's override, for a dry run only: go on past
+    /// [`StopKind::BootloaderSlotsUnknown`], and say so on every screen from
+    /// then on ([`SLOT_CHECK_SKIPPED`]). It passes no other stop: two
+    /// versions that are known to differ still stop.
+    ///
+    /// This flow ends at the dry run, so here it can't reach a write. The
+    /// session it opens is refused with [`Error::OverrideOutsideDryRun`]
+    /// unless it holds every write back; a version of this flow that writes
+    /// must refuse the override the same way before its first write.
+    pub maintainer_skip_bootloader_slot_check: bool,
 }
 
 /// Where the install is, and what the front end shows.
@@ -524,6 +537,9 @@ pub struct DryRunPlan {
     /// run (each checked against the signed manifest, the root image cut
     /// into sparse images). When not, `would` comes from the manifest alone.
     pub images_walked: bool,
+    /// The maintainer's override skipped the bootloader-slot check: this
+    /// plan is not evidence that an install would be allowed.
+    pub slot_check_skipped: bool,
 }
 
 /// One screen, as text. Both front ends render this and add nothing of
@@ -536,6 +552,9 @@ pub struct Screen {
     /// For `stopped`: [`Stop::id`].
     pub stop: Option<&'static str>,
     pub title: String,
+    /// Said before everything else on the screen, and made to stand out:
+    /// a check was skipped by the maintainer's override.
+    pub notice: Option<String>,
     pub body: Vec<String>,
     /// Numbered steps for the person.
     pub steps: Vec<ScreenStep>,
@@ -582,6 +601,8 @@ pub struct Flow {
     zip: Option<VerifiedFactoryZip>,
     answers: Option<AnswersSummary>,
     dry_run_open: bool,
+    /// The maintainer's override let a phone past the bootloader-slot stop.
+    slot_check_skipped: bool,
 }
 
 fn step(text: impl Into<String>) -> ScreenStep {
@@ -623,6 +644,7 @@ impl Flow {
             zip: None,
             answers: None,
             dry_run_open: false,
+            slot_check_skipped: false,
         };
         let release = match verify_release(files, trusted) {
             Ok(r) => r,
@@ -919,6 +941,12 @@ impl Flow {
                 );
                 return Judged::Stopped;
             }
+            // The maintainer's override: this stop and no other. The flow
+            // ends at a dry run, and the session it opens refuses the
+            // override unless every write is held back.
+            None if self.options.maintainer_skip_bootloader_slot_check => {
+                self.slot_check_skipped = true;
+            }
             None => {
                 let probe_declared = self
                     .release
@@ -1171,7 +1199,9 @@ impl Flow {
             reinstall: self.options.reinstall,
             // Never the owner's word for the other slot: the flow stops instead
             bootloader_slots_confirmed: None,
+            // Always: the session refuses the override below without it
             dry_run: true,
+            maintainer_skip_bootloader_slot_check: self.slot_check_skipped,
         };
         match Session::connect_pinned(transport, &release, &report.id, options).await {
             Ok(session) => {
@@ -1232,6 +1262,8 @@ impl Flow {
         if !session.is_dry_run() || Some(session.release_id()) != ours {
             return Err(Error::Refused("not the dry run this install opened".into()));
         }
+        // Once skipped, on any look at the phone, the whole run says so
+        self.slot_check_skipped |= session.slot_check_skipped();
         let walked = session.is_done();
         let would: Vec<String> = if walked {
             // Sparse images of the root image, counted rather than listed
@@ -1272,6 +1304,7 @@ impl Flow {
             answers,
             would,
             images_walked: walked,
+            slot_check_skipped: self.slot_check_skipped,
         });
         Ok(session.into_transport())
     }
@@ -1289,6 +1322,9 @@ impl Flow {
             state: "",
             stop: None,
             title: String::new(),
+            notice: self
+                .slot_check_skipped
+                .then(|| SLOT_CHECK_SKIPPED.to_string()),
             body: Vec::new(),
             steps: Vec::new(),
             link: None,
@@ -1331,7 +1367,11 @@ impl Flow {
                 s.title = "Unlock the bootloader".into();
                 s.body = vec![
                     format!("The {name} is in Fastboot Mode, and its bootloader is still locked."),
-                    "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, its two bootloader copies match, and this release was tested with its Android build.".into(),
+                    if self.slot_check_skipped {
+                        "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, and this release was tested with its Android build. Its second bootloader copy was not checked.".into()
+                    } else {
+                        "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, its two bootloader copies match, and this release was tested with its Android build.".into()
+                    },
                     "Unlocking is the moment the phone is erased, as the warning said: copy off photos, messages and two-factor codes before you do it.".into(),
                 ];
                 // What the phone itself said about "OEM unlocking", when it
@@ -1422,7 +1462,11 @@ impl Flow {
             }
             Step::Done(plan) => {
                 s.state = "done";
-                s.title = "The dry run passed. Nothing was written".into();
+                s.title = if plan.slot_check_skipped {
+                    "The dry run finished with one check skipped. Nothing was written".into()
+                } else {
+                    "The dry run passed. Nothing was written".into()
+                };
                 let a = &plan.answers;
                 s.body = vec![
                     format!(

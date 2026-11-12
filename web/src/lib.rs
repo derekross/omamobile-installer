@@ -257,7 +257,12 @@ impl InstallFlow {
                 &files,
                 index.as_deref(),
                 &TrustedKeys::omamobile(),
-                FlowOptions { reinstall },
+                // The maintainer's bootloader-slot override is not offered
+                // here: the page as it ships has no way to set it
+                FlowOptions {
+                    reinstall,
+                    ..Default::default()
+                },
             ),
             check: None,
             #[cfg(feature = "selftest")]
@@ -406,6 +411,8 @@ pub async fn connect(release: Release, phone: Phone, reinstall: bool) -> Result<
         reinstall,
         bootloader_slots_confirmed: None,
         dry_run: !cfg!(feature = "enable-writes"),
+        // Never on a path that can be built to write
+        maintainer_skip_bootloader_slot_check: false,
     };
     let session = Session::connect(transport, &release.inner, &phone.serial, options)
         .await
@@ -597,8 +604,14 @@ impl Phone {
 impl InstallFlow {
     /// A flow on the signed test bundle built into this module, trusted by
     /// its test key. `tamper`: `manifest` or `index` changes one byte of
-    /// that file first, to show the refusal.
-    pub fn selftest(reinstall: bool, tamper: &str) -> Result<InstallFlow, JsError> {
+    /// that file first, to show the refusal. `slot_override`: the
+    /// maintainer's override for the bootloader-slot stop, which the page
+    /// has no control for; the self-test sets it to see the page say so.
+    pub fn selftest(
+        reinstall: bool,
+        tamper: &str,
+        slot_override: bool,
+    ) -> Result<InstallFlow, JsError> {
         let flip = |data: &[u8], on: bool| {
             let mut v = data.to_vec();
             if on {
@@ -621,7 +634,15 @@ impl InstallFlow {
             TrustedKeys::new(&[core::str::from_utf8(fx!("test-key.fingerprint")).map_err(js)?])
                 .map_err(js)?;
         Ok(InstallFlow {
-            flow: Flow::begin(&files, Some(&index), &trusted, FlowOptions { reinstall }),
+            flow: Flow::begin(
+                &files,
+                Some(&index),
+                &trusted,
+                FlowOptions {
+                    reinstall,
+                    maintainer_skip_bootloader_slot_check: slot_override,
+                },
+            ),
             check: None,
             built_in: true,
         })

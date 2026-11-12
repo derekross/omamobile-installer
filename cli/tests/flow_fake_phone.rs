@@ -155,6 +155,73 @@ fn a_locked_phone_is_shown_the_command_and_sent_nothing() {
     assert!(out.contains("\n           fastboot flashing unlock\n"));
 }
 
+const SLOT_OVERRIDE: &str = "--maintainer-skip-bootloader-slot-check";
+const SKIPPED: &str = "The bootloader-slot check was skipped by a maintainer override.";
+const NOT_EVIDENCE: &str = "This run is not evidence that an install would be allowed.";
+
+#[test]
+fn the_maintainers_override_is_hidden_dry_run_only_and_said_on_the_screen() {
+    let zip = factory_zip();
+    let zip = zip.to_str().unwrap();
+    let typed = format!("yes\n{ANSWERS}");
+    // Without it the one-slot phone stops, and nothing mentions an override
+    let (code, out, _) = flow("one-slot", &["--factory-zip", zip], &typed);
+    assert_eq!(code, 2);
+    assert!(!flat(&out).contains("override") && !out.contains("--"));
+    // With it the dry run goes on to its end, and says what was skipped
+    let (code, out, err) = flow("one-slot", &["--factory-zip", zip, SLOT_OVERRIDE], &typed);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "The dry run finished with one check skipped. Nothing was written"
+    );
+    assert!(!titles(&out).contains(&"The dry run passed. Nothing was written"));
+    // On every screen from the look at the phone on: four of them
+    assert_eq!(flat(&out).matches(SKIPPED).count(), 4, "{out}");
+    assert_eq!(flat(&out).matches(NOT_EVIDENCE).count(), 4, "{out}");
+    // Set apart from the rest of the screen
+    assert!(out.contains("\n    !!  The bootloader-slot check was skipped"));
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+    // A phone that reports both slots: the override changes nothing
+    let (code, out, _) = flow("ready", &["--factory-zip", zip, SLOT_OVERRIDE], &typed);
+    assert_eq!(code, 0);
+    assert!(!flat(&out).contains("override"));
+    assert!(titles(&out).contains(&"The dry run passed. Nothing was written"));
+    // Two versions that are known to differ still stop
+    let (code, out, _) = flow("slots-differ", &[SLOT_OVERRIDE], "yes\n");
+    assert_eq!(code, 2);
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "The phone's two bootloader copies differ"
+    );
+    assert!(!flat(&out).contains("override"));
+
+    // Not in the usage text
+    let (code, out, err) = run(&[], "");
+    assert_eq!(code, 1);
+    assert!(err.contains("usage:") && err.contains("--dry-run"));
+    for hidden in ["maintainer", "skip", "override"] {
+        assert!(!err.contains(hidden) && !out.contains(hidden), "{err}");
+    }
+    // On a real phone it is for a dry run only: without --dry-run it is
+    // refused from the arguments alone, and no USB device is listed or opened
+    let dir = fixture();
+    let dir = dir.to_str().unwrap();
+    for args in [
+        vec!["install", dir, "--serial", "<SERIAL>", SLOT_OVERRIDE],
+        vec!["install", dir, SLOT_OVERRIDE, "--serial", "<SERIAL>"],
+        vec!["install", dir, SLOT_OVERRIDE],
+    ] {
+        let (code, out, err) = run(&args, "");
+        assert_eq!(code, 1, "{args:?}");
+        assert!(
+            err.contains("the bootloader-slot check can be skipped in a dry run only"),
+            "{err}"
+        );
+        assert!(out.is_empty(), "{out}");
+    }
+}
+
 #[test]
 fn each_stop_ends_the_tool_with_the_cores_words() {
     for (scenario, title, footer) in [

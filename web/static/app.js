@@ -40,10 +40,12 @@ async function bytes(url, optional = false) {
 
 // ---- Starting a flow ------------------------------------------------------
 
-async function start(tamper = "") {
+// `slotOverride` is the maintainer's override for the bootloader-slot stop.
+// Nothing on the page sets it: only the self-test does, on the pretend phone.
+async function start(tamper = "", slotOverride = false) {
   phone = null;
   if (pretend) {
-    flow = core.InstallFlow.selftest($("reinstall").checked, tamper);
+    flow = core.InstallFlow.selftest($("reinstall").checked, tamper, slotOverride);
     phone = core.fake_phone($("scenario").value);
   } else {
     const files = await Promise.all(RELEASE_FILES.map((name) => bytes("release/" + name)));
@@ -242,7 +244,10 @@ function render() {
   steps.forEach((li, n) => {
     li.className = n === at ? "now" : n < at ? "past" : "";
   });
-  const parts = [el("h2", { textContent: s.title }), ...s.body.map((text) => el("p", { textContent: text }))];
+  const parts = [el("h2", { textContent: s.title })];
+  // A check that was skipped: before everything else, and set apart
+  if (s.notice) parts.push(el("p", { className: "notice", id: "notice", textContent: s.notice }));
+  parts.push(...s.body.map((text) => el("p", { textContent: text })));
   if (s.steps.length) {
     parts.push(
       el(
@@ -286,10 +291,10 @@ async function selftest() {
     b.click();
     await busy;
   };
-  const begin = async (scenario, { reinstall = false, tamper = "" } = {}) => {
+  const begin = async (scenario, { reinstall = false, tamper = "", slotOverride = false } = {}) => {
     $("scenario").value = scenario;
     $("reinstall").checked = reinstall;
-    await start(tamper);
+    await start(tamper, slotOverride);
   };
   const sent = () => JSON.parse(phone.fake_report());
   // getvar and nothing else; a locked phone at the unlock steps is also
@@ -298,6 +303,7 @@ async function selftest() {
     const r = sent();
     return r.commands > 0 && r.unlock_questions === questions && r.not_reads.length === 0 && r.written.length === 0 && r.active_slot === "a";
   };
+  const notice = () => $("notice")?.textContent ?? "";
   const stepCount = () => document.querySelectorAll("#screen .steps li").length;
   const pick = async (file) => {
     const transfer = new DataTransfer();
@@ -402,8 +408,35 @@ async function selftest() {
   await begin("one-slot");
   await click("accept");
   await click("look");
-  check("the slot stop hands out no way around and says a retry stops again", text().includes("will stop here again") && !text().includes("--") && sent().not_reads.length === 0);
+  check("the slot stop hands out no way around and says a retry stops again", text().includes("will stop here again") && !text().includes("--") && !text().includes("override") && !notice() && sent().not_reads.length === 0);
 
+  // 4b. The maintainer's override for the bootloader-slot stop: the page has
+  // no control for it, and when it is set the core's notice is on every screen
+  const skipped = "The bootloader-slot check was skipped by a maintainer override.";
+  const notEvidence = "This run is not evidence that an install would be allowed.";
+  check("the page offers no control for the override", !document.querySelector("main").innerHTML.includes("override") && !document.querySelector("[id*=override], [name*=override], [id*=maintainer]"));
+  await begin("one-slot", { slotOverride: true });
+  check("nothing is said before a check was skipped", !notice());
+  await click("accept");
+  await click("look");
+  const noticed = [state() === "factory-image" && notice().startsWith(skipped) && notice().endsWith(notEvidence)];
+  await click("pretend-zip");
+  noticed.push(state() === "answers" && notice().endsWith(notEvidence));
+  await answer(good);
+  noticed.push(state() === "dry-run" && notice().endsWith(notEvidence));
+  await click("dry");
+  noticed.push(state() === "done" && notice().startsWith(skipped) && notice().endsWith(notEvidence));
+  check("with the override, every screen after the look says the check was skipped and the run is no evidence", noticed.every(Boolean), noticed.join(" "));
+  check("with the override, the notice comes right under the title, and the title doesn't say passed", $("screen").children[1] === $("notice") && $("screen").children[0].textContent === "The dry run finished with one check skipped. Nothing was written", $("screen").children[0].textContent);
+  check("with the override, the dry run still sent getvar and nothing else", onlyGetvar(), JSON.stringify(sent()));
+  await begin("slots-differ", { slotOverride: true });
+  await click("accept");
+  await click("look");
+  check("with the override, two bootloader versions that differ still stop", stop() === "bootloader-slots-differ" && !notice());
+  await begin("ready", { slotOverride: true });
+  await click("accept");
+  await click("look");
+  check("with the override, a phone that reports both slots gets no notice", state() === "factory-image" && !notice());
   await begin("slot-b", { reinstall: true });
   await click("accept");
   await click("look");

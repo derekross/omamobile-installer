@@ -63,3 +63,7 @@ jobs:
           if grep -q fake_phone web/dist/pkg/omamobile_installer_web.js; then
             echo "the shipping build carries the pretend phone"; exit 1
           fi
+          # The maintainer's bootloader-slot override: no way to set it from the page
+          if grep -qiE 'slot_override|maintainer' web/dist/pkg/omamobile_installer_web.js web/dist/*.html; then
+            echo "the shipping build offers the bootloader-slot override"; exit 1
+          fi

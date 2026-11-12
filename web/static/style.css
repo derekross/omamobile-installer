@@ -8,6 +8,7 @@ section { border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent
 .bad { color: #c22; }
 .bad::before { content: "refused  "; font-weight: bold; }
 .problem { color: #c22; font-weight: 600; }
+.notice { border: 2px solid #c22; border-radius: 0.4rem; padding: 0.6rem 0.8rem; font-weight: 600; }
 #progress { display: flex; flex-wrap: wrap; gap: 0.3rem 2.4rem; padding-left: 1.2rem; opacity: 0.8; }
 #progress li.now { font-weight: bold; opacity: 1; }
 #progress li.past { text-decoration: line-through; opacity: 0.6; }

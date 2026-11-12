@@ -366,6 +366,12 @@ pub struct PhoneOptions {
     /// Do every check, send no write: each is recorded in the log as
     /// `would: ...` instead.
     pub dry_run: bool,
+    /// The maintainer's override, for a dry run only: go on when the
+    /// bootloader reports only the current slot's version, without knowing
+    /// the other. It never passes two versions that are known to differ.
+    /// Without `dry_run` the session is refused before anything is sent
+    /// ([`Error::OverrideOutsideDryRun`]).
+    pub maintainer_skip_bootloader_slot_check: bool,
 }
 
 /// What the read-only checks found, for the confirmation screen.
@@ -399,6 +405,9 @@ pub struct Session<T: Transport> {
     facts: PhoneFacts,
     state: State,
     dry_run: bool,
+    /// The bootloader-slot check was skipped by the maintainer's override.
+    /// Only ever true together with `dry_run`.
+    slot_check_skipped: bool,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -434,6 +443,11 @@ impl<T: Transport> Session<T> {
         expected: &PhoneId,
         options: PhoneOptions,
     ) -> Result<Self> {
+        // The override exists for dry runs. A session that could write
+        // refuses it whole, before a question is asked of the phone.
+        if options.maintainer_skip_bootloader_slot_check && !options.dry_run {
+            return Err(Error::OverrideOutsideDryRun);
+        }
         let m: &Manifest = release.manifest();
         let mut client = Client {
             transport,
@@ -483,11 +497,17 @@ impl<T: Transport> Session<T> {
         // Setting slot B active runs slot B's bootloader: both must match.
         let all = client.getvar_all().await?;
         let per_slot = |slot: char| slot_bootloader(&all, slot);
+        let mut slot_check_skipped = false;
         match (per_slot('a'), per_slot('b'), &options.bootloader_slots_confirmed) {
             (Some(a), Some(b), _) if a == b => {}
             (Some(a), Some(b), _) => return Err(Error::Phone(format!("the bootloader slots differ (a: {a}, b: {b})"))),
             (_, _, Some(confirmed)) if *confirmed == bootloader => {}
             (_, _, Some(confirmed)) => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
+            // Only the unknown case, and only in a dry run (checked above too)
+            _ if options.maintainer_skip_bootloader_slot_check && options.dry_run => {
+                slot_check_skipped = true;
+                client.log.push("skipped: the bootloader-slot check (maintainer override, dry run only)".into());
+            }
             _ => return Err(Error::Phone(format!("the phone only reports slot {current_slot}'s bootloader ({bootloader}); the other slot must be checked and confirmed"))),
         }
         if current_slot == "b" && !options.reinstall {
@@ -545,6 +565,7 @@ impl<T: Transport> Session<T> {
             facts,
             state: State::Boot(0),
             dry_run: options.dry_run,
+            slot_check_skipped,
         })
     }
 
@@ -589,6 +610,19 @@ impl<T: Transport> Session<T> {
     pub fn is_dry_run(&self) -> bool {
         self.dry_run
     }
+    /// Whether the maintainer's override skipped the bootloader-slot check.
+    /// Such a session is a dry run, and says nothing about a real install.
+    pub fn slot_check_skipped(&self) -> bool {
+        self.slot_check_skipped
+    }
+    /// The last gate before anything that changes the phone is sent: a
+    /// session whose bootloader-slot check was skipped never writes.
+    fn may_write(&self) -> Result<()> {
+        if self.slot_check_skipped {
+            return Err(Error::OverrideOutsideDryRun);
+        }
+        Ok(())
+    }
     pub(crate) fn release_id(&self) -> &str {
         self.release.id()
     }
@@ -629,6 +663,7 @@ impl<T: Transport> Session<T> {
             ));
             return Ok(());
         }
+        self.may_write()?;
         self.client.download(data).await?;
         self.client
             .simple(&format!("flash:{}", partition.name()))
@@ -755,6 +790,9 @@ impl<T: Transport> Session<T> {
             self.client.log.push("would: reboot".into());
             self.state = State::Rebooted;
             return Ok(());
+        }
+        if let Err(e) = self.may_write() {
+            return self.fail(e);
         }
         if let Err(e) = self.client.simple("set_active:b").await {
             return self.fail(e);

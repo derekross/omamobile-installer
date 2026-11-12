@@ -21,7 +21,7 @@ Does not work, or is not built:
 
 - **Installing.** No front end can write to a phone. The owner's answers can't be delivered to the phone yet, and nothing after the write exists (the first start, the radio backup, firmware, the restart, the check).
 - **The published release in the flow.** 2026.11.08 carries no build index, so the flow stops and says so. It needs a release that ships `factory-builds.json`.
-- **A Pixel 7 Pro, even then.** Its bootloader reports one slot's version only, and the flow stops there by decision (DESIGN §6).
+- **A Pixel 7 Pro, even then.** Its bootloader reports one slot's version only, and the flow stops there by decision (DESIGN §6). The maintainer has a hidden override that takes a dry run, and nothing else, past that stop; such a run says on every screen that the check was skipped and that it is not evidence that an install would be allowed.
 - **Android to Fastboot Mode, and the unlock,** are the owner's: the installer shows the keys and the command.
 - **The web page's downloads** (the images and the root image), **the desktop window, Windows and macOS.**
 
@@ -30,7 +30,7 @@ Does not work, or is not built:
 | Path | What |
 | --- | --- |
 | `core/` | The shared core: the install flow (`flow.rs`), the build index, `manifest.json` and `device.conf` rules, the release signature and checksums, fastboot over a transport trait, Android sparse cutting, zstd. No I/O of its own |
-| `core/tests/` | 54 tests, and 3 beside the command layer in `core/src/fastboot.rs`. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
+| `core/tests/` | 57 tests, and 3 beside the command layer in `core/src/fastboot.rs`. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
 | `usb/` | The fastboot transport over USB (nusb): one file for Linux, Windows, macOS and WebUSB |
 | `cli/` | `omamobile-install`. `verify` and `sparse` need no phone; `flow --fake-phone` runs the install flow against the pretend phone; `devices` and `install --dry-run` use USB |
 | `web/` | The same core as WebAssembly, a static page with a screen for each state of the flow, a local server that sends the strict headers, and a self-test that clicks through the page in a headless browser |
