@@ -1,0 +1,21 @@
+{
+  "state": "stopped",
+  "stop": "locked-at-dry-run",
+  "title": "The phone's bootloader is locked",
+  "notice": null,
+  "body": [
+    "The phone's bootloader was unlocked when the installer first looked, and it is locked now. Nothing can be written to a locked phone.",
+    "Unlocking it again erases the phone again."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer only asked the phone what it is. It has written nothing to it.",
+    "Start the installer again once that is done."
+  ],
+  "action": "none"
+}

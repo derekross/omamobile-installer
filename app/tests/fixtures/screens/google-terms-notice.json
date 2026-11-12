@@ -1,0 +1,41 @@
+{
+  "state": "google-terms",
+  "stop": null,
+  "title": "Google's terms for the factory image",
+  "notice": "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.",
+  "body": [
+    "The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. This phone's bootloader and baseband match Google's build TEST.260101.001, which release 2026.01.02 was tested with, and the installer can download that image for you from Google's own server.",
+    "Google's page says these files are for use only on your own Pixel, and Google does not allow them to be redistributed. So the installer downloads them straight from Google to this computer, for this phone, and Omarchy Mobile does not host them or pass them on.",
+    "Before Google's download page hands out a factory image, it asks you to accept Google's terms. The installer asks you the same here, and downloads nothing until you accept."
+  ],
+  "quote": {
+    "intro": "From Google's download page (the link below). These are Google's words, not Omarchy Mobile's:",
+    "lines": [
+      "Downloading of the system image and use of the device software is subject to the Google Terms of Service",
+      "By continuing, you agree to the Google Terms of Service and Privacy Policy"
+    ],
+    "after": [
+      "Google's page also says that the download and use \"may also be subject to certain third-party terms of service, which can be found in Settings > About phone > Legal information\"."
+    ],
+    "links": [
+      {
+        "label": "Google Terms of Service",
+        "url": "https://policies.google.com/terms"
+      },
+      {
+        "label": "Google Privacy Policy",
+        "url": "https://policies.google.com/privacy"
+      }
+    ]
+  },
+  "steps": [],
+  "link": "https://developers.google.com/android/images#cheetah",
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "If you do not accept here, the installer downloads nothing, and you can still go on: you download the file from Google's page yourself and hand the saved file to the installer.",
+    "Your answer stays in this run of the installer. It is sent nowhere."
+  ],
+  "action": "accept-terms"
+}
