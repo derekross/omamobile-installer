@@ -216,12 +216,29 @@ fn flow(
     run(&args, typed)
 }
 
+/// The variables an HTTP client may take a proxy from.
+const PROXY_VARS: [&str; 6] = [
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+];
+
 fn run(args: &[&str], typed: &str) -> (i32, String, String) {
+    run_with(args, typed, &[])
+}
+
+/// As `run`, with these variables set for the tool and no other proxy
+/// variable of this computer's.
+fn run_with(args: &[&str], typed: &str, env: &[(&str, &str)]) -> (i32, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_omamobile-install"));
-    // No proxy of this computer's between the tool and the stand-in
-    for var in ["http_proxy", "https_proxy", "all_proxy"] {
-        command.env_remove(var).env_remove(var.to_uppercase());
+    for var in PROXY_VARS {
+        command.env_remove(var);
     }
+    command.env_remove("no_proxy").env_remove("NO_PROXY");
+    command.envs(env.iter().copied());
     let mut child = command
         .args(args)
         .stdin(Stdio::piped())
@@ -681,6 +698,134 @@ fn another_size_said_by_the_server_leaves_a_good_part_on_disk() {
         assert_eq!(asked[1].range.as_deref(), Some("bytes=20000-"));
         assert_eq!(kept(&work), [(ZIP.to_string(), file.len() as u64)]);
         assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
+    }
+}
+
+/// Something that listens where a proxy would, counts who connects and
+/// keeps the first line each one sends. It answers nothing.
+struct Listening {
+    at: SocketAddr,
+    heard: Arc<Mutex<Vec<String>>>,
+}
+
+impl Listening {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = listener.local_addr().unwrap();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let log = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let (mut line, mut byte) = (Vec::new(), [0u8; 1]);
+                while !line.ends_with(b"\r\n") && line.len() < 512 {
+                    match stream.read(&mut byte) {
+                        Ok(1) => line.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&line).trim().to_string());
+            }
+        });
+        Listening { at, heard }
+    }
+    fn heard(&self) -> Vec<String> {
+        self.heard.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn a_proxy_named_in_the_environment_is_not_used_and_one_named_with_proxy_is() {
+    let file = zip();
+    let dir = fixture();
+    let dir = dir.to_str().unwrap();
+    let typed = format!("yes\nyes\n{ANSWERS}");
+    let proxy = Listening::start();
+    let through = format!("http://{}", proxy.at);
+
+    // Each variable alone, then all of them at once: the request goes
+    // straight to the stand-in, and nothing connects to the proxy
+    let mut sets: Vec<Vec<(&str, &str)>> =
+        PROXY_VARS.iter().map(|v| vec![(*v, &*through)]).collect();
+    sets.push(PROXY_VARS.iter().map(|v| (*v, &*through)).collect());
+    for (n, env) in sets.iter().enumerate() {
+        let work = work(&format!("proxy-in-environment-{n}"));
+        let body = file.clone();
+        let google = StandIn::start(move |_, _| Reply::whole(&body));
+        let at = google.at.to_string();
+        let args = [
+            "flow",
+            dir,
+            "--fake-phone",
+            "ready",
+            "--work-dir",
+            work.to_str().unwrap(),
+            "--fake-google",
+            &at,
+        ];
+        let (code, out, err) = run_with(&args, &typed, env);
+        assert_eq!(code, 0, "{env:?}: {out}\n{err}");
+        assert_eq!(google.asked().len(), 1, "{env:?}");
+        assert_eq!(proxy.heard(), Vec::<String>::new(), "{env:?}");
+        assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
+        assert!(!flat(&out).contains("through the proxy"), "{out}");
+    }
+
+    // Named on the command line, by the owner: used, and said
+    let work = work("proxy-named");
+    let body = file.clone();
+    let google = StandIn::start(move |_, _| Reply::whole(&body));
+    let at = google.at.to_string();
+    let args = [
+        "flow",
+        dir,
+        "--fake-phone",
+        "ready",
+        "--work-dir",
+        work.to_str().unwrap(),
+        "--fake-google",
+        &at,
+        "--proxy",
+        &through,
+    ];
+    // The input ends where the tool asks whether to try again
+    let (code, out, err) = run_with(&args, "yes\nyes\n", &[]);
+    assert_eq!(code, 1, "{out}\n{err}");
+    let heard = proxy.heard();
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    // The proxy is asked for the stand-in, which is itself asked nothing
+    assert!(heard[0].contains(&at), "{heard:?}");
+    assert_eq!(google.asked().len(), 0);
+    assert!(
+        flat(&out).contains("through the proxy named with --proxy"),
+        "{out}"
+    );
+    // Its address is not printed back: it may hold a password
+    assert!(!out.contains(&through) && !err.contains(&through));
+    assert_eq!(kept(&work), []);
+
+    // Only an HTTP proxy, with a host; refused from the arguments alone
+    for bad in [
+        "",
+        "proxy.example",
+        "socks5://127.0.0.1:1080",
+        "ftp://127.0.0.1:21",
+        "http://",
+    ] {
+        let (code, out, err) = run_with(
+            &["flow", dir, "--fake-phone", "ready", "--proxy", bad],
+            "yes\nyes\n",
+            &[],
+        );
+        assert_eq!(code, 1, "{bad}");
+        assert!(
+            err.contains("--proxy takes an address like http://HOST:PORT"),
+            "{bad}: {err}"
+        );
+        assert!(out.is_empty(), "{bad}: {out}");
     }
 }
 

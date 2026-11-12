@@ -6,7 +6,7 @@
 //!                                                no phone: the sparse images a flash would send
 //!   omamobile-install devices                    USB: phones in fastboot mode
 //!   omamobile-install install BUNDLE_DIR --serial SERIAL --dry-run [--reinstall]
-//!                             [--factory-zip FILE] [--work-dir DIR]
+//!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the install flow up to the dry run, read-only
 //!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--reinstall] [--factory-zip FILE]
 //!                             [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
@@ -31,6 +31,10 @@
 //! carries the requests out and keeps the bytes. `--factory-zip FILE` hands
 //! in a file the owner already saved from Google's page: nothing is
 //! downloaded then.
+//!
+//! The download uses no proxy unless the owner names one with `--proxy`: a
+//! proxy named in the environment (`http_proxy`, `https_proxy`, `all_proxy`)
+//! is not used.
 //!
 //! `flow` never reaches Google: its downloads go to the stand-in server
 //! named with `--fake-google`, on this computer, or nowhere.
@@ -515,8 +519,16 @@ const BODY_IDLE: Duration = Duration::from_secs(60);
 #[cfg(feature = "fake-phone")]
 const STAND_IN_BODY_IDLE: Duration = Duration::from_secs(2);
 
-fn agent(https_only: bool) -> ureq::Agent {
+/// The HTTP client. `proxy`: the one the owner named with `--proxy`, or
+/// none. A proxy named in the environment (`http_proxy`, `https_proxy`,
+/// `all_proxy`, in either case) is never used: the client would take one
+/// from there by default, and whoever sets such a variable for a shell
+/// would learn, unasked, that this computer fetches a Pixel factory image.
+fn agent(https_only: bool, proxy: Option<ureq::Proxy>) -> ureq::Agent {
     ureq::Agent::config_builder()
+        // Said even when it is None: that is what switches the
+        // environment's proxy off
+        .proxy(proxy)
         // The core is shown every redirect and every status, and decides
         .max_redirects(0)
         .max_redirects_will_error(false)
@@ -530,8 +542,8 @@ fn agent(https_only: bool) -> ureq::Agent {
 }
 
 impl Fetcher {
-    fn google() -> Self {
-        Fetcher::Google(agent(true))
+    fn google(proxy: Option<ureq::Proxy>) -> Self {
+        Fetcher::Google(agent(true, proxy))
     }
 
     /// How long a body may stay silent before the try is ended.
@@ -568,6 +580,18 @@ impl Fetcher {
             call = call.header("Range", range);
         }
         call.call().map_err(|e| e.to_string())
+    }
+}
+
+/// `--proxy`'s value: an HTTP proxy the download goes through, as
+/// `http://HOST:PORT` (with `USER:PASSWORD@` before the host if it asks for
+/// one). The value is never printed back.
+fn parse_proxy(value: Option<&str>) -> Res<ureq::Proxy> {
+    let bad = "--proxy takes an address like http://HOST:PORT";
+    let value = value.ok_or(bad)?;
+    match value.strip_prefix("http://") {
+        Some(rest) if !rest.is_empty() => Ok(ureq::Proxy::new(value).map_err(|_| bad)?),
+        _ => Err(bad.into()),
     }
 }
 
@@ -731,6 +755,7 @@ fn fetch(
 fn download_factory_zip(
     flow: &mut Flow,
     fetcher: &Fetcher,
+    proxied: bool,
     work_dir: Option<&Path>,
     name: &str,
 ) -> Res<()> {
@@ -747,7 +772,15 @@ fn download_factory_zip(
     let path = if whole.is_file() { &whole } else { &part };
     let have = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut download = flow.factory_download(have)?;
-    println!("    downloading {name} into {}", dir.display());
+    println!(
+        "    downloading {name} into {}{}",
+        dir.display(),
+        if proxied {
+            ", through the proxy named with --proxy"
+        } else {
+            ""
+        }
+    );
     let failure = fetch(&mut download, fetcher, path).err();
     match flow.factory_download_done(download, failure)? {
         DownloadEnd::Verified => {
@@ -812,6 +845,8 @@ struct FactoryImage {
     /// Where a download is kept (`--work-dir`).
     work_dir: Option<PathBuf>,
     fetcher: Fetcher,
+    /// The owner named a proxy for the download (`--proxy`).
+    proxied: bool,
 }
 
 /// Drive the core's flow to its end. `connect` finds the phone and opens
@@ -880,6 +915,7 @@ fn run_flow<T: Transport>(
                 download_factory_zip(
                     &mut flow,
                     &factory.fetcher,
+                    factory.proxied,
                     factory.work_dir.as_deref(),
                     name.ok_or("the flow names no file to download")?,
                 )?;
@@ -930,6 +966,7 @@ fn cmd_fake(
     options: FlowOptions,
     mut factory: FactoryImage,
     fake_google: Option<&str>,
+    proxy: Option<ureq::Proxy>,
 ) -> Res<bool> {
     use fake::{FakePhone, SERIAL};
     // A pretend run never reaches Google: a stand-in on this computer
@@ -942,7 +979,7 @@ fn cmd_fake(
             if !at.ip().is_loopback() {
                 return Err("--fake-google takes an address on this computer only".into());
             }
-            Fetcher::StandIn(agent(false), at)
+            Fetcher::StandIn(agent(false, proxy), at)
         }
         None => Fetcher::Nowhere,
     };
@@ -981,11 +1018,18 @@ fn cmd_fake(
 }
 
 #[cfg(not(feature = "fake-phone"))]
-fn cmd_fake(_: &Path, _: &str, _: FlowOptions, _: FactoryImage, _: Option<&str>) -> Res<bool> {
+fn cmd_fake(
+    _: &Path,
+    _: &str,
+    _: FlowOptions,
+    _: FactoryImage,
+    _: Option<&str>,
+    _: Option<ureq::Proxy>,
+) -> Res<bool> {
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT]";
 
 fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
     // Decode a small .zst repeatedly: the same loop as the browser self-test
@@ -1022,11 +1066,7 @@ fn run() -> Res<bool> {
         [command @ ("install" | "flow"), dir, rest @ ..] => {
             let (mut serial, mut fake, mut dry_run) = (None, None, false);
             let (mut options, mut fake_google) = (FlowOptions::default(), None);
-            let mut factory = FactoryImage {
-                own_file: None,
-                work_dir: None,
-                fetcher: Fetcher::google(),
-            };
+            let (mut own_file, mut work_dir, mut proxy) = (None, None, None);
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 match *arg {
@@ -1035,12 +1075,20 @@ fn run() -> Res<bool> {
                     "--dry-run" => dry_run = true,
                     "--reinstall" => options.reinstall = true,
                     SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
-                    "--factory-zip" => factory.own_file = it.next().map(PathBuf::from),
-                    "--work-dir" => factory.work_dir = it.next().map(PathBuf::from),
+                    "--factory-zip" => own_file = it.next().map(PathBuf::from),
+                    "--work-dir" => work_dir = it.next().map(PathBuf::from),
+                    // The one way a proxy is used: named here, by the owner
+                    "--proxy" => proxy = Some(parse_proxy(it.next().copied())?),
                     "--fake-google" => fake_google = it.next().copied(),
                     other => return Err(format!("unknown argument {other}").into()),
                 }
             }
+            let factory = FactoryImage {
+                own_file,
+                work_dir,
+                proxied: proxy.is_some(),
+                fetcher: Fetcher::google(proxy.clone()),
+            };
             let dir = Path::new(dir);
             // `flow` is always a dry run on a pretend phone. `install` is
             // one only when told so, and the override is for nothing else:
@@ -1050,7 +1098,7 @@ fn run() -> Res<bool> {
             }
             return match (*command, serial, fake) {
                 ("flow", None, Some(scenario)) => {
-                    cmd_fake(dir, scenario, options, factory, fake_google)
+                    cmd_fake(dir, scenario, options, factory, fake_google, proxy)
                 }
                 ("flow", ..) => {
                     Err("flow runs against a pretend phone only: --fake-phone STATE".into())
