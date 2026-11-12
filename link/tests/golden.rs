@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: MIT
-//! The golden frames: one file per frame under `link/golden/`, the bytes of
-//! one bulk transfer each, with a description beside it. They are the
-//! contract the phone's daemon in omarchy-mobile is checked against (the
-//! same files are kept there, INSTALL-LINK-PLAN §12 Q8), and this test
-//! fails when the encoding changes by a single byte.
+//! The golden frames: under `link/golden/`, for each frame `NAME.bin` (the
+//! bytes of one bulk transfer), `NAME.hex` (the same bytes as text) and
+//! `NAME.txt` (what the frame is). They are the contract the phone's daemon
+//! in omarchy-mobile is checked against (INSTALL-LINK-PLAN §12 Q8, §11.1),
+//! and this test fails when the encoding changes by a single byte.
 //!
-//! Protocol 1 is fixed at the crate's first tag (INSTALL-LINK-PLAN §13, N4);
-//! from then on a change of the wire is a new protocol number. To write the
-//! files anew: `OMIL_GOLDEN_WRITE=1 cargo test -p omamobile-link --test golden`.
+//! The text form is for the other repository, whose pull-request gate
+//! refuses binary files: lower-case hex, 32 bytes a line, nothing else. It
+//! keeps `NAME.hex` and `NAME.txt`; this repository keeps the bytes too,
+//! and this test holds the two forms together.
+//!
+//! Protocol 1 is fixed at the crate's first tag (the plan's decision N4);
+//! until then the files follow the plan, and from then on a change that
+//! makes this test fail is a new protocol number. To write the files anew:
+//! `OMIL_GOLDEN_WRITE=1 cargo test -p omamobile-link --test golden`.
 mod common;
 use common::*;
 use omamobile_link::digest::{sha256, to_hex};
@@ -212,6 +218,49 @@ fn all() -> Vec<Golden> {
     v
 }
 
+/// The text form of a frame's bytes: lower-case hex, 32 bytes a line, each
+/// line ended by a newline. One frame has one such text.
+fn hex_text(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2 + bytes.len() / 32 + 1);
+    for line in bytes.chunks(32) {
+        s.push_str(&to_hex(line));
+        s.push('\n');
+    }
+    s
+}
+
+/// The bytes a text form stands for, or what is wrong with it. Strict: what
+/// [`hex_text`] writes and nothing else, so two texts of one frame are equal.
+fn hex_bytes(text: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let last = lines.peek().is_none();
+        if last {
+            // After the final newline: nothing
+            return if line.is_empty() && !out.is_empty() {
+                Ok(out)
+            } else {
+                Err("no newline at the end, or no bytes".into())
+            };
+        }
+        // Every line but the last one of bytes is full
+        let more = lines.clone().nth(1).is_some();
+        if line.is_empty() || line.len() > 64 || line.len() % 2 != 0 || (more && line.len() != 64) {
+            return Err(format!("a line of {} characters", line.len()));
+        }
+        for pair in line.as_bytes().chunks(2) {
+            let nib = |c: u8| match c {
+                b'0'..=b'9' => Ok(c - b'0'),
+                b'a'..=b'f' => Ok(c - b'a' + 10),
+                _ => Err(format!("{:?} is not a lower-case hex digit", c as char)),
+            };
+            out.push((nib(pair[0])? << 4) | nib(pair[1])?);
+        }
+    }
+    Err("empty".into())
+}
+
 fn describe(g: &Golden) -> String {
     let f = frame::decode(&g.bytes, MAX_DATA_LIMIT).unwrap();
     let pad = g.bytes.len() - HEADER_LEN - f.payload.len();
@@ -244,6 +293,7 @@ fn files() -> BTreeMap<String, Vec<u8>> {
             g.name
         );
         if g.bytes.len() <= KEEP_BYTES_UP_TO {
+            m.insert(format!("{}.hex", g.name), hex_text(&g.bytes).into_bytes());
             m.insert(format!("{}.bin", g.name), g.bytes);
         }
     }
@@ -295,12 +345,35 @@ fn the_golden_files_read_back_as_what_they_say() {
         .map(|(n, f)| (n.to_string(), f))
         .collect();
     let phones: BTreeMap<String, PhoneFrame> = phone_samples().into_iter().collect();
-    let (mut messages, mut datas, mut padded) = (0, 0, 0);
+    let (mut messages, mut datas, mut padded, mut texts) = (0, 0, 0, 0);
     for entry in std::fs::read_dir(dir()).expect("link/golden") {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "txt") {
             let text = std::fs::read_to_string(&path).unwrap();
             assert!(text.is_ascii() || text.contains("payload: {"), "{path:?}");
+            continue;
+        }
+        if path.extension().is_some_and(|e| e == "hex") {
+            // The text form and the bytes agree, read from disk alone: this
+            // is what omarchy-mobile's test does with its copy
+            let text = std::fs::read_to_string(&path).unwrap();
+            let bytes = hex_bytes(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+            let bin = std::fs::read(path.with_extension("bin"))
+                .unwrap_or_else(|e| panic!("{path:?} has no .bin beside it: {e}"));
+            assert!(bytes == bin, "{path:?} is not the bytes of its .bin");
+            assert!(hex_text(&bin) == text, "{path:?}: one frame, one text");
+            assert!(
+                text.is_ascii() && text.lines().all(|l| l.len() <= 64),
+                "{path:?}"
+            );
+            // ... and the description beside it names the same bytes
+            let about = std::fs::read_to_string(path.with_extension("txt")).unwrap();
+            let line = format!("frame sha256: {}\n", to_hex(&sha256(&bytes)));
+            assert!(
+                about.contains(&line),
+                "{path:?}: not what its .txt describes"
+            );
+            texts += 1;
             continue;
         }
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -333,6 +406,7 @@ fn the_golden_files_read_back_as_what_they_say() {
         "every message of the host's and the phone's, the padded one, the two at the limit"
     );
     assert_eq!(datas, 4);
+    assert_eq!(texts, messages + datas, "a text form of every frame kept");
     assert!(
         padded >= 3,
         "pad-message, pad-data-8 and the padded message at the limit, at least"
@@ -379,4 +453,29 @@ fn every_kind_of_frame_and_message_has_a_golden_file() {
     );
     assert_eq!(big[1].bytes.len(), 1048576 + 1);
     assert_eq!(big[2].bytes.len(), 56 + 4194304);
+}
+
+#[test]
+fn the_text_form_is_one_spelling() {
+    assert_eq!(hex_text(&[0x4f, 0x4d, 0x49, 0x4c]), "4f4d494c\n");
+    let bytes: Vec<u8> = (0..=70u8).collect();
+    let text = hex_text(&bytes);
+    assert_eq!(text.lines().map(str::len).collect::<Vec<_>>(), [64, 64, 14]);
+    assert_eq!(hex_bytes(&text).unwrap(), bytes);
+    assert_eq!(hex_bytes(&hex_text(&[7; 32])).unwrap(), [7; 32]);
+    assert_eq!(hex_bytes(&hex_text(&[7; 64])).unwrap(), [7; 64]);
+    for bad in [
+        "", "\n", "4f4d",     // no newline at the end
+        "4F4D\n",   // upper case
+        "4f 4d\n",  // a space
+        "4f4\n",    // half a byte
+        "4f4d\n\n", // an empty line
+        "4f\n4d\n", // a short line that is not the last
+        "4f4d\r\n", // another line ending
+        "0x4f4d\n",
+    ] {
+        assert!(hex_bytes(bad).is_err(), "{bad:?}");
+    }
+    let long = format!("{}\n", "00".repeat(33));
+    assert!(hex_bytes(&long).is_err(), "more than 32 bytes on a line");
 }
