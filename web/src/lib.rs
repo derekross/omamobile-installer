@@ -829,8 +829,11 @@ pub async fn selftest() -> Result<String, JsError> {
     check.update(root_zst);
     let root = check.finish().map_err(js)?;
     let phone = FakePhone::new("cheetah");
+    // The pretend phone is written to: said here, since the default is a
+    // dry run
     let options = PhoneOptions {
         bootloader_slots_confirmed: Some("fake-1.0".into()),
+        dry_run: false,
         ..Default::default()
     };
     let mut session = Session::connect(phone.clone(), &release, SERIAL, options)

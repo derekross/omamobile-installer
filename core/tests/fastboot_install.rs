@@ -19,9 +19,12 @@ const OURS: [&str; 6] = [
     "vendor_kernel_boot_b",
 ];
 
+/// A session that writes, on a phone whose other slot was confirmed. The
+/// default options are a dry run: writing is said, here.
 fn options() -> PhoneOptions {
     PhoneOptions {
         bootloader_slots_confirmed: Some("fake-1.0".into()),
+        dry_run: false,
         ..Default::default()
     }
 }
@@ -239,7 +242,30 @@ fn slots_the_bootloader_reports_as_equal_need_no_confirmation() {
         s.vars
             .insert("version-bootloader-b".into(), "fake-1.0".into());
     });
-    block_on(install(&bundle, &release, &phone, PhoneOptions::default())).unwrap();
+    let writing = PhoneOptions {
+        dry_run: false,
+        ..Default::default()
+    };
+    block_on(install(&bundle, &release, &phone, writing)).unwrap();
+    assert_eq!(phone.written(), OURS);
+    // The default options, on the same kind of phone: a dry run
+    let untouched = FakePhone::new("cheetah");
+    untouched.edit(|s| {
+        s.vars
+            .insert("version-bootloader-a".into(), "fake-1.0".into());
+        s.vars
+            .insert("version-bootloader-b".into(), "fake-1.0".into());
+    });
+    block_on(install(
+        &bundle,
+        &release,
+        &untouched,
+        PhoneOptions::default(),
+    ))
+    .unwrap();
+    assert!(untouched.written().is_empty());
+    assert!(writes_in(&untouched.log()).is_empty());
+    assert!(!untouched.0.borrow().rebooted);
     // And a reinstall from slot b, when the owner says so
     let phone = FakePhone::new("cheetah");
     phone.edit(|s| {

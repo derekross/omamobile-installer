@@ -63,6 +63,14 @@ A step handed in out of order is refused and changes nothing. Before the warning
 
 **The unlock question.** `flashing get_unlock_ability` asks a phone whether it would take an unlock command, which is what "OEM unlocking" in Android's Developer options decides. It reads; it changes nothing on the phone. It is the one command of the `flashing` family in the crate, as a named operation with a typed answer (`fastboot::unlock_ability`, giving `UnlockAbility::Allowed`, `NotAllowed` or `Unknown`), not a way to send a command of the caller's choosing. The command layer holds a closed list of what may leave (`getvar:`, `download:`, `flash:`, `set_active:b`, `reboot`, and this command compared whole), checked at the one place a command is sent; `flashing unlock`, `flashing lock`, `flashing unlock_critical` and every `oem` command are refused there, and a test tries each.
 
+**The gate is closed by itself, not by the layer above it** (`allowed` in `core/src/fastboot.rs`). Each client carries the list of partitions it may flash, checked at the moment a command is sent:
+
+- A client that only asks (`probe`, `unlock_ability`) has an empty list, and so has every dry-run session's. With an empty list nothing that writes or stages a write passes: no `flash:`, no `download:`, no `set_active:b`, no `reboot`. Every session a shipping front end opens is a dry run, so in a shipping build the gate passes `getvar:` and the one question, and nothing else.
+- A session that may write (`dry_run: false`: today the tests, the page's self-test against the pretend phone, and a `web` build with `enable-writes`, which nothing turns on) has the verified release's partitions as its list. A `flash:` passes only for a name that is on that list and also on the gate's own fixed one, slot B's boot images and `userdata`. So `flash:persist`, `flash:boot_a` or `flash:vbmeta_b` is refused at the gate even if the `Partition` type above it had let the name through; the type and the gate each hold without the other, and a test feeds the gate a list of such names.
+- A `download:` carries exactly eight hex digits.
+
+`PhoneOptions::default()` is a dry run: a session that writes is one whose maker wrote `dry_run: false`.
+
 The flow asks it of a locked phone only, only once that phone has passed every stop and is about to be shown the unlock steps, and as the last question of that look. So a phone the install can't go on with is never asked, and neither is an unlocked one. The answer changes the unlock step's words and nothing else:
 
 - yes (`get_unlock_ability: 1`): "The phone says that "OEM unlocking" is already switched on, so it will take the unlock command." The step that switches it on is left out.
@@ -248,7 +256,7 @@ Not built, in the order a real install needs them:
 ## 10. Tests
 
 - `core/tests/flow.rs`: each state and each stop against the pretend phone; each test also checks that only `getvar` reached it, and for a locked phone at the unlock steps `flashing get_unlock_ability`, counted. The override's properties, one by one: it passes the one-slot stop in a dry run and says so on every screen, it passes no other stop, and a session that could write refuses it before anything is sent.
-- `core/src/fastboot.rs` (unit tests, where the private command layer is): of the `flashing` and `oem` families only the one question is sent, nothing off the list of commands is sent, and an answer is a plain yes or no or nothing is concluded.
+- `core/src/fastboot.rs` (unit tests, where the private command layer is): of the `flashing` and `oem` families only the one question is sent, nothing off the list of commands is sent, a flash leaves only for a partition on the session's list, the gate refuses a wrong name without the `Partition` type's help, a client that only asks and a dry-run session's client send nothing that writes, the default options are a dry run, and an answer is a plain yes or no or nothing is concluded.
 - `core/tests/factory_download.rs`: the terms step's words and that nothing is downloaded or taken before it is answered; the acceptance and its date; declining; a front end that cannot fetch from Google, which is shown no terms and given no download; and each property of the download against a stand-in that is a function in the test: the address is the signed index's, redirects on and off Google's host, the size before and during the transfer, the SHA-256, going on from kept bytes with the hash from the first byte, progress, and each fallback.
 - `core/tests/build_index.rs`: every field's rule on the real cheetah index (`fixtures/index/`) and on changed copies; the match; trust.
 - `cli/tests/flow_fake_phone.rs` (`--features fake-phone`): the built tool with typed input.
