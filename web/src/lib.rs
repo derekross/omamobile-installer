@@ -286,7 +286,9 @@ impl InstallFlow {
         self.flow.no_phone().map_err(js)
     }
 
-    /// Ask the phone what it is. Sends `getvar` and nothing else.
+    /// Ask the phone what it is. Sends `getvar` and, to a locked phone about
+    /// to be shown the unlock steps, the one question
+    /// `flashing get_unlock_ability`. Both read; nothing else is sent.
     pub async fn read_phone(&mut self, phone: Phone) -> Result<(), JsError> {
         let id = phone.id()?;
         let mut transport = phone.open().await?;
@@ -564,8 +566,16 @@ impl Phone {
         self.serial = "ANOTHERPHONE0002".into();
         self.fake_set("serialno", "ANOTHERPHONE0002");
     }
-    /// What reached the pretend phone, as JSON: how many commands, how many
-    /// of them were not `getvar`, and which partitions were written.
+    /// How the pretend phone answers `flashing get_unlock_ability` from now
+    /// on: this line, whatever it says.
+    pub fn fake_unlock_answer(&self, line: &str) {
+        if let Link::Fake(phone) = &self.link {
+            phone.edit(|s| s.unlock_ability = Some(line.into()));
+        }
+    }
+    /// What reached the pretend phone, as JSON: how many commands, how often
+    /// it was asked `flashing get_unlock_ability`, which commands were
+    /// neither that nor `getvar`, and which partitions were written.
     pub fn fake_report(&self) -> String {
         let Link::Fake(phone) = &self.link else {
             return "{}".into();
@@ -573,7 +583,8 @@ impl Phone {
         let log = phone.log();
         json!({
             "commands": log.len(),
-            "not_getvar": log.iter().filter(|c| !c.starts_with("getvar:")).collect::<Vec<_>>(),
+            "unlock_questions": phone.unlock_questions(),
+            "not_reads": phone.not_reads(),
             "written": phone.written(),
             "active_slot": phone.0.borrow().active_slot,
         })

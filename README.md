@@ -13,7 +13,7 @@ The installer for [Omarchy Mobile](https://github.com/derekross/omarchy-mobile):
 Works, against the pretend phone and the fixtures:
 
 - **Verifying a release:** the release key's signature, the checksums, `manifest.json` and `device.conf` against the installer's rules. The published Pixel 7 Pro release 2026.11.08 verifies, natively and in a browser.
-- **The install flow up to the dry run,** the same in both front ends: the one warning; reading the phone's state; the unlock steps as text for the owner; looking the phone up in the release's signed build index; taking the owner's factory zip, checked by name, size and SHA-256 as it is read; the owner's answers; and a dry run that lists what an install would write.
+- **The install flow up to the dry run,** the same in both front ends: the one warning; reading the phone's state; the unlock steps as text for the owner, with what the phone says about "OEM unlocking"; looking the phone up in the release's signed build index; taking the owner's factory zip, checked by name, size and SHA-256 as it is read; the owner's answers; and a dry run that lists what an install would write.
 - **Every stop,** with words that are true for the phone at that point: another model, slot B, the bootloader slots, a build that isn't listed or tested, another phone than the first, a release or an index that fails its checks.
 - **The write path, on the pretend phone only:** slot B's boot images and `userdata`, the root image decompressed and cut into sparse images.
 
@@ -30,7 +30,7 @@ Does not work, or is not built:
 | Path | What |
 | --- | --- |
 | `core/` | The shared core: the install flow (`flow.rs`), the build index, `manifest.json` and `device.conf` rules, the release signature and checksums, fastboot over a transport trait, Android sparse cutting, zstd. No I/O of its own |
-| `core/tests/` | 51 tests. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
+| `core/tests/` | 54 tests, and 3 beside the command layer in `core/src/fastboot.rs`. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
 | `usb/` | The fastboot transport over USB (nusb): one file for Linux, Windows, macOS and WebUSB |
 | `cli/` | `omamobile-install`. `verify` and `sparse` need no phone; `flow --fake-phone` runs the install flow against the pretend phone; `devices` and `install --dry-run` use USB |
 | `web/` | The same core as WebAssembly, a static page with a screen for each state of the flow, a local server that sends the strict headers, and a self-test that clicks through the page in a headless browser |
@@ -65,12 +65,12 @@ omamobile-install sparse ROOT.img.zst OUT_DIR   # the sparse images a flash woul
 # The whole install flow against a pretend phone (a build with --features fake-phone):
 cargo run --features fake-phone -p omamobile-installer-cli -- flow fixtures/selftest --fake-phone ready \
   --factory-zip fixtures/selftest/factory/cheetah-test.260101.001-factory-31c2322a.zip
-# Other pretend phones: locked, other-model, slot-b, one-slot, slots-differ, unknown-build, untested-build, untested-old-build
+# Other pretend phones: locked, locked-oem-off, other-model, slot-b, one-slot, slots-differ, unknown-build, untested-build, untested-old-build
 ```
 
 ## Safety
 
-- `omamobile-install devices` and `install` open USB devices, and so does the page's "Choose the phone". `install` runs only with `--dry-run`. Both go through the install flow, which sends `getvar` and nothing else. Ask the phone's owner before either.
-- The core can send `getvar:`, `download:`, `flash:` to slot B's boot images and `userdata`, `set_active:b` and `reboot`. It has no code for anything else: no `flashing`, no `erase`, no other slot. The writes are reachable only from the tests and from a `web` build with `enable-writes`, which nothing here turns on.
+- `omamobile-install devices` and `install` open USB devices, and so does the page's "Choose the phone". `install` runs only with `--dry-run`. Both go through the install flow, which sends `getvar` and, to a locked phone it is about to show the unlock steps for, the one question `flashing get_unlock_ability`. Both read, and nothing else is sent. Ask the phone's owner before either.
+- The core can send `getvar:`, `download:`, `flash:` to slot B's boot images and `userdata`, `set_active:b`, `reboot` and the read-only question `flashing get_unlock_ability`. That list is closed and checked where a command is sent: no other `flashing` command (`flashing unlock` among them), no `oem`, no `erase`, no other slot. The writes are reachable only from the tests and from a `web` build with `enable-writes`, which nothing here turns on.
 - The unlock command is shown for the owner to type. The installer never sends it, never switches slots, and never downloads Google's factory image.
 - No serial number is stored or printed by the core: it compares a digest. Tests use placeholders.

@@ -292,10 +292,13 @@ async function selftest() {
     await start(tamper);
   };
   const sent = () => JSON.parse(phone.fake_report());
-  const onlyGetvar = () => {
+  // getvar and nothing else; a locked phone at the unlock steps is also
+  // asked `flashing get_unlock_ability`, `questions` times
+  const onlyGetvar = (questions = 0) => {
     const r = sent();
-    return r.commands > 0 && r.not_getvar.length === 0 && r.written.length === 0 && r.active_slot === "a";
+    return r.commands > 0 && r.unlock_questions === questions && r.not_reads.length === 0 && r.written.length === 0 && r.active_slot === "a";
   };
+  const stepCount = () => document.querySelectorAll("#screen .steps li").length;
   const pick = async (file) => {
     const transfer = new DataTransfer();
     transfer.items.add(file);
@@ -355,12 +358,23 @@ async function selftest() {
   await click("look");
   const commands = [...document.querySelectorAll("#screen .command")].map((c) => c.textContent);
   check("a locked phone gets the unlock steps, with the command as text", state() === "unlock" && commands.length === 1 && commands[0] === "fastboot flashing unlock" && text().includes("does not send the unlock command"));
-  check("a locked phone was sent getvar and nothing else", onlyGetvar(), JSON.stringify(sent()));
+  check("a locked phone was sent getvar and the one unlock question, and nothing else", onlyGetvar(1), JSON.stringify(sent()));
+  check("a locked phone with OEM unlocking on is told so, without the Developer options step", text().includes('"OEM unlocking" is already switched on') && !text().includes("Developer options") && stepCount() === 3, text());
   await click("look");
   check("still locked: the same screen", state() === "unlock");
   await click("pretend-unlock");
   await click("look");
   check("unlocked by its owner: on to the factory image", state() === "factory-image");
+
+  await begin("locked-oem-off");
+  await click("accept");
+  await click("look");
+  check("a locked phone with OEM unlocking off is told to switch it on first", state() === "unlock" && text().includes('"OEM unlocking" is not switched on yet') && text().includes('Switch on "OEM unlocking"') && stepCount() === 4 && onlyGetvar(1), text());
+  await begin("locked");
+  phone.fake_unlock_answer("something this installer doesn't know");
+  await click("accept");
+  await click("look");
+  check("a phone that doesn't answer the unlock question gets the steps for both cases", state() === "unlock" && !text().includes("The phone says") && text().includes('If "OEM unlocking" is not switched on yet') && stepCount() === 4 && onlyGetvar(1), text());
 
   // 3. Another phone comes back after the unlock steps
   await begin("locked");
@@ -388,7 +402,8 @@ async function selftest() {
   await begin("one-slot");
   await click("accept");
   await click("look");
-  check("the slot stop hands out no way around and says a retry stops again", text().includes("will stop here again") && !text().includes("--") && sent().not_getvar.length === 0);
+  check("the slot stop hands out no way around and says a retry stops again", text().includes("will stop here again") && !text().includes("--") && sent().not_reads.length === 0);
+
   await begin("slot-b", { reinstall: true });
   await click("accept");
   await click("look");

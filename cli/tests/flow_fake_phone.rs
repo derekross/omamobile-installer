@@ -139,7 +139,20 @@ fn a_locked_phone_is_shown_the_command_and_sent_nothing() {
     );
     assert!(out.contains("\n           fastboot flashing unlock\n"));
     assert!(flat(&out).contains("does not send the unlock command"));
+    // The phone was asked whether it would take the command, and said yes
+    assert!(flat(&out).contains("The phone says that \"OEM unlocking\" is already switched on"));
+    assert!(!flat(&out).contains("Developer options"));
+    assert!(out.contains("1 flashing get_unlock_ability, 0 others"));
     assert!(out.contains(ONLY_GETVAR), "{out}");
+
+    // "OEM unlocking" still off: said, with how to switch it on. The input
+    // ends at the unlock steps, as it would for an owner who goes to do that
+    let (code, out, err) = flow("locked-oem-off", &[], "yes\n");
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert_eq!(*titles(&out).last().unwrap(), "Unlock the bootloader");
+    assert!(flat(&out).contains("The phone says that \"OEM unlocking\" is not switched on yet"));
+    assert!(flat(&out).contains("1. Switch on \"OEM unlocking\": press Power to start Android."));
+    assert!(out.contains("\n           fastboot flashing unlock\n"));
 }
 
 #[test]

@@ -18,8 +18,12 @@
 //!
 //! What it can send: `getvar:`, `download:`, `flash:<p>` where `<p>` is a
 //! [`Partition`] of the verified release (slot B's boot images, `userdata`),
-//! `set_active:b` and `reboot`. There is no code for `erase`, `format`,
-//! `oem`, `flashing`, another slot or a caller-chosen partition name. Bytes
+//! `set_active:b` and `reboot`; and one question outside the session,
+//! [`unlock_ability`], which sends `flashing get_unlock_ability` and changes
+//! nothing on the phone. That list is closed, and checked again at the one
+//! place a command leaves (`allowed`): there is no code for `erase`,
+//! `format`, `oem`, any other `flashing` command (`flashing unlock` among
+//! them), another slot or a caller-chosen partition name. Bytes
 //! to write come only as [`VerifiedImage`] or under a [`VerifiedRootImage`].
 //! Before every write the phone's serial number and product are read again
 //! and must still be the ones pinned at `connect`.
@@ -41,6 +45,24 @@ pub const USB_VENDOR_GOOGLE: u16 = 0x18d1;
 /// transfer early.
 pub const SEND_CHUNK: usize = 1 << 20;
 const MAX_INFO_PACKETS: usize = 100_000;
+
+/// The one command of the `flashing` family this crate sends, and it only
+/// reads: whether the phone would take an unlock command ("OEM unlocking" in
+/// Android's Developer options). Sent by [`unlock_ability`] and nothing else.
+pub const GET_UNLOCK_ABILITY: &str = "flashing get_unlock_ability";
+
+/// Every command this crate may put on the wire, and nothing more. The
+/// `flashing` entry is the whole command, compared exactly: `flashing unlock`,
+/// `flashing lock`, `flashing unlock_critical` and every `oem` command are
+/// not on the list, and neither is anything else that isn't named here.
+fn allowed(command: &str) -> bool {
+    command == GET_UNLOCK_ABILITY
+        || command == "set_active:b"
+        || command == "reboot"
+        || ["getvar:", "download:", "flash:"]
+            .iter()
+            .any(|prefix| command.starts_with(prefix))
+}
 
 /// A USB (or fake) link to a phone in fastboot mode: one bulk OUT and one
 /// bulk IN endpoint. Futures need not be `Send`, so a browser's can be used.
@@ -108,6 +130,55 @@ fn slot_bootloader(all: &[String], slot: char) -> Option<String> {
             .then(|| c.as_str().strip_prefix(':').map(|v| v.trim().to_string()))
             .flatten()
     })
+}
+
+/// Whether a locked phone would take the unlock command: the answer to
+/// [`GET_UNLOCK_ABILITY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnlockAbility {
+    /// "OEM unlocking" is switched on: the unlock command can work.
+    Allowed,
+    /// "OEM unlocking" is not switched on: the phone refuses the unlock
+    /// command until it is.
+    NotAllowed,
+    /// The phone did not answer the question, or not in a form this crate
+    /// knows. Nothing is concluded from that.
+    Unknown,
+}
+
+/// `get_unlock_ability: 0` or `get_unlock_ability: 1`, and nothing else.
+fn unlock_ability_line(line: &str) -> Option<bool> {
+    match line.trim().strip_prefix("get_unlock_ability:")?.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Ask a phone in fastboot mode whether it would take an unlock command.
+/// Sends [`GET_UNLOCK_ABILITY`], once, and nothing else: it reads, and
+/// changes nothing on the phone. It never sends the unlock command.
+///
+/// There is no error to handle: a phone that answers FAIL, something else
+/// than a plain yes or no, both, or nothing gives [`UnlockAbility::Unknown`],
+/// and the caller goes on without the answer. Because a phone that never
+/// answers could answer late, send this as the last question on a transport.
+pub async fn unlock_ability<T: Transport>(transport: &mut T) -> UnlockAbility {
+    let mut client = Client {
+        transport,
+        log: Vec::new(),
+    };
+    let mut lines = Vec::new();
+    match client.command(GET_UNLOCK_ABILITY, &mut lines).await {
+        Ok(Reply::Okay(text)) => lines.push(text),
+        Ok(Reply::Data(_)) | Err(_) => return UnlockAbility::Unknown,
+    }
+    let mut answers = lines.iter().filter_map(|l| unlock_ability_line(l));
+    match (answers.next(), answers.next()) {
+        (Some(true), None) => UnlockAbility::Allowed,
+        (Some(false), None) => UnlockAbility::NotAllowed,
+        _ => UnlockAbility::Unknown,
+    }
 }
 
 /// Ask a phone in fastboot mode what it is. Sends `getvar:` commands and
@@ -202,6 +273,12 @@ impl<T: Transport> Client<T> {
 
     async fn command(&mut self, command: &str, info: &mut Vec<String>) -> Result<Reply> {
         debug_assert!(command.len() <= 64, "the original protocol's command limit");
+        // The one place a command leaves: nothing off the list is sent
+        if !allowed(command) {
+            return Err(Error::Refused(format!(
+                "'{command}' is not a command this installer sends"
+            )));
+        }
         self.log.push(command.to_string());
         let sent = self.transport.send(command.as_bytes()).await?;
         if sent != command.len() {
@@ -693,5 +770,121 @@ impl<T: Transport> Session<T> {
 
     pub fn is_done(&self) -> bool {
         self.state == State::Rebooted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The private command layer, where the list of commands is enforced.
+    //! No USB: a transport that records what it is handed.
+    use super::*;
+    use pollster::block_on;
+
+    #[derive(Default)]
+    struct Recorder {
+        sent: Vec<String>,
+    }
+    impl Transport for Recorder {
+        async fn send(&mut self, data: &[u8]) -> Result<usize> {
+            self.sent.push(String::from_utf8_lossy(data).into_owned());
+            Ok(data.len())
+        }
+        async fn recv(&mut self) -> Result<Vec<u8>> {
+            Ok(b"OKAY".to_vec())
+        }
+    }
+
+    fn try_command(command: &str) -> (Result<String>, Vec<String>) {
+        let mut client = Client {
+            transport: Recorder::default(),
+            log: Vec::new(),
+        };
+        let result = block_on(client.simple(command));
+        assert_eq!(client.log, client.transport.sent);
+        (result, client.transport.sent)
+    }
+
+    #[test]
+    fn of_the_flashing_and_oem_commands_only_the_one_question_is_sent() {
+        assert_eq!(GET_UNLOCK_ABILITY, "flashing get_unlock_ability");
+        let (result, sent) = try_command(GET_UNLOCK_ABILITY);
+        assert!(result.is_ok());
+        assert_eq!(sent, [GET_UNLOCK_ABILITY]);
+        for refused in [
+            "flashing unlock",
+            "flashing lock",
+            "flashing unlock_critical",
+            "flashing lock_critical",
+            "flashing get_unlock_bootloader_nonce",
+            "flashing",
+            "flashing ",
+            // Not the question itself with something after or before it
+            "flashing get_unlock_ability ",
+            "flashing get_unlock_ability unlock",
+            "flashing get_unlock_ability;flashing unlock",
+            " flashing get_unlock_ability",
+            "flashing  get_unlock_ability",
+            "flashing:get_unlock_ability",
+            "FLASHING GET_UNLOCK_ABILITY",
+            "flashing get_unlock_ability\0flashing unlock",
+            "oem unlock",
+            "oem lock",
+            "oem device-info",
+            "oem",
+            "oem get_unlock_ability",
+        ] {
+            let (result, sent) = try_command(refused);
+            assert!(
+                matches!(&result, Err(Error::Refused(why)) if why.contains("not a command this installer sends")),
+                "{refused:?}: {result:?}"
+            );
+            assert!(sent.is_empty(), "{refused:?} reached the transport");
+        }
+    }
+
+    #[test]
+    fn nothing_off_the_list_is_sent() {
+        for (command, ok) in [
+            ("getvar:product", true),
+            ("download:00000010", true),
+            ("flash:boot_b", true),
+            ("set_active:b", true),
+            ("reboot", true),
+            ("set_active:a", false),
+            ("set_active:b ", false),
+            ("reboot-bootloader", false),
+            ("reboot bootloader", false),
+            ("erase:userdata", false),
+            ("format:userdata", false),
+            ("boot", false),
+            ("continue", false),
+            ("upload", false),
+            ("", false),
+        ] {
+            let (result, sent) = try_command(command);
+            assert_eq!(result.is_ok(), ok, "{command:?}");
+            assert_eq!(sent.len(), usize::from(ok), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn the_answer_is_a_plain_yes_or_no_or_nothing_is_concluded() {
+        assert_eq!(unlock_ability_line("get_unlock_ability: 1"), Some(true));
+        assert_eq!(unlock_ability_line("get_unlock_ability: 0"), Some(false));
+        assert_eq!(unlock_ability_line(" get_unlock_ability:1 "), Some(true));
+        for odd in [
+            "",
+            "1",
+            "0",
+            "yes",
+            "get_unlock_ability:",
+            "get_unlock_ability: 2",
+            "get_unlock_ability: 10",
+            "get_unlock_ability: yes",
+            "unlock_ability: 1",
+            "unlocked: 1",
+        ] {
+            assert_eq!(unlock_ability_line(odd), None, "{odd:?}");
+        }
     }
 }

@@ -19,11 +19,14 @@
 //!
 //! This version ends at the dry run. It has no step that writes to a phone.
 //!
-//! What the flow sends to a phone is `getvar:` and nothing else, through the
-//! transport a front end lends it: [`Flow::read_phone`] asks the phone what
-//! it is, and [`Flow::dry_run`] opens a [`Session`] that holds every write
-//! back. It never sends `flashing unlock`: the unlock step shows that
-//! command for the owner to run. It never switches slots.
+//! What the flow sends to a phone is `getvar:` and, to a locked phone it is
+//! about to show the unlock steps for, the one question
+//! `flashing get_unlock_ability` ([`unlock_ability`]): both read, and nothing
+//! else is sent. They go through the transport a front end lends it:
+//! [`Flow::read_phone`] asks the phone what it is, and [`Flow::dry_run`]
+//! opens a [`Session`] that holds every write back. It never sends
+//! `flashing unlock`: the unlock step shows that command for the owner to
+//! run. It never switches slots.
 //!
 //! Every end that isn't `Done` is a [`Stop`]: a typed reason, the words for
 //! the person, and a closing line that says what is true of the phone at
@@ -31,7 +34,9 @@
 //! fixed reassurance.
 use crate::build_index::{Build, BuildIndex, Lookup};
 use crate::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
-use crate::fastboot::{probe, PhoneId, PhoneOptions, PhoneReport, Session, Transport};
+use crate::fastboot::{
+    probe, unlock_ability, PhoneId, PhoneOptions, PhoneReport, Session, Transport, UnlockAbility,
+};
 use crate::hash::StreamHasher;
 use crate::signature::TrustedKeys;
 use crate::{Error, Result};
@@ -40,7 +45,8 @@ use serde::Serialize;
 const ISSUES: &str = "https://github.com/derekross/omarchy-mobile/issues";
 const DOWNLOAD: &str = "https://omamobile.org/download";
 /// The command the owner runs to unlock the bootloader. Shown, never sent:
-/// this crate has no code that sends a `flashing` command.
+/// the one `flashing` command this crate sends is the question
+/// [`crate::fastboot::GET_UNLOCK_ABILITY`], which only reads.
 pub const UNLOCK_COMMAND: &str = "fastboot flashing unlock";
 
 /// What the person running the install said up front.
@@ -61,7 +67,9 @@ pub enum Step {
     Phone { not_found: bool },
     /// The phone is the right one and can be installed, but its bootloader
     /// is locked. The steps are for the owner; the flow sends none of them.
-    Unlock,
+    /// `oem_unlocking`: what the phone said when asked whether it would take
+    /// the unlock command.
+    Unlock { oem_unlocking: UnlockAbility },
     /// The owner fetches Google's factory image for this build and hands the
     /// saved file over. `refused`: why the last file wasn't taken.
     FactoryImage {
@@ -129,7 +137,8 @@ pub enum StopKind {
 pub enum PhoneFact {
     /// No phone was asked anything.
     NotAsked,
-    /// A phone was asked what it is; nothing else was sent.
+    /// A phone was asked what it is (and, if it is locked, whether it would
+    /// take an unlock command); nothing else was sent.
     OnlyRead,
     /// As `OnlyRead`, and the unlock steps were shown: the owner may have
     /// unlocked the bootloader, which erases the phone.
@@ -173,15 +182,18 @@ impl Stop {
                     .to_string(),
             ],
             PhoneFact::OnlyReadUnlockShown => vec![
-                "The installer only asked the phone what it is. It has written nothing to it."
+                "The installer only asked the phone what it is and whether it can be unlocked. It has written nothing to it."
                     .to_string(),
                 erased.to_string(),
             ],
             PhoneFact::TwoPhones { unlock_shown } => {
-                let mut v = vec![
+                let mut v = vec![if unlock_shown {
+                    "The installer only asked each of the two phones what it is, and the first whether it can be unlocked. It has written nothing to either."
+                        .to_string()
+                } else {
                     "The installer only asked each of the two phones what it is. It has written nothing to either."
-                        .to_string(),
-                ];
+                        .to_string()
+                }];
                 if unlock_shown {
                     v.push("If you unlocked the first phone's bootloader, that erased that phone: Android starts on it as new.".to_string());
                 }
@@ -773,7 +785,7 @@ impl Flow {
     pub fn no_phone(&mut self) -> Result<()> {
         match self.step {
             Step::Phone { .. } => self.step = Step::Phone { not_found: true },
-            Step::Unlock => {}
+            Step::Unlock { .. } => {}
             _ => return self.out_of_order("a look for the phone"),
         }
         Ok(())
@@ -783,6 +795,11 @@ impl Flow {
     /// what comes next. `chosen` is the device the person picked, from its
     /// USB serial number; the phone that answers must be that one.
     ///
+    /// A locked phone that passes every stop is asked one thing more, last:
+    /// whether it would take the unlock command (`flashing
+    /// get_unlock_ability`, which reads). No answer changes nothing but the
+    /// unlock step's words.
+    ///
     /// Refused, with nothing sent, until the warning has been accepted. A
     /// transport error leaves the step as it is, to try again.
     pub async fn read_phone<T: Transport>(
@@ -790,7 +807,7 @@ impl Flow {
         transport: &mut T,
         chosen: &PhoneId,
     ) -> Result<()> {
-        if !matches!(self.step, Step::Phone { .. } | Step::Unlock) {
+        if !matches!(self.step, Step::Phone { .. } | Step::Unlock { .. }) {
             return self.out_of_order("a look at the phone");
         }
         let report = probe(transport).await?;
@@ -804,8 +821,11 @@ impl Flow {
         match self.judge(&report) {
             Judged::Stopped => {}
             Judged::Locked => {
+                // Asked only of a phone about to be shown the unlock steps,
+                // and after every other question
+                let oem_unlocking = unlock_ability(transport).await;
                 self.unlock_shown = true;
-                self.step = Step::Unlock;
+                self.step = Step::Unlock { oem_unlocking };
             }
             Judged::Ready { build, same_pair } => {
                 self.step = Step::FactoryImage {
@@ -1305,7 +1325,7 @@ impl Flow {
                 ];
                 s.footer = vec!["Connect one phone only.".into()];
             }
-            Step::Unlock => {
+            Step::Unlock { oem_unlocking } => {
                 s.state = "unlock";
                 s.action = "read-phone";
                 s.title = "Unlock the bootloader".into();
@@ -1313,18 +1333,34 @@ impl Flow {
                     format!("The {name} is in Fastboot Mode, and its bootloader is still locked."),
                     "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, its two bootloader copies match, and this release was tested with its Android build.".into(),
                     "Unlocking is the moment the phone is erased, as the warning said: copy off photos, messages and two-factor codes before you do it.".into(),
-                    "The installer does not send the unlock command. You do, when you are ready:".into(),
                 ];
-                s.steps = vec![
-                    step(format!("If \"OEM unlocking\" is not switched on yet: press Power to start Android. {developer_options} Then put the phone back in Fastboot Mode: {keys}.")),
+                // What the phone itself said about "OEM unlocking", when it
+                // said anything; otherwise the steps cover both cases
+                let switch_on = match oem_unlocking {
+                    UnlockAbility::Allowed => {
+                        s.body.push("The phone says that \"OEM unlocking\" is already switched on, so it will take the unlock command.".into());
+                        None
+                    }
+                    UnlockAbility::NotAllowed => {
+                        s.body.push("The phone says that \"OEM unlocking\" is not switched on yet. Until it is, the phone refuses the unlock command, so switch it on in Android's Developer options first (step 1).".into());
+                        Some(format!("Switch on \"OEM unlocking\": press Power to start Android. {developer_options} Then put the phone back in Fastboot Mode: {keys}."))
+                    }
+                    UnlockAbility::Unknown => Some(format!("If \"OEM unlocking\" is not switched on yet: press Power to start Android. {developer_options} Then put the phone back in Fastboot Mode: {keys}.")),
+                };
+                s.body.push(
+                    "The installer does not send the unlock command. You do, when you are ready:"
+                        .into(),
+                );
+                s.steps = switch_on.into_iter().map(step).collect();
+                s.steps.extend([
                     ScreenStep {
                         text: "On a computer with Android's fastboot tool, with the phone in Fastboot Mode, run:".into(),
                         command: Some(UNLOCK_COMMAND.into()),
                     },
                     step("On the phone, press a volume key until it says \"Unlock the bootloader\", then press Power. The phone erases itself and starts Android again."),
                     step(format!("Bring it back to Fastboot Mode ({keys}) and let the installer look again.")),
-                ];
-                s.footer = vec!["The installer has only asked the phone what it is. It has written nothing to it.".into()];
+                ]);
+                s.footer = vec!["The installer has only asked the phone what it is and whether it can be unlocked. It has written nothing to it.".into()];
             }
             Step::FactoryImage {
                 build,

@@ -16,7 +16,8 @@
 //! typed. It decides nothing and words nothing of its own about the phone.
 //!
 //! The flow ends at the dry run, and `install` runs only with `--dry-run`:
-//! nothing here can write to a phone. All that reaches one is `getvar`.
+//! nothing here can write to a phone. All that reaches one is `getvar` and,
+//! for a locked phone, the one question `flashing get_unlock_ability`.
 use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
 use omamobile_installer_core::fastboot::{
     PhoneId, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
@@ -579,11 +580,11 @@ fn cmd_fake(
         Ok(Some((phone.clone(), PhoneId::of_serial(SERIAL).unwrap())))
     })?;
     let log = phone.log();
-    let other = log.iter().filter(|c| !c.starts_with("getvar:")).count();
+    let (asked, other) = (phone.unlock_questions(), phone.not_reads().len());
     println!(
-        "\nThe pretend phone received {} commands: {} getvar, {other} others; partitions written: {}",
+        "\nThe pretend phone received {} commands: {} getvar, {asked} flashing get_unlock_ability, {other} others; partitions written: {}",
         log.len(),
-        log.len() - other,
+        log.len() - asked - other,
         phone.written().len()
     );
     Ok(done)

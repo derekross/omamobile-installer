@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 //! The install flow, state by state and refusal by refusal, against the
 //! fake phone. No USB. Every test also checks what reached the phone:
-//! `getvar:` and nothing else.
+//! `getvar:` and nothing else, but for a locked phone at the unlock steps,
+//! which is also asked `flashing get_unlock_ability`.
 mod support;
 use omamobile_installer_core::bundle::ReleaseFiles;
-use omamobile_installer_core::fastboot::{PhoneId, Session, Transport};
+use omamobile_installer_core::fastboot::{
+    PhoneId, Session, Transport, UnlockAbility, GET_UNLOCK_ABILITY,
+};
 use omamobile_installer_core::flow::{
     AnswerField, AnswersInput, Flow, FlowOptions, OwnerAnswers, PhoneFact, Retry, Step, Stop,
     StopKind, ZipRefusal, UNLOCK_COMMAND,
@@ -68,6 +71,22 @@ fn only_getvar(phone: &FakePhone) {
         log.iter().all(|c| c.starts_with("getvar:")),
         "something other than getvar was sent: {log:?}"
     );
+    assert!(phone.written().is_empty());
+    assert_eq!(phone.0.borrow().active_slot, "a");
+    assert!(!phone.0.borrow().rebooted);
+}
+/// As `only_getvar` for a locked phone at the unlock steps: it was also
+/// asked, `questions` times, whether it would take an unlock command. That
+/// is the whole of the flashing family that may ever reach a phone.
+fn only_reads(phone: &FakePhone, questions: usize) {
+    assert_eq!(phone.not_reads(), Vec::<String>::new());
+    assert_eq!(phone.unlock_questions(), questions);
+    for c in phone.log() {
+        assert!(
+            c == GET_UNLOCK_ABILITY || !(c.contains("flashing") || c.contains("oem")),
+            "{c}"
+        );
+    }
     assert!(phone.written().is_empty());
     assert_eq!(phone.0.borrow().active_slot, "a");
     assert!(!phone.0.borrow().rebooted);
@@ -429,7 +448,12 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
         .contains("No phone in Fastboot Mode"));
 
     look(&mut flow, &phone).unwrap();
-    assert_eq!(flow.step(), &Step::Unlock);
+    assert_eq!(
+        flow.step(),
+        &Step::Unlock {
+            oem_unlocking: UnlockAbility::Allowed
+        }
+    );
     let screen = flow.screen();
     assert_eq!((screen.state, screen.action), ("unlock", "read-phone"));
     // The command is text for the owner, in one place
@@ -445,15 +469,18 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
         .join(" ")
         .contains("does not send the unlock command"));
     assert!(screen.body.join(" ").contains("moment the phone is erased"));
-    only_getvar(&phone);
-    assert!(!phone.log().iter().any(
-        |c| c.contains("flashing") || c.contains("unlock") && !c.starts_with("getvar:unlocked")
-    ));
+    // Asked what it is and, once, whether it would take an unlock command:
+    // the unlock command itself is never sent
+    only_reads(&phone, 1);
+    assert!(!phone.log().iter().any(|c| c.contains("unlock")
+        && !c.starts_with("getvar:unlocked")
+        && c != GET_UNLOCK_ABILITY));
 
-    // Still locked on the next look: the same step, and still only getvar
+    // Still locked on the next look: the same step, and still only questions
     look(&mut flow, &phone).unwrap();
     flow.no_phone().unwrap();
-    assert_eq!(flow.step(), &Step::Unlock);
+    assert!(matches!(flow.step(), Step::Unlock { .. }));
+    only_reads(&phone, 2);
     // Later steps are not open yet
     assert!(flow.factory_zip(&bundle.factory_zip_name, 1).is_err());
     assert!(block_on(flow.dry_run(phone.clone())).is_err());
@@ -461,7 +488,7 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
     // A stop after the unlock steps were shown says what unlocking did
     let mut stopped = flow_at(&bundle, &phone, "phone");
     look(&mut stopped, &phone).unwrap();
-    assert_eq!(stopped.step(), &Step::Unlock);
+    assert!(matches!(stopped.step(), Step::Unlock { .. }));
     phone.edit(|s| {
         s.vars.insert("unlocked".into(), "yes".into());
         s.vars.insert("current-slot".into(), "b".into());
@@ -481,7 +508,158 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
     // The owner unlocked it: on to the factory image
     look(&mut flow, &phone).unwrap();
     assert!(matches!(flow.step(), Step::FactoryImage { build, .. } if build.build == PHONE_BUILD));
-    only_getvar(&phone);
+    // An unlocked phone is not asked again
+    only_reads(&phone, 3);
+}
+
+/// The unlock screen's text for a locked fake phone that answers
+/// `flashing get_unlock_ability` as `edit` sets it up.
+fn unlock_screen(
+    edit: impl FnOnce(&mut support::fake::FakeState),
+) -> (UnlockAbility, String, Vec<String>, FakePhone) {
+    let bundle = TestBundle::new();
+    let phone = phone("locked");
+    phone.edit(edit);
+    let mut flow = flow_at(&bundle, &phone, "phone");
+    look(&mut flow, &phone).unwrap();
+    let Step::Unlock { oem_unlocking } = *flow.step() else {
+        panic!("not at the unlock steps: {:?}", flow.step());
+    };
+    let screen = flow.screen();
+    // Whatever the phone answered: the command is shown once, as text, and
+    // only questions were sent
+    let commands: Vec<&str> = screen
+        .steps
+        .iter()
+        .filter_map(|s| s.command.as_deref())
+        .collect();
+    assert_eq!(commands, [UNLOCK_COMMAND]);
+    assert!(screen
+        .body
+        .join(" ")
+        .contains("does not send the unlock command"));
+    only_reads(&phone, 1);
+    (
+        oem_unlocking,
+        screen.body.join(" "),
+        screen.steps.into_iter().map(|s| s.text).collect(),
+        phone,
+    )
+}
+
+#[test]
+fn a_locked_phone_is_told_whether_oem_unlocking_is_switched_on() {
+    // Switched on already: said, and the step that switches it on is gone
+    let (ability, body, steps, _) = unlock_screen(|_| {});
+    assert_eq!(ability, UnlockAbility::Allowed);
+    assert!(body.contains("\"OEM unlocking\" is already switched on"));
+    assert_eq!(steps.len(), 3);
+    assert!(!steps.join(" ").contains("Developer options"));
+
+    // Not switched on: said, with what that means, and how to switch it on
+    let (ability, body, steps, _) =
+        unlock_screen(|s| s.unlock_ability = Some("get_unlock_ability: 0".into()));
+    assert_eq!(ability, UnlockAbility::NotAllowed);
+    assert!(body.contains("\"OEM unlocking\" is not switched on yet"));
+    assert!(body.contains("refuses the unlock command"));
+    assert_eq!(steps.len(), 4);
+    assert!(steps[0].starts_with("Switch on \"OEM unlocking\""));
+    assert!(steps[0].contains("Developer options"));
+
+    // The pretend phone of that name is this one
+    let named = phone("locked-oem-off");
+    assert_eq!(
+        named.0.borrow().unlock_ability.as_deref(),
+        Some("get_unlock_ability: 0")
+    );
+}
+
+#[test]
+fn a_phone_that_does_not_answer_the_unlock_question_gets_the_steps_for_both_cases() {
+    let both_cases = |body: &str, steps: &[String]| {
+        assert!(!body.contains("The phone says"), "{body}");
+        assert_eq!(steps.len(), 4);
+        assert!(steps[0].starts_with("If \"OEM unlocking\" is not switched on yet"));
+        assert!(steps[0].contains("Developer options"));
+    };
+    // A bootloader that doesn't know the command answers FAIL
+    let (ability, body, steps, asked) = unlock_screen(|s| s.unlock_ability = None);
+    assert_eq!(ability, UnlockAbility::Unknown);
+    both_cases(&body, &steps);
+    assert!(asked.log().contains(&GET_UNLOCK_ABILITY.to_string()));
+    // Answers this installer doesn't know, an empty one among them
+    for odd in [
+        "",
+        "1",
+        "yes",
+        "get_unlock_ability: 2",
+        "get_unlock_ability: maybe",
+        "unlock ability: 1",
+    ] {
+        let (ability, body, steps, _) = unlock_screen(|s| s.unlock_ability = Some(odd.into()));
+        assert_eq!(ability, UnlockAbility::Unknown, "{odd:?}");
+        both_cases(&body, &steps);
+    }
+
+    // A phone that stops answering at that question: the install goes on to
+    // the unlock steps all the same
+    struct Silent(FakePhone);
+    impl Transport for Silent {
+        async fn send(&mut self, data: &[u8]) -> Result<usize, Error> {
+            if data == GET_UNLOCK_ABILITY.as_bytes() {
+                self.0.edit(|s| s.log.push(GET_UNLOCK_ABILITY.into()));
+                return Ok(data.len());
+            }
+            self.0.send(data).await
+        }
+        async fn recv(&mut self) -> Result<Vec<u8>, Error> {
+            self.0.recv().await
+        }
+    }
+    let bundle = TestBundle::new();
+    let phone = phone("locked");
+    let mut flow = flow_at(&bundle, &phone, "phone");
+    block_on(flow.read_phone(&mut Silent(phone.clone()), &id())).unwrap();
+    assert_eq!(
+        flow.step(),
+        &Step::Unlock {
+            oem_unlocking: UnlockAbility::Unknown
+        }
+    );
+    only_reads(&phone, 1);
+    // And from there to the factory image once its owner unlocked it
+    phone.edit(|s| {
+        s.vars.insert("unlocked".into(), "yes".into());
+    });
+    look(&mut flow, &phone).unwrap();
+    assert_eq!(flow.screen().state, "factory-image");
+}
+
+#[test]
+fn only_a_locked_phone_at_the_unlock_steps_is_asked_the_unlock_question() {
+    let bundle = TestBundle::new();
+    // An unlocked phone, through the whole flow: never
+    let ready = phone("ready");
+    ready.edit(|s| s.unlock_ability = Some("get_unlock_ability: 1".into()));
+    let mut flow = flow_at(&bundle, &ready, "dry-run");
+    let session = block_on(flow.dry_run(ready.clone())).unwrap().unwrap();
+    flow.dry_run_done(session).unwrap();
+    only_getvar(&ready);
+    // A phone found locked again at the dry run: not there either
+    let relocked = phone("ready");
+    let mut flow = flow_at(&bundle, &relocked, "dry-run");
+    relocked.edit(|s| {
+        s.vars.insert("unlocked".into(), "no".into());
+        s.unlock_ability = Some("get_unlock_ability: 1".into());
+    });
+    assert!(block_on(flow.dry_run(relocked.clone())).unwrap().is_none());
+    assert_eq!(stop(&flow).kind, StopKind::LockedAtDryRun);
+    only_getvar(&relocked);
+    // Before the warning is accepted: nothing at all
+    let locked = phone("locked");
+    let mut flow = begin(&bundle);
+    assert!(look(&mut flow, &locked).is_err());
+    assert!(locked.log().is_empty());
 }
 
 #[test]
@@ -500,6 +678,7 @@ fn every_stop_comes_before_the_unlock_steps() {
         let phone = phone(scenario);
         phone.edit(|s| {
             s.vars.insert("unlocked".into(), "no".into());
+            s.unlock_ability = Some("get_unlock_ability: 1".into());
         });
         let mut flow = flow_at(&bundle, &phone, "phone");
         look(&mut flow, &phone).unwrap();
@@ -507,6 +686,7 @@ fn every_stop_comes_before_the_unlock_steps() {
         assert_eq!(s.id(), kind);
         assert_eq!(s.phone, PhoneFact::OnlyRead, "{scenario}");
         footer_is_honest(s);
+        // Not even asked whether it could be unlocked: it won't be shown how
         only_getvar(&phone);
     }
 }
@@ -620,7 +800,10 @@ fn a_phone_on_slot_b_stops_unless_it_is_a_reinstall() {
         &bundle.files(),
         bundle.index(),
         &bundle.trusted(),
-        FlowOptions { reinstall: true },
+        FlowOptions {
+            reinstall: true,
+            ..Default::default()
+        },
     );
     flow.acknowledge_warning().unwrap();
     look(&mut flow, &phone).unwrap();
@@ -865,7 +1048,7 @@ fn a_phone_swapped_between_steps_stops_the_install() {
     let first = self::phone("locked");
     let mut flow = flow_at(&bundle, &first, "phone");
     look(&mut flow, &first).unwrap();
-    assert_eq!(flow.step(), &Step::Unlock);
+    assert!(matches!(flow.step(), Step::Unlock { .. }));
     let second = self::phone("ready");
     swap(&second);
     block_on(flow.read_phone(&mut second.clone(), &chosen)).unwrap();
@@ -874,7 +1057,7 @@ fn a_phone_swapped_between_steps_stops_the_install() {
     assert_eq!(s.phone, PhoneFact::TwoPhones { unlock_shown: true });
     assert_eq!(s.retry, Retry::AfterFix);
     footer_is_honest(&s);
-    only_getvar(&first);
+    only_reads(&first, 1);
     only_getvar(&second);
 
     // Between the factory image and the dry run

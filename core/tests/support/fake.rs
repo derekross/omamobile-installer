@@ -7,7 +7,7 @@
 //! format, parsed here independently of the core's writer), so a test can
 //! compare the partitions afterwards with what should be on them.
 #![allow(dead_code)]
-use omamobile_installer_core::fastboot::Transport;
+use omamobile_installer_core::fastboot::{Transport, GET_UNLOCK_ABILITY};
 use omamobile_installer_core::{Error, Result};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -25,6 +25,9 @@ pub struct FakeState {
     pub active_slot: String,
     pub rebooted: bool,
     pub max_download: usize,
+    /// The INFO line that answers `flashing get_unlock_ability`. `None`: a
+    /// bootloader that doesn't know the command, and answers FAIL.
+    pub unlock_ability: Option<String>,
     // Faults
     /// Answer FAIL to a command starting with any of these.
     pub fail_on: Vec<String>,
@@ -93,6 +96,7 @@ impl FakePhone {
             active_slot: "a".into(),
             rebooted: false,
             max_download: 256 << 10,
+            unlock_ability: None,
             fail_on: Vec::new(),
             short_data: false,
             take_at_most: None,
@@ -130,7 +134,16 @@ impl FakePhone {
         slots("fake-1.0");
         match name {
             "ready" | "other-model" => {}
-            "locked" => set(&[("unlocked", "no")]),
+            // Locked, with "OEM unlocking" switched on in Developer options
+            "locked" => {
+                set(&[("unlocked", "no")]);
+                phone.edit(|s| s.unlock_ability = Some("get_unlock_ability: 1".into()));
+            }
+            // Locked, and "OEM unlocking" still off
+            "locked-oem-off" => {
+                set(&[("unlocked", "no")]);
+                phone.edit(|s| s.unlock_ability = Some("get_unlock_ability: 0".into()));
+            }
             "slot-b" => set(&[("current-slot", "b")]),
             "one-slot" => {
                 phone.edit(|s| {
@@ -162,9 +175,10 @@ impl FakePhone {
     }
 
     /// The names [`Self::scenario`] knows.
-    pub const SCENARIOS: [&'static str; 9] = [
+    pub const SCENARIOS: [&'static str; 10] = [
         "ready",
         "locked",
+        "locked-oem-off",
         "other-model",
         "slot-b",
         "one-slot",
@@ -180,6 +194,24 @@ impl FakePhone {
 
     pub fn log(&self) -> Vec<String> {
         self.0.borrow().log.clone()
+    }
+
+    /// What was received that is neither `getvar:` nor the one read-only
+    /// question of the flashing family: for a flow that only reads, nothing.
+    pub fn not_reads(&self) -> Vec<String> {
+        self.0
+            .borrow()
+            .log
+            .iter()
+            .filter(|c| !c.starts_with("getvar:") && *c != GET_UNLOCK_ABILITY)
+            .cloned()
+            .collect()
+    }
+
+    /// How many times `flashing get_unlock_ability` was received.
+    pub fn unlock_questions(&self) -> usize {
+        let log = &self.0.borrow().log;
+        log.iter().filter(|c| *c == GET_UNLOCK_ABILITY).count()
     }
 
     /// Names of the partitions that no longer hold only the sentinel.
@@ -325,8 +357,13 @@ impl FakeState {
         } else if cmd == "reboot" {
             self.rebooted = true;
             self.reply("OKAY", "");
+        } else if cmd == GET_UNLOCK_ABILITY && self.unlock_ability.is_some() {
+            // The one question of the flashing family: it reads
+            let line = self.unlock_ability.clone().unwrap_or_default();
+            self.reply("INFO", &line);
+            self.reply("OKAY", "");
         } else {
-            // erase:, format:, oem, flashing, ...: a test that sees one fails
+            // erase:, format:, oem, flashing unlock, ...: a test that sees one fails
             self.reply("FAIL", "unknown command");
         }
     }

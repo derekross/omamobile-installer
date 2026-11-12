@@ -1,8 +1,8 @@
 # The install flow: design
 
-Status (2026-11-10): **built and tested against a pretend phone; never run against a real one.** The flow ends at the dry run. Nothing in this repository's front ends can write to a phone.
+Status (2026-11-12): **built and tested against a pretend phone; never run against a real one.** The flow ends at the dry run. Nothing in this repository's front ends can write to a phone.
 
-This is the design of the installer's flow: the steps of an install as one state machine in the core (`core/src/flow.rs`), which the command-line tool and the web page both drive. It follows Omarchy Mobile's [install experience plan](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-EXPERIENCE-PLAN.md) (M3, M4) and the maintainer's decisions of 2026-11-10, listed in §2. How the shell-script installer does each step today is in that project's `docs/INSTALL-GUIDED.md`.
+This is the design of the installer's flow: the steps of an install as one state machine in the core (`core/src/flow.rs`), which the command-line tool and the web page both drive. It follows Omarchy Mobile's [install experience plan](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-EXPERIENCE-PLAN.md) (M3, M4) and the maintainer's decisions of 2026-11-10 and 2026-11-12, listed in §2. How the shell-script installer does each step today is in that project's `docs/INSTALL-GUIDED.md`.
 
 ## 1. The shape
 
@@ -12,7 +12,7 @@ front end                         core (no I/O of its own)
 fetches the release's files  -->  Flow::begin          verifies, checks the build index
 draws Flow::screen()         <--  Screen               title, text, steps, link, file, problem, plan, footer
 hands in what the person did -->  acknowledge_warning, read_phone, factory_zip, answers, dry_run
-lends a transport            -->  getvar, and nothing else, reaches the phone
+lends a transport            -->  getvar and one read-only question reach the phone, nothing else
 ```
 
 The core decides the order of the steps, every refusal and every sentence a person reads about the phone. A front end draws and listens. That is what keeps the two front ends from drifting, and what a third one (the desktop window) gets for free.
@@ -29,14 +29,18 @@ Made by the maintainer on 2026-11-10:
 6. **Every step is tied to one phone,** pinned by its serial number in fastboot.
 7. **Only slot B's boot images and `userdata` are ever written, nothing before the release is verified, and unsigned bundles are not supported.** The flow adds no write at all.
 
+Made by the maintainer on 2026-11-12:
+
+8. **One `flashing` command is allowed, and it only reads: `flashing get_unlock_ability`.** A locked phone that passes every stop is asked whether it would take the unlock command, and the unlock step says what it answered: "OEM unlocking" is already switched on, or it still has to be switched on in Developer options. A phone that doesn't answer, or answers something else than a plain yes or no, gets the steps for both cases, as before, and the install goes on. Nothing else of the `flashing` or `oem` families is sent, and decision 3 stands: the installer never sends the unlock command (§3, "The unlock question").
+
 ## 3. The states
 
 | State (`Screen.state`) | What the person sees | What the front end hands in | Goes to | Reaches the phone |
 | --- | --- | --- | --- | --- |
 | (start) | | `Flow::begin(release files, build index, trusted keys, options)` | `warning`, or a stop | nothing |
 | `warning` | The one warning: the phone is erased (by the unlock, if it is locked); Omarchy Mobile replaces Android and what this release lacks; the way back | `acknowledge_warning`, or `decline_warning` | `phone`, or a stop | nothing |
-| `phone` | Connect the phone in Fastboot Mode (how, from the descriptor's `INSTALL_KEYS_FASTBOOT`) | `read_phone(transport, chosen)`, or `no_phone` | `unlock`, `factory-image`, or a stop | `getvar` |
-| `unlock` | The bootloader is locked: the steps on the phone and the command to type. The flow sends none of it | `read_phone` again, when the owner says it is done | `unlock` (still locked), `factory-image`, or a stop | `getvar` |
+| `phone` | Connect the phone in Fastboot Mode (how, from the descriptor's `INSTALL_KEYS_FASTBOOT`) | `read_phone(transport, chosen)`, or `no_phone` | `unlock`, `factory-image`, or a stop | `getvar`; then, if the next screen is `unlock`, `flashing get_unlock_ability` |
+| `unlock` | The bootloader is locked: whether "OEM unlocking" is switched on, if the phone said; the steps on the phone and the command to type. The flow sends none of it | `read_phone` again, when the owner says it is done | `unlock` (still locked), `factory-image`, or a stop | `getvar`; then, if still locked, `flashing get_unlock_ability` |
 | `factory-image` | The build that matches, Google's page as a link, the file's name and size | `factory_zip(name, size)`, the file's bytes a piece at a time, `factory_zip_done` | `answers`, or stays with why the file wasn't taken | nothing |
 | `answers` | User name, PIN or password, the phone's name, time zone, Wi-Fi | `answers(OwnerAnswers)` | `dry-run` | nothing |
 | `dry-run` | What the dry run is | `dry_run(transport)`, then `dry_run_done(session)` or `dry_run_failed` | `done`, or a stop | `getvar` |
@@ -48,6 +52,16 @@ A step handed in out of order is refused and changes nothing. Before the warning
 **Verifying comes first, and so does the build index.** `begin` checks the signature, the checksums, the manifest and the descriptor, and then the build index, before the warning. A release that can't be used stops there, not after the owner has erased a phone for it.
 
 **Every stop comes before the unlock steps.** Each look at the phone judges it in one order: the model, the pinned phone, slot B, the two bootloader slots, the build index. Only a phone that passes all of them is shown how to unlock. This differs from the shell installer, which checks slots and the index after the unlock. It rests on a locked bootloader answering the same `getvar` questions as an unlocked one, which has not been checked on a phone (§9).
+
+**The unlock question.** `flashing get_unlock_ability` asks a phone whether it would take an unlock command, which is what "OEM unlocking" in Android's Developer options decides. It reads; it changes nothing on the phone. It is the one command of the `flashing` family in the crate, as a named operation with a typed answer (`fastboot::unlock_ability`, giving `UnlockAbility::Allowed`, `NotAllowed` or `Unknown`), not a way to send a command of the caller's choosing. The command layer holds a closed list of what may leave (`getvar:`, `download:`, `flash:`, `set_active:b`, `reboot`, and this command compared whole), checked at the one place a command is sent; `flashing unlock`, `flashing lock`, `flashing unlock_critical` and every `oem` command are refused there, and a test tries each.
+
+The flow asks it of a locked phone only, only once that phone has passed every stop and is about to be shown the unlock steps, and as the last question of that look. So a phone the install can't go on with is never asked, and neither is an unlocked one. The answer changes the unlock step's words and nothing else:
+
+- yes (`get_unlock_ability: 1`): "The phone says that "OEM unlocking" is already switched on, so it will take the unlock command." The step that switches it on is left out.
+- no (`get_unlock_ability: 0`): "The phone says that "OEM unlocking" is not switched on yet. Until it is, the phone refuses the unlock command, so switch it on in Android's Developer options first (step 1)."
+- anything else (FAIL from a bootloader that doesn't know the command, another reply, both answers at once, no reply): nothing is concluded, and the screen gives the steps for both cases, as it did before this question existed. It is never an error and never a stop.
+
+The form of the answer (an `INFO` line `get_unlock_ability: 0` or `1`) is the one Google's bootloaders are expected to give; it has not been checked on a phone (§9). An answer in another form falls back to the text for both cases, so a wrong guess here costs the sentence, not the install.
 
 **The dry run judges the phone again**, then opens a `Session` with every write held back, pinned to the same phone. A front end that has the release's images (the command-line tool) walks them through that session: each is checked against the signed manifest and the root image is cut into sparse images, all without a write. One that doesn't (the web page, for now) gets the signed plan's list, and the last screen says which it was.
 
@@ -137,8 +151,8 @@ A later version writes, and then has steps that talk to the phone some other way
 
 Not built, in the order a real install needs them:
 
-- **A run on a real phone.** Unknown until then: how a Pixel's bootloader answers `getvar:all`; whether a locked bootloader answers `current-slot`, `version-baseband` and the per-slot versions (§3 depends on it); `max-download-size`; timing. The first run should be `install --dry-run`, which sends `getvar` only. On a Pixel 7 Pro it is expected to stop at `bootloader-slots-unknown`.
-- **Whether a locked phone can be unlocked.** `fastboot flashing get_unlock_ability` would tell whether "OEM unlocking" is on, but it is a `flashing` command, and the core has none (CONTRIBUTING). So the unlock screen gives the steps for both cases.
+- **A run on a real phone.** Unknown until then: how a Pixel's bootloader answers `getvar:all`; whether a locked bootloader answers `current-slot`, `version-baseband` and the per-slot versions (§3 depends on it); `max-download-size`; timing. The first run should be `install --dry-run`, which sends `getvar` and, to a locked phone, `flashing get_unlock_ability`. On a Pixel 7 Pro it is expected to stop at `bootloader-slots-unknown`.
+- **How a real bootloader answers `flashing get_unlock_ability`.** The flow asks it since 2026-11-12 (§3). The pretend phone answers with an `INFO` line `get_unlock_ability: 0` or `1`; whether a Pixel's bootloader uses that form, and whether a locked one answers at all, is unknown until the run above. Any other answer gives the steps for both cases.
 - **Restarting an Android phone into Fastboot Mode** (adb). The phone screen gives the key combination.
 - **How the owner unlocks from the web page.** The command needs Android's fastboot tool on the computer, which the plan says a person should never have to install.
 - **Delivering the owner's answers** (`firstboot.conf`): over the install link (plan M2) or written into the image. Until then no front end may write.
@@ -151,7 +165,8 @@ Not built, in the order a real install needs them:
 
 ## 10. Tests
 
-- `core/tests/flow.rs`: each state and each stop against the pretend phone; each test also checks that only `getvar` reached it.
+- `core/tests/flow.rs`: each state and each stop against the pretend phone; each test also checks that only `getvar` reached it, and for a locked phone at the unlock steps `flashing get_unlock_ability`, counted.
+- `core/src/fastboot.rs` (unit tests, where the private command layer is): of the `flashing` and `oem` families only the one question is sent, nothing off the list of commands is sent, and an answer is a plain yes or no or nothing is concluded.
 - `core/tests/build_index.rs`: every field's rule on the real cheetah index (`fixtures/index/`) and on changed copies; the match; trust.
 - `cli/tests/flow_fake_phone.rs` (`--features fake-phone`): the built tool with typed input.
 - `web/selftest.sh`: the page in a headless Chromium, clicked through every state against the pretend phone, under the strict Content-Security-Policy. The browser is started with WebUSB off and, where bubblewrap is installed, without USB device nodes.
