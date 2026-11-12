@@ -12,10 +12,15 @@
 //!                             [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
 //!                                                no phone: the same flow against a pretend phone
 //!                                                (only in a build with the `fake-phone` feature)
+//!   omamobile-install json [--release BUNDLE_DIR] [--work-dir DIR]
+//!                                                USB: the same flow as JSON lines on standard input
+//!                                                and output, for the desktop app, agents and scripts
+//!                                                (json.rs, docs/APP.md)
 //!
-//! `install` and `flow` drive the core's one install flow (core/src/flow.rs):
-//! this file prints the screens the flow gives it and hands in what was
-//! typed. It decides nothing and words nothing of its own about the phone.
+//! `install`, `flow` and `json` drive the core's one install flow
+//! (core/src/flow.rs): this file prints the screens the flow gives it and
+//! hands in what was typed, and json.rs sends them as they are. Neither
+//! decides anything or words anything of its own about the phone.
 //!
 //! The flow ends at the dry run, and `install` runs only with `--dry-run`:
 //! nothing here can write to a phone. All that reaches one is `getvar` and,
@@ -61,6 +66,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+mod json;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -408,7 +415,7 @@ fn show(screen: &Screen) {
 }
 
 /// What a long step says on the way, and how it is ended early. The
-/// terminal prints, and ends nothing early.
+/// terminal prints; the JSON mode sends `progress` and listens for a cancel.
 trait Watch {
     /// A line for a person at a terminal.
     fn note(&mut self, _text: &str) {}
@@ -1029,7 +1036,7 @@ fn cmd_fake(_: &Path, _: &str, _: FlowOptions, _: FactoryImage, _: Option<&str>)
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR]";
 
 fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
     // Decode a small .zst repeatedly: the same loop as the browser self-test
@@ -1122,6 +1129,12 @@ fn run() -> Res<bool> {
 }
 
 fn main() -> ExitCode {
+    // The JSON mode owns standard output: nothing below may print there
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("json") {
+        let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+        return json::run(&rest);
+    }
     match run() {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(2),
