@@ -31,8 +31,8 @@ Does not work, or is not built:
 
 | Path | What |
 | --- | --- |
-| `core/` | The shared core: the install flow (`flow.rs`), the build index, the download of Google's factory image as decisions on what a front end fetched (`download.rs`), `manifest.json` and `device.conf` rules, the release signature and checksums, fastboot over a transport trait, Android sparse cutting, zstd. No I/O of its own |
-| `core/tests/` | 68 tests, and 3 beside the command layer in `core/src/fastboot.rs`. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
+| `core/` | The shared core: the install flow (`flow.rs`), the build index, the download of Google's factory image as decisions on what a front end fetched (`download.rs`), the filter for what a phone or a server says before it is printed (`text.rs`), `manifest.json` and `device.conf` rules, the release signature and checksums, fastboot over a transport trait, Android sparse cutting, zstd. No I/O of its own |
+| `core/tests/` | 75 tests, and 13 in the core's sources: 9 beside the command layer in `core/src/fastboot.rs`, 4 for `core/src/text.rs`. `support/fake.rs` is the pretend phone; `support/bundle.rs` signs small test bundles with a key made on the spot |
 | `usb/` | The fastboot transport over USB (nusb): one file for Linux, Windows, macOS and WebUSB |
 | `cli/` | `omamobile-install`. `verify` and `sparse` need no phone; `flow --fake-phone` runs the install flow against the pretend phone; `devices` and `install --dry-run` use USB. It downloads Google's factory image with `ureq`, into `--work-dir`, through no proxy unless `--proxy` names one |
 | `web/` | The same core as WebAssembly, a static page with a screen for each state of the flow, a local server that sends the strict headers (and, for the self-test, runs a stand-in for Google's server), and a self-test that clicks through the page in a headless browser |
@@ -40,6 +40,7 @@ Does not work, or is not built:
 | `fixtures/index/` | `device/cheetah/factory-builds.json` as Omarchy Mobile carries it: public metadata about two of Google's builds |
 | `fixtures/selftest/`, `fixtures/zstd/` | A signed test bundle (test key, build index, a stand-in factory zip of noise) for the front ends' pretend phone, and a file made by the `zstd` tool |
 | `platform/linux/` | A fallback udev rule |
+| `tools/` | `check-identifiers` (no identifier of a phone or a person in any tracked file) and `check-shipping` (what ships has no way to write and no pretend phone). CI runs both |
 
 ## Build and test
 
