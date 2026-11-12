@@ -16,11 +16,16 @@
 //!                             [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
 //!                                                no phone: the same flow against a pretend phone
 //!                                                (only in a build with the `fake-phone` feature)
+//!   omamobile-install json [--release BUNDLE_DIR] [--work-dir DIR]
+//!                                                USB: the same flow as JSON lines on standard input
+//!                                                and output, for the desktop app, agents and scripts
+//!                                                (json.rs, docs/APP.md)
 //!   omamobile-install help                       what each command does, and what --write erases
 //!
-//! `install` and `flow` drive the core's one install flow (core/src/flow.rs):
-//! this file prints the screens the flow gives it and hands in what was
-//! typed. It decides nothing and words nothing of its own about the phone.
+//! `install`, `flow` and `json` drive the core's one install flow
+//! (core/src/flow.rs): this file prints the screens the flow gives it and
+//! hands in what was typed, and json.rs sends them as they are. Neither
+//! decides anything or words anything of its own about the phone.
 //!
 //! `install` takes `--dry-run` or `--write`, one of them, and has no default.
 //! With `--dry-run` all that reaches a phone is `getvar` and, for a locked
@@ -78,6 +83,8 @@ use std::io::{self, BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+mod json;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -424,7 +431,7 @@ fn show(screen: &Screen) {
 }
 
 /// What a long step says on the way, and how it is ended early. The
-/// terminal prints, and ends nothing early.
+/// terminal prints; the JSON mode sends `progress` and listens for a cancel.
 trait Watch {
     /// A line for a person at a terminal.
     fn note(&mut self, _text: &str) {}
@@ -1284,7 +1291,7 @@ fn cmd_fake(
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | help";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
 
 /// What `help` says about [`SLOTS_MATCH`].
 const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written.";
@@ -1437,6 +1444,12 @@ fn run() -> Res<bool> {
 }
 
 fn main() -> ExitCode {
+    // The JSON mode owns standard output: nothing below may print there
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("json") {
+        let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+        return json::run(&rest);
+    }
     match run() {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(2),
