@@ -1,11 +1,13 @@
 # The gate for every push and pull request: no identifiers, formatted, the
-# core's tests and the command-line tool's flow against the fake phone, the
-# web page built both ways and its self-test in a headless browser, and a
-# look at what ships: no way to write to a phone, no pretend phone. Nothing
-# here touches a USB device: the tests use a fake transport, and no step
-# lists or opens USB devices. Nothing here reaches Google: downloads go to
-# stand-ins on the runner, and the self-test's browser can resolve no host
-# but 127.0.0.1.
+# core's tests and the command-line tool's flow against the fake phone (as
+# text and as JSON lines), the web page built both ways and its self-test in
+# a headless browser, a look at what ships (no way to write to a phone but
+# the command-line tool's, no pretend phone), and the desktop app built and
+# tested against a stand-in and against the real tool with its pretend
+# phone. Nothing here touches a USB device: the tests use a fake transport,
+# and no step lists or opens USB devices. Nothing here reaches Google:
+# downloads go to stand-ins on the runner, and the self-test's browser can
+# resolve no host but 127.0.0.1.
 name: Checks
 on:
   push:
@@ -40,7 +42,7 @@ jobs:
         run: cargo clippy --locked
       - name: Tests (the core, against the fake phone; the install flow and the build index among them)
         run: cargo test --locked
-      - name: Tests (the command-line tool driving the flow against the pretend phone)
+      - name: Tests (the command-line tool driving the flow against the pretend phone, as text and as JSON lines)
         run: cargo test --locked -p omamobile-installer-cli --features fake-phone
       # web/build.sh needs wasm-bindgen-cli at exactly the wasm-bindgen
       # version in Cargo.lock. Built once per version and kept.
@@ -126,3 +128,34 @@ jobs:
             echo "the shipping build offers the bootloader-slot override"; exit 1
           fi
           grep -q 'cannot write to a phone' web/dist/index.html
+
+  # The desktop app (app/). It needs Qt 6.5 or newer (the window uses
+  # Material.roundedScale), and the runner's own distribution, Ubuntu 24.04,
+  # packages Qt 6.4.2: the window does not load there. So this job runs in an
+  # Arch Linux container, which is also what the app is built for.
+  app:
+    name: The desktop app, against a stand-in and against the real tool
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 30
+    steps:
+      # A font too: the image has none, and the test of the window at its
+      # smallest size measures the buttons' labels.
+      - name: Packages (Qt 6, a C++ compiler, Python for the tests' stand-in, a font, rustup)
+        run: pacman -Syu --noconfirm --needed base-devel git python qt6-base qt6-declarative ttf-dejavu rustup
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: The app builds
+        run: app/bin/build
+      # app/bin/test builds omamobile-install with its pretend phone (cargo)
+      # and runs the Qt tests offscreen: no window, no phone, no USB. A test
+      # that was skipped means the real tool was not there, and fails the job.
+      - name: The app's tests, with none skipped
+        shell: bash
+        run: |
+          set -o pipefail
+          app/bin/test | tee app-tests.log
+          if grep -q '^SKIP' app-tests.log; then
+            echo "a test of the app was skipped"; exit 1
+          fi
