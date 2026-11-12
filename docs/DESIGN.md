@@ -11,8 +11,10 @@ front end                         core (no I/O of its own)
 ---------                         ------------------------
 fetches the release's files  -->  Flow::begin          verifies, checks the build index
 draws Flow::screen()         <--  Screen               title, text, steps, link, file, problem, plan, footer
-hands in what the person did -->  acknowledge_warning, read_phone, factory_zip, answers, dry_run
+hands in what the person did -->  acknowledge_warning, read_phone, accept_google_terms, factory_zip, answers, dry_run
 lends a transport            -->  getvar and one read-only question reach the phone, nothing else
+fetches Google's factory zip <--  FetchRequest         the address from the signed index, where to go on from, the size
+hands in each answer, the bytes -->  FactoryDownload   every redirect, the size and the SHA-256 are decided here
 ```
 
 The core decides the order of the steps, every refusal and every sentence a person reads about the phone. A front end draws and listens. That is what keeps the two front ends from drifting, and what a third one (the desktop window) gets for free.
@@ -21,7 +23,7 @@ The core decides the order of the steps, every refusal and every sentence a pers
 
 Made by the maintainer on 2026-11-10:
 
-1. **Google's factory image is the owner's download.** The installer never downloads it and never shows Google's terms. It opens Google's page and takes the file the owner saved, checked by size and SHA-256 against the release's signed build index.
+1. **Reversed on 2026-11-12 by decision 11.** The rule was: "Google's factory image is the owner's download. The installer never downloads it and never shows Google's terms. It opens Google's page and takes the file the owner saved." What stays of it: the file is checked by size and SHA-256 against the release's signed build index, and the owner saving the file from Google's page themselves is still a way through the step.
 2. **The match is exact, and tested.** The build whose bootloader *and* baseband equal the phone's, marked tested, or the install stops. There is no nearest build.
 3. **The installer never sends `fastboot flashing unlock`.** It shows the command and the steps on the phone.
 4. **One warning, before the unlock steps,** acknowledged once.
@@ -34,6 +36,7 @@ Made by the maintainer on 2026-11-12:
 8. **One `flashing` command is allowed, and it only reads: `flashing get_unlock_ability`.** A locked phone that passes every stop is asked whether it would take the unlock command, and the unlock step says what it answered: "OEM unlocking" is already switched on, or it still has to be switched on in Developer options. A phone that doesn't answer, or answers something else than a plain yes or no, gets the steps for both cases, as before, and the install goes on. Nothing else of the `flashing` or `oem` families is sent, and decision 3 stands: the installer never sends the unlock command (§3, "The unlock question").
 9. **The maintainer can let a dry run go on past a phone that reports one bootloader slot's version.** The override is for the maintainer's own first dry runs on such a phone (the Pixel 7 Pro). It is hidden, it works in a dry run only, it passes that one stop and no other, and every screen from then on says that the check was skipped and that the run is not evidence that an install would be allowed. Decision 5 stands for everyone else, and for every install (§6, "The maintainer's override").
 10. **A build that is listed, not tested, with no newer build tested, is "not tested yet".** The owner is told that nothing they can install today changes that, and what they can do: wait, or ask in the issue tracker. They are not told to update Android. It still stops: decision 2 does not change. When a newer build was tested, "update Android to that build" stays (§4).
+11. **The installer downloads Google's factory image for the owner, from Google's own server, after showing Google's terms for the owner to accept.** This reverses decision 1. A step of the flow shows what Google's download page asks a person to accept, in Google's words and marked as Google's, and nothing is downloaded until the owner accepts there. Then the file is fetched from the one address the release's signed build index gives for the phone's build, on `https://dl.google.com/`, and checked on this computer (size, then SHA-256 over the whole file) before anything of it is used. **The project hosts none of Google's files:** nothing of Google's is fetched from anywhere but that address, and nothing of it is passed on. An owner who does not accept, or whose download can't be made, saves the file from Google's page and hands it in, as under decision 1. Whether Omarchy Mobile may ship files extracted from a factory image itself is a separate question, and it is not decided (§3, "Google's terms" and "The download").
 
 ## 3. The states
 
@@ -41,9 +44,10 @@ Made by the maintainer on 2026-11-12:
 | --- | --- | --- | --- | --- |
 | (start) | | `Flow::begin(release files, build index, trusted keys, options)` | `warning`, or a stop | nothing |
 | `warning` | The one warning: the phone is erased (by the unlock, if it is locked); Omarchy Mobile replaces Android and what this release lacks; the way back | `acknowledge_warning`, or `decline_warning` | `phone`, or a stop | nothing |
-| `phone` | Connect the phone in Fastboot Mode (how, from the descriptor's `INSTALL_KEYS_FASTBOOT`) | `read_phone(transport, chosen)`, or `no_phone` | `unlock`, `factory-image`, or a stop | `getvar`; then, if the next screen is `unlock`, `flashing get_unlock_ability` |
-| `unlock` | The bootloader is locked: whether "OEM unlocking" is switched on, if the phone said; the steps on the phone and the command to type. The flow sends none of it | `read_phone` again, when the owner says it is done | `unlock` (still locked), `factory-image`, or a stop | `getvar`; then, if still locked, `flashing get_unlock_ability` |
-| `factory-image` | The build that matches, Google's page as a link, the file's name and size | `factory_zip(name, size)`, the file's bytes a piece at a time, `factory_zip_done` | `answers`, or stays with why the file wasn't taken | nothing |
+| `phone` | Connect the phone in Fastboot Mode (how, from the descriptor's `INSTALL_KEYS_FASTBOOT`) | `read_phone(transport, chosen)`, or `no_phone` | `unlock`, `google-terms`, or a stop | `getvar`; then, if the next screen is `unlock`, `flashing get_unlock_ability` |
+| `unlock` | The bootloader is locked: whether "OEM unlocking" is switched on, if the phone said; the steps on the phone and the command to type. The flow sends none of it | `read_phone` again, when the owner says it is done | `unlock` (still locked), `google-terms`, or a stop | `getvar`; then, if still locked, `flashing get_unlock_ability` |
+| `google-terms` | What Google's download page asks a person to accept, as Google's words; whose the files are; Google's page as a link | `accept_google_terms(now)`, or `decline_google_terms` | `factory-image` (to download, or for the owner's own file) | nothing |
+| `factory-image` | The build that matches, the acceptance if it was given, Google's page as a link, the file's name and size | Accepted: `factory_download(have)`, the fetch, `factory_download_done`. Always: `factory_zip(name, size)`, the file's bytes a piece at a time, `factory_zip_done` | `answers`; stays with why the file wasn't taken or the download ended early; or a stop | nothing |
 | `answers` | User name, PIN or password, the phone's name, time zone, Wi-Fi | `answers(OwnerAnswers)` | `dry-run` | nothing |
 | `dry-run` | What the dry run is | `dry_run(transport)`, then `dry_run_done(session)` or `dry_run_failed` | `done`, or a stop | `getvar` |
 | `done` | The plan: what an install would write. Nothing was written | | (the end, in this version) | |
@@ -65,6 +69,34 @@ The flow asks it of a locked phone only, only once that phone has passed every s
 
 The form of the answer (an `INFO` line `get_unlock_ability: 0` or `1`) is the one Google's bootloaders are expected to give; it has not been checked on a phone (§9). An answer in another form falls back to the text for both cases, so a wrong guess here costs the sentence, not the install.
 
+**Google's terms** (decision 11). The step comes after every stop and the unlock, when the phone's build is known, and before the factory image. It shows:
+
+- Google's words, quoted and marked as Google's (`Screen.quote`, which both front ends set apart from the installer's own text): "Downloading of the system image and use of the device software is subject to the Google Terms of Service" and "By continuing, you agree to the Google Terms of Service and Privacy Policy", with links to `https://policies.google.com/terms` and `https://policies.google.com/privacy`; and that Google's page also says the download and use "may also be subject to certain third-party terms of service, which can be found in Settings > About phone > Legal information". These are the sentences the maintainer gave with the decision. They are constants in `core/src/flow.rs`; they have not been compared with Google's page by this code, and they have to be kept the same as the page (§9).
+- In the installer's own words, what Google's page says of the files: they are for use only on the owner's own Pixel, and Google does not allow them to be redistributed. So the installer downloads them straight from Google to this computer, for this phone, and Omarchy Mobile does not host them or pass them on.
+- Google's page for this build (the index's `page`), as a link.
+
+Nothing happens until the owner answers. Accepting is recorded in the flow, with the build and the time (`Flow::google_terms_accepted`, a `TermsAccepted`; the front end passes its clock, since the core has none), and the next screen shows it: "You accepted Google's terms for build … on 2026-11-12 at 14:03 UTC." It is kept for that run only and is never sent anywhere. Not accepting is not a stop: the flow goes on to the factory image with the owner's own download, and downloads nothing for the rest of that run. An owner who says up front that they already have the file (`FlowOptions::owner_has_factory_zip`, the command line's `--factory-zip FILE`) is not shown the step, because the installer then downloads nothing: the terms were Google's to ask on its page.
+
+**The download.** The core does no I/O, so the front end fetches and the core decides (`core/src/download.rs`). `Flow::factory_download(have)` is refused unless the terms were accepted for this build in this flow. It gives a `FactoryDownload`, and from then on:
+
+1. The front end feeds in the bytes it kept of an earlier try (`kept`), from the file's first byte. The core hashes them like the bytes that arrive later, and takes no answer of the server before they are all in.
+2. It asks what to fetch (`request`): a `FetchRequest` with the address, the byte to go on from (a `Range: bytes=N-` header when that is above zero) and the file's size. A `FetchRequest` can only be made in the core, from the `url` of the build in the signed index or from a redirect that passed the same rule. No address comes from what a person typed, from a front end, or from a server.
+3. It carries out one GET without following redirects, and hands the status and headers to `response`. The answer is `Fetch` (a redirect to follow), `Body { at }` (read the body, which belongs at that byte of the file) or `End` (read nothing).
+4. It feeds the body in pieces to `body`, which counts and hashes them and says when to stop reading.
+5. It hands everything to `Flow::factory_download_done`, with what kept it from carrying the request out, if anything did. The answer says what to do with the bytes it kept: `Verified`, `Kept` or `Discard`.
+
+What holds, each with a test:
+
+- **`https` and the host `dl.google.com`, and nothing else.** One rule, `build_index::is_download_url`, for the index entry (§5), again where a download starts, and for every redirect. A redirect to another host, to plain `http`, or to an address with a port, a user name, a query or `..` is not followed. A client that can't be told not to follow redirects (a browser) says where the answer came from in the end, and that is checked by the same rule; the page's Content-Security-Policy is what holds each hop in between to that host.
+- **The size is the index's,** before the transfer (a `Content-Length`, or a `Content-Range` total, that says otherwise ends the try before a byte of the body is read) and during it (the piece that would pass the file's size is refused whole, and reading stops).
+- **The SHA-256 is over the whole file** before anything of it is used: the kept bytes first, then what arrived. A server that sends the whole file although the rest was asked for is fine: what was kept is dropped, and its part of the hash with it.
+- **A file that is not the listed one stops the install** (`factory-download-mismatch`, §4), and the front end is told to delete every byte it kept of it.
+- **A download that can't be made is not a stop and says nothing against the file.** A redirect off Google's host, too many redirects (five), a status that is neither the file nor a redirect, an answer that does not fit the request, or a browser that got no answer it may read: the step falls back to the owner's own download, with the reason in a sentence, and the installer downloads no more in that run.
+- **A download that broke off stays open.** The screen says how many bytes had arrived, and it can be tried again; a front end that kept the bytes goes on from them.
+- **Progress** is `FactoryDownload::progress()`: bytes in hand, of the file's size.
+
+The address is on no screen. A front end learns it only from a `FetchRequest`.
+
 **The dry run judges the phone again**, then opens a `Session` with every write held back, pinned to the same phone. A front end that has the release's images (the command-line tool) walks them through that session: each is checked against the signed manifest and the root image is cut into sparse images, all without a write. One that doesn't (the web page, for now) gets the signed plan's list, and the last screen says which it was.
 
 ## 4. The stops
@@ -85,11 +117,16 @@ Each is a `StopKind` with a short id (`Screen.stop`), a title and a message.
 | `baseband-unknown` | No `version-baseband` | stops again |
 | `build-not-listed` | No build has both the phone's versions | after an Android update |
 | `build-not-tested` | The build is listed, not marked tested | after an Android update, if a newer build was tested; else stops again ("not tested yet") |
+| `factory-download-mismatch` | What the installer downloaded from Google's server is not the file the signed index describes: the server said another size, sent more bytes than the file has, or the SHA-256 of the whole file is another. What was downloaded is deleted | at any time (the file is downloaded afresh) |
 | `locked-at-dry-run` | The bootloader is locked again at the dry run | after unlocking |
 | `build-changed` | Other versions at the dry run than the factory image was chosen for | at any time |
 | `dry-run-refused` | A check only the session makes (a partition's size, `max-download-size`), or the link was lost | stops again; after reconnecting |
 
-A factory image that isn't taken (`ZipRefusal`: another name, another size, another SHA-256) is not a stop: the step stays open and says why.
+A factory image the owner hands in that isn't taken (`ZipRefusal`: another name, another size, another SHA-256) is not a stop: the step stays open and says why. That differs from a download on purpose. A person can pick the wrong file, and picks another. A file the installer fetched itself from the one address it trusts, complete, with another SHA-256, means that Google's file and the release's list do not agree, and trying again in the same run would only fetch it again.
+
+Not stops either: Google's terms not accepted, a download that can't be made (`OwnerFileWhy::Unavailable`: the step falls back to the owner's own download), and a download that broke off (`DownloadTrouble`: the step stays open). §3, "The download".
+
+`factory-download-mismatch` says: "The downloaded file is not the one this release lists", then what was wrong ("… the file is not what the release's signed list of Google's builds says: its SHA-256 is another than the one the list records for build …"), then "The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer.", then that starting again downloads the file afresh and whom to tell if it stops there again.
 
 ### What a stop says
 
@@ -108,7 +145,7 @@ The M1 reviews of the shell installer found stops that reassured wrongly: "Nothi
 - **Every field is checked:** the build id, both versions, the SHA-256, a size above zero; the zip named `<codename>-<build>-factory-<first eight digits of its SHA-256>.zip`; `url` on `https://dl.google.com/` (and ending in the zip's name), with no character that could name another host; `page` Google's factory images page on `developers.google.com`; `tested` and `tested_with` together, the latter a release version; no build twice; the index's codename the release's. An unknown key is refused, as in the manifest's install plan: it could be a rule this version would ignore.
 - **Trusted only through a verified release.** `VerifiedRelease::build_index` takes the bytes, checks them against the signed manifest's size and SHA-256 for `factory-builds.json`, then parses. Nothing else makes a `BuildIndex`, and the flow takes nothing else.
 - **The match** is `BuildIndex::lookup(bootloader, baseband)`: `Tested` (used; other builds with the same pair are named, since fastboot can't tell carrier variants apart), `NotTested`, `NotListed`. Among builds with the same pair the tested one is used wherever it is listed.
-- **`url` is never fetched.** `page` is a link the person clicks.
+- **`url` is the one address anything of Google's is fetched from** (decision 11), and only through `Flow::factory_download`, after the owner accepted Google's terms. The rule for it is `is_download_url`, which the download applies again and to every redirect. `page` is a link the person clicks.
 
 Not built: the newer copy published beside `latest.json` with a detached signature (INSTALL-GUIDED §5). `signature::verify_detached` can check one; what is open is binding it to a release and its replay (a signed index never expires).
 
@@ -151,13 +188,21 @@ For a later version to probe, the rule has to be in the signed install plan, not
 1. **Draw the whole `Screen`:** title, the notice (right under the title, set apart), body, numbered steps, a step's `command` as text to copy, the link, the file wanted, the problem, the plan, the footer. Add no sentence of its own about the phone's state, and no reassurance.
 2. **Never run a `command`.** It is for the person's terminal.
 3. **Send nothing to a phone itself,** and offer no control for the maintainer's override in a page or a usage text (§6). It lends the flow a transport (`read_phone`, `dry_run`) and passes which device the person chose (`PhoneId::of_serial` of the USB serial number), so the phone that answers must be that one.
-4. **Open Google's page only on the person's click,** as an ordinary link in a new tab. Fetch nothing from Google.
-5. **Read the factory zip in pieces** into `FactoryZipCheck::update`; never hold it whole. Hand over the name and size first.
+4. **Open Google's page only on the person's click,** as an ordinary link in a new tab. **Fetch one thing from Google, and only what the core asks for:** the `FetchRequest` of a `FactoryDownload`, which the flow gives out only after the owner accepted Google's terms. Don't build an address, change one, or follow a redirect the core did not answer with `Fetch`. Send Google no cookie and no referrer. Draw `Screen.quote` set apart, as someone else's words.
+5. **Read the factory zip in pieces,** never whole: a file the owner hands in into `FactoryZipCheck::update` (the name and size first), a download into `FactoryDownload::body`. Bytes kept of an earlier try go into `FactoryDownload::kept` first, all of them. Do with the kept bytes what `factory_download_done` answers: on `Discard`, delete them.
 6. **Keep the owner's answers in memory only.** `OwnerAnswers::check` applies the rules (those of Omarchy Mobile's `tools/install-phone`); the flow keeps a summary without the secrets or the network's name. A front end may add what only it knows (which time zones exist).
 7. **Say what it is.** The page's first line says it is a preview that cannot write to a phone.
 8. **Offer the pretend phone only in builds made for it** (the command-line tool's `fake-phone` feature, the page's `selftest` feature). Those are also the only builds that trust a test key.
 
 How the two do it: `cli/src/main.rs` (`run_flow`) and `web/static/app.js` with `web/src/lib.rs` (`InstallFlow`).
+
+### The download in each front end
+
+**The command-line tool** fetches with `ureq` (a small blocking HTTP client; TLS by rustls with the webpki roots; no async runtime, which the tool does not otherwise have). It follows no redirect by itself and treats no status as an error: the core sees each answer. The file goes to `factory/<name>.part` under the work directory (`--work-dir DIR`; by default the user's cache directory, `omamobile-installer`), and is renamed to `<name>` once the core says `Verified`. A later run finds either file, reads it back into the core from its first byte and asks Google for the rest only. `--factory-zip FILE` hands in a file the owner already has, and nothing is downloaded. `flow` (the pretend phone) never reaches Google: its fetches go to a stand-in on this computer named with `--fake-google 127.0.0.1:PORT`, or nowhere; `install` refuses that option.
+
+**The web page** fetches with the browser's `fetch` (no cookie, no referrer), streams the body into the core and keeps none of it: there is no resume there yet, and a try starts at the file's first byte. A browser follows redirects itself, so the page hands the core the address the answer came from in the end, and the site's Content-Security-Policy (`connect-src … https://dl.google.com`, as `web/serve.py` sends it) is what keeps every hop on that host.
+
+**Whether Google's server allows the browser's fetch is unverified.** A page on another origin may read an answer only if the server sends `Access-Control-Allow-Origin` for it, and nobody has checked whether `dl.google.com` does. The page does not guess. It tries; when `fetch` is rejected before any answer (which is all a page learns, of a refusal by that rule and of a network error alike), the core is told `FetchFailure::NoAnswer` and the step falls back to "open Google's page and save the file, then pick it here", with the reason: "this browser got no answer from dl.google.com that a web page may read. A browser does not tell a page why: either there is no connection to Google's server, or Google's server does not let a web page read its files." The page's self-test runs both outcomes against a stand-in on another origin: one that sends the header and one that does not.
 
 ## 8. Pinning the phone
 
@@ -171,6 +216,10 @@ Not built, in the order a real install needs them:
 
 - **A run on a real phone.** Unknown until then: how a Pixel's bootloader answers `getvar:all`; whether a locked bootloader answers `current-slot`, `version-baseband` and the per-slot versions (§3 depends on it); `max-download-size`; timing. The first run should be `install --dry-run`, which sends `getvar` and, to a locked phone, `flashing get_unlock_ability`. On a Pixel 7 Pro it is expected to stop at `bootloader-slots-unknown`; the maintainer's override (§6) takes a dry run past that stop, to see the rest.
 - **How a real bootloader answers `flashing get_unlock_ability`.** The flow asks it since 2026-11-12 (§3). The pretend phone answers with an `INFO` line `get_unlock_ability: 0` or `1`; whether a Pixel's bootloader uses that form, and whether a locked one answers at all, is unknown until the run above. Any other answer gives the steps for both cases.
+- **How Google's server answers** (decision 11). No request has been sent to `dl.google.com` by this code: every test uses a stand-in. Unknown until a first attended download: whether it redirects, and where (a redirect off `dl.google.com`, to an edge host say, is not followed, and the step falls back to the owner's own download; following one would be a new decision, with the host named); whether it honours `Range` (if not, a download that broke off starts over, which the core handles); whether it sends `Content-Length`; and whether it lets a web page read its files (§7). The command-line path is expected to work; the browser path may always fall back.
+- **Google's words on the terms step** are the sentences given with the decision, as constants. Nothing checks them against Google's page, and Google can change its page. Someone has to compare them before a release, and whenever the page changes.
+- **Shipping files extracted from a factory image ourselves** (so that an owner needs no factory image at all) is a separate question from decision 11, and it is not decided. Today the project hosts none of Google's files.
+- **What the installer does with the factory image after checking it.** Nothing yet: the flow ends at the dry run. The page keeps no byte of a download, so a later version there needs storage and resume (below).
 - **Restarting an Android phone into Fastboot Mode** (adb). The phone screen gives the key combination.
 - **How the owner unlocks from the web page.** The command needs Android's fastboot tool on the computer, which the plan says a person should never have to install.
 - **Delivering the owner's answers** (`firstboot.conf`): over the install link (plan M2) or written into the image. Until then no front end may write.
@@ -185,8 +234,10 @@ Not built, in the order a real install needs them:
 
 - `core/tests/flow.rs`: each state and each stop against the pretend phone; each test also checks that only `getvar` reached it, and for a locked phone at the unlock steps `flashing get_unlock_ability`, counted. The override's properties, one by one: it passes the one-slot stop in a dry run and says so on every screen, it passes no other stop, and a session that could write refuses it before anything is sent.
 - `core/src/fastboot.rs` (unit tests, where the private command layer is): of the `flashing` and `oem` families only the one question is sent, nothing off the list of commands is sent, and an answer is a plain yes or no or nothing is concluded.
+- `core/tests/factory_download.rs`: the terms step's words and that nothing is downloaded or taken before it is answered; the acceptance and its date; declining; and each property of the download against a stand-in that is a function in the test: the address is the signed index's, redirects on and off Google's host, the size before and during the transfer, the SHA-256, going on from kept bytes with the hash from the first byte, progress, and each fallback.
 - `core/tests/build_index.rs`: every field's rule on the real cheetah index (`fixtures/index/`) and on changed copies; the match; trust.
 - `cli/tests/flow_fake_phone.rs` (`--features fake-phone`): the built tool with typed input.
-- `web/selftest.sh`: the page in a headless Chromium, clicked through every state against the pretend phone, under the strict Content-Security-Policy. The browser is started with WebUSB off and, where bubblewrap is installed, without USB device nodes.
+- `cli/tests/factory_download.rs` (the same feature): the built tool downloading from a stand-in for Google's server, a socket on 127.0.0.1 in the test: the terms before the first request, the file in the work directory, a download that broke off going on in a later run and in the same one with `Range`, a spoiled part found out and deleted, files that are not the listed one, redirects, and that a pretend run can't reach Google.
+- `web/selftest.sh`: the page in a headless Chromium, clicked through every state against the pretend phone, under the strict Content-Security-Policy. Its downloads go to a stand-in that `web/serve.py --stand-in` runs on another port, which takes `dl.google.com`'s place in the policy, so the run can reach nothing of Google's: a server that lets the page read and one that does not, one that can't be reached, wrong bytes, too many, another size, redirects, a missing file and a transfer that breaks off. The browser is started with WebUSB off and, where bubblewrap is installed, without USB device nodes.
 
 A check counts only if it fails when what it guards is removed. For this milestone that was tried by hand, one change at a time; the pull request lists the changes and what caught each.
