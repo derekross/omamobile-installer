@@ -4,6 +4,7 @@
 //! files.
 use omamobile_link::digest::sha256;
 use omamobile_link::msg::FactoryBegin;
+use omamobile_link::msg::{Code, StepResult, StepState};
 use omamobile_link::phone::{PartFound, Persistent, PhoneConfig};
 use omamobile_link::sim::{SimPhone, TestRng};
 
@@ -11,14 +12,17 @@ use omamobile_link::sim::{SimPhone, TestRng};
 pub const SERIAL: &[u8] = b"<SERIAL>";
 /// Small frames, so a small image is many of them.
 pub const MAX_DATA: u32 = 1024;
-pub const ACK_EVERY: u64 = 4096;
+pub const TEST_ACK_EVERY: u64 = 4096;
+/// Twice that, as on the phone: eight frames may be under way unacknowledged.
+pub const TEST_WINDOW: u64 = 2 * TEST_ACK_EVERY;
 /// 10 frames, the last one short; acknowledged at 4096, 8192 and the end.
 pub const IMAGE_LEN: usize = 9 * 1024 + 100;
 
 pub fn phone_config() -> PhoneConfig {
     let mut c = PhoneConfig::new("0.0.1", "cheetah", SERIAL);
     c.max_data = MAX_DATA;
-    c.ack_every = ACK_EVERY;
+    c.ack_every = TEST_ACK_EVERY;
+    c.window = TEST_WINDOW;
     c
 }
 
@@ -59,12 +63,52 @@ pub fn parts() -> Vec<(PartFound, Vec<u8>)> {
     .collect()
 }
 
-pub fn sim_phone(state: Persistent, new_boot: bool, code_screen: bool, seed: u64) -> SimPhone {
-    let mut cfg = phone_config();
-    cfg.code_screen = code_screen;
-    let mut p = SimPhone::new(cfg, state, new_boot, 0, seed);
+/// A phone whose files are what a link at `state` left, the daemon started.
+pub fn sim_phone(state: Persistent, new_boot: bool, seed: u64) -> SimPhone {
+    let mut p = SimPhone::new(phone_config(), state, new_boot, 0, seed);
     p.parts = parts();
     p
+}
+
+/// A freshly installed phone at its first start.
+pub fn new_phone(seed: u64) -> SimPhone {
+    let mut p = SimPhone::first_start(phone_config(), 0, seed);
+    p.parts = parts();
+    p
+}
+
+/// The owner's session is up and its agent is connected to the daemon.
+pub fn session_up(p: &mut SimPhone, now: u64) {
+    p.feed(now, PhoneInput::SessionUp);
+    p.feed(now, PhoneInput::AgentUp);
+}
+
+/// The owner taps the notice in the unlocked session: the code in the window.
+pub fn tap(p: &mut SimPhone, now: u64) -> Code {
+    p.feed(now, PhoneInput::AgentShow);
+    p.phone.code().expect("the window shows a code")
+}
+
+/// A worker's result file: every step `ok`, or one of them `failed`.
+pub fn result(failed: Option<&str>) -> Vec<StepResult> {
+    [
+        "firmware",
+        "sensors",
+        "gnss",
+        "modem",
+        "fingerprint",
+        "camera",
+    ]
+    .into_iter()
+    .map(|step| StepResult {
+        step: step.into(),
+        state: if failed == Some(step) {
+            StepState::Failed
+        } else {
+            StepState::Ok
+        },
+    })
+    .collect()
 }
 
 // --- The installer's side, and the loopback ---------------------------------
@@ -82,7 +126,7 @@ pub fn host_config() -> HostConfig {
 pub fn rig() -> Loopback {
     let mut host = SimHost::new(host_config());
     host.factory = image();
-    Loopback::new(sim_phone(Persistent::default(), true, true, 1), host)
+    Loopback::new(new_phone(1), host)
 }
 
 /// Connect and pair with the code on the phone's screen.
@@ -111,14 +155,8 @@ pub fn set_up() -> Loopback {
     lb
 }
 
-/// The phone restarts: a new daemon from the state file, the session on the
-/// screen (no code), the same partitions and image file.
+/// The phone restarts: the daemon starts again from what is on the phone.
 pub fn reboot(lb: &mut Loopback) {
     lb.cut();
-    let state = lb.phone.state_file.clone();
-    let mut p = sim_phone(state, true, false, 99);
-    p.factory_file = core::mem::take(&mut lb.phone.factory_file);
-    p.sums = lb.phone.sums.take();
-    p.conf = lb.phone.conf.take();
-    lb.phone = p;
+    lb.phone.start(true, lb.now);
 }

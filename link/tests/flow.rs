@@ -43,29 +43,22 @@ fn finish_from_set_up(lb: &mut Loopback) {
 
     lb.command(Command::Provision);
     assert_eq!(lb.phone.provision_starts, 1);
-    let steps = vec![
-        StepResult {
-            step: "firmware".into(),
-            state: StepState::Ok,
-        },
-        StepResult {
-            step: "camera".into(),
-            state: StepState::Failed,
-        },
-    ];
+    // The camera step alone failed: a success with a note (§6.6)
+    let steps = result(Some("camera"));
     lb.phone_input(PhoneInput::ProvisionEnded {
-        steps: steps.clone(),
-        failed: None,
+        result: Some(steps.clone()),
     });
     assert!(
         lb.saw(|e| *e
             == Event::ProvisionDone {
-                steps: steps.clone()
+                steps: steps.clone(),
+                optional_failed: vec!["camera".into()]
             }),
         "{:?}",
         lb.host.events
     );
     assert_eq!(lb.phone.phone.stage(), Stage::Provisioned);
+    assert_eq!(lb.phone.state_file.optional_failed, ["camera"]);
     assert!(
         lb.phone.factory_file.is_empty(),
         "the image is gone once provisioning succeeded"
@@ -78,7 +71,11 @@ fn finish_from_set_up(lb: &mut Loopback) {
     lb.connect();
     assert!(lb.saw(|e| *e == Event::Restarted), "{:?}", lb.host.events);
 
-    lb.phone_input(PhoneInput::DesktopUp);
+    session_up(&mut lb.phone, lb.now);
+    // The planned restart was taken: a second one is not the link's to give
+    lb.host.take_events();
+    lb.command(Command::Restart);
+    assert!(lb.saw(|e| *e == Event::Restarted) && lb.phone.restarts == 1);
     lb.command(Command::Smoke);
     assert!(
         lb.saw(|e| matches!(e, Event::SmokeReport(_))),
@@ -88,6 +85,8 @@ fn finish_from_set_up(lb: &mut Loopback) {
     lb.command(Command::Finish);
     assert!(lb.saw(|e| *e == Event::Finished), "{:?}", lb.host.events);
     assert!(lb.phone.finished && lb.phone.phone.stopped());
+    assert_eq!(lb.phone.done.as_deref(), Some("finished"));
+    assert!(!lb.phone.marker && !lb.phone.state_exists);
     assert_eq!(lb.phone.state_file.stage, Stage::Finished);
     assert_eq!(lb.phone.state_file.token_hash, None);
     assert_eq!(lb.host.token, None);
@@ -99,9 +98,11 @@ fn the_straight_path() {
     // The answers reached first boot as a firstboot.conf, value for value
     let conf = lb
         .phone
-        .conf
+        .started_with
         .clone()
         .expect("first boot was started with a file");
+    assert_eq!(lb.phone.conf, None, "which first boot deleted when done");
+    assert!(lb.phone.boot_update_conf, "the plan's Q3");
     assert!(
         conf.contains("USERNAME=owner\n") && conf.contains("TIMEZONE=Europe/Berlin\n"),
         "{conf}"
@@ -192,7 +193,7 @@ fn wrong_codes_up_to_the_limit() {
             assert_eq!(lb.phone.phone.code(), before);
             continue;
         }
-        // The fifth: a new code, and a lock that doubles
+        // The fifth: a new code, and a lock
         let wait = lb.host.events.iter().find_map(|e| match e {
             Event::Locked { wait_s } => Some(*wait_s),
             _ => None,
@@ -211,8 +212,9 @@ fn wrong_codes_up_to_the_limit() {
                 lb.host.events
             );
             assert_eq!(lb.phone.phone.wrong_tries(), n);
-            // After the wait the host says hello again by itself and may try
-            lb.advance(wait.unwrap() as u64 * 1000);
+            // The host asks again every five seconds, and may try when the
+            // wait is over
+            lb.advance(wait.unwrap() as u64 * 1000 + 5000);
             assert!(
                 lb.saw(|e| *e == Event::NeedCode),
                 "{n}: {:?}",
@@ -223,16 +225,25 @@ fn wrong_codes_up_to_the_limit() {
     assert_eq!(
         waits,
         vec![30, 60, 120, 0],
-        "30 s, doubling; the twentieth locks until a restart"
+        "30, 60 and 120 s; the twentieth locks until someone acts at the phone"
     );
     assert_eq!(lb.phone.phone.code(), None);
     assert!(lb.phone.screens.contains(&Screen::Locked { wait_s: 0 }));
-    // Nothing pairs now, however long the host waits
+    // Nothing pairs by a code now, however long the host waits
     lb.advance(3_600_000);
     assert!(!lb.phone.phone.paired());
     lb.cut();
     lb.connect();
     assert!(lb.saw(|e| *e == Event::Locked { wait_s: 0 }));
+    // One press of a volume key: a new code, and the count from nothing
+    lb.host.take_events();
+    lb.phone_input(PhoneInput::Key);
+    assert_eq!(lb.phone.phone.wrong_tries(), 0);
+    lb.advance(5000);
+    assert!(lb.saw(|e| *e == Event::NeedCode), "{:?}", lb.host.events);
+    let code = lb.phone.phone.code().unwrap();
+    lb.command(Command::Pair(code));
+    assert!(lb.host.host.ready());
 }
 
 #[test]
@@ -251,16 +262,23 @@ fn a_right_code_after_wrong_ones_pairs() {
     }
     lb.command(Command::Pair(right));
     assert!(lb.host.host.ready());
+    // A code is used once: the screen has another for the next time
+    assert_ne!(lb.phone.phone.code(), Some(right));
+    assert_eq!(
+        lb.phone.phone.wrong_tries(),
+        4,
+        "a right code does not reset the count"
+    );
 }
 
 #[test]
-fn a_wrong_token_is_a_wrong_try_and_the_code_still_works() {
+fn a_wrong_token_is_not_counted_and_the_code_still_works() {
     let mut lb = rig();
     let mut cfg = host_config();
     cfg.token = Some(Token([7; 32]));
     lb.host = SimHost::new(cfg);
     lb.connect();
-    // No token exists on the phone yet: `resume` is not allowed, nothing counted
+    // No token exists on the phone yet: `resume` is not allowed
     assert_eq!(lb.phone.phone.wrong_tries(), 0);
     assert!(lb.saw(|e| *e == Event::NeedCode), "{:?}", lb.host.events);
     let code = lb.phone.phone.code().unwrap();
@@ -272,7 +290,11 @@ fn a_wrong_token_is_a_wrong_try_and_the_code_still_works() {
     cfg.token = Some(Token([8; 32]));
     lb.host = SimHost::new(cfg);
     lb.connect();
-    assert_eq!(lb.phone.phone.wrong_tries(), 1);
+    assert_eq!(
+        lb.phone.phone.wrong_tries(),
+        0,
+        "a token is 256 random bits: counting guesses protects nothing"
+    );
     assert_eq!(lb.host.token, None, "the refused token is forgotten");
     assert!(lb.saw(|e| *e == Event::NeedCode));
 }
@@ -321,7 +343,7 @@ fn a_cut_at_every_frame_of_the_factory_image() {
             assert!(lb.saw(|e| *e == Event::LinkLost), "{dir:?} {k}");
             let kept = lb.phone.state_file.factory.as_ref().map_or(0, |f| f.synced);
             assert!(
-                kept.is_multiple_of(ACK_EVERY) || kept == IMAGE_LEN as u64,
+                kept.is_multiple_of(TEST_ACK_EVERY) || kept == IMAGE_LEN as u64,
                 "{dir:?} {k}: kept {kept}"
             );
             lb.host.take_events();
@@ -435,8 +457,8 @@ fn a_cut_at_every_frame_of_the_whole_install() {
 
 #[test]
 fn a_wrong_image_digest() {
-    // What arrives is not what was announced: the phone deletes it, says so
-    // and counts a wrong try; the stage does not move.
+    // What arrives is not what was announced: the phone deletes it and says
+    // so; nothing is counted (§2.5), and the stage does not move.
     let mut lb = set_up();
     lb.phone.damage_factory = Some(5000);
     lb.command(Command::Factory(factory_begin(&image())));
@@ -447,7 +469,7 @@ fn a_wrong_image_digest() {
     );
     assert!(lb.phone.factory_file.is_empty());
     assert_eq!(lb.phone.state_file.factory, None);
-    assert_eq!(lb.phone.phone.wrong_tries(), 1);
+    assert_eq!(lb.phone.phone.wrong_tries(), 0);
     assert!(lb.phone.screens.contains(&Screen::Damaged));
     assert_eq!(lb.phone.phone.stage(), Stage::FirstbootDone);
     // `provision` is refused without a verified image
@@ -477,7 +499,7 @@ fn a_wrong_image_digest() {
     begin.sha256[0] ^= 1;
     lb.command(Command::Factory(begin));
     assert!(refused(&lb, "factory", "factory-mismatch"));
-    assert_eq!(lb.phone.phone.wrong_tries(), 1);
+    assert_eq!(lb.phone.phone.wrong_tries(), 0);
 }
 
 #[test]
@@ -643,8 +665,7 @@ fn provisioning_needs_power_and_reports_a_failed_step() {
     }));
     assert!(lb.saw(|e| matches!(e, Event::Progress(p) if p.step == "firmware")));
     lb.phone_input(PhoneInput::ProvisionEnded {
-        steps: vec![],
-        failed: Some("modem".into()),
+        result: Some(result(Some("modem"))),
     });
     assert!(
         lb.saw(|e| matches!(e, Event::Refused { step: "provision", error }
@@ -662,10 +683,11 @@ fn provisioning_needs_power_and_reports_a_failed_step() {
     lb.command(Command::Provision);
     assert_eq!(lb.phone.provision_starts, 2);
     lb.phone_input(PhoneInput::ProvisionEnded {
-        steps: vec![],
-        failed: None,
+        result: Some(result(None)),
     });
-    assert!(lb.saw(|e| matches!(e, Event::ProvisionDone { .. })));
+    assert!(lb.saw(
+        |e| matches!(e, Event::ProvisionDone { optional_failed, .. } if optional_failed.is_empty())
+    ));
 }
 
 #[test]
@@ -675,19 +697,36 @@ fn provisioning_goes_on_without_the_host() {
     lb.command(Command::Factory(factory_begin(&image())));
     lb.command(Command::Provision);
     lb.cut();
+    // The camera step alone fails while nobody listens (§6.6)
     lb.phone_input(PhoneInput::ProvisionEnded {
-        steps: vec![],
-        failed: None,
+        result: Some(result(Some("camera"))),
     });
     assert_eq!(lb.phone.state_file.stage, Stage::Provisioned);
     lb.host.take_events();
     lb.connect();
-    // The step is taken up, sees the stage and ends without sending `provision` again
+    // The step is taken up, sees the stage and ends without sending
+    // `provision` again; `status` still says what the lost event would
+    // have: "Cameras: not set up"
     assert!(
-        lb.saw(|e| *e == Event::ProvisionDone { steps: vec![] }),
+        lb.saw(|e| *e
+            == Event::ProvisionDone {
+                steps: vec![],
+                optional_failed: vec!["camera".into()]
+            }),
         "{:?}",
         lb.host.events
     );
+    // ... and so does a later run of the installer, in a later boot
+    reboot(&mut lb);
+    lb.host.take_events();
+    lb.connect();
+    lb.command(Command::Provision);
+    assert!(lb.saw(
+        |e| matches!(e, Event::ProvisionDone { optional_failed, .. } if optional_failed == &["camera"])
+    ));
+    // There is nothing to provision again from: the image is gone, and
+    // `provision` at `provisioned` is not allowed
+    assert!(lb.phone.factory_file.is_empty() && !lb.phone.factory_exists);
     assert_eq!(lb.phone.provision_starts, 1);
 }
 
@@ -847,49 +886,9 @@ fn a_lost_repeated_swapped_or_damaged_frame_ends_the_session_and_the_install_goe
                 assert_eq!(lb.host.backup[&found.name], bytes, "{what} {dir:?}");
             }
             assert_eq!(lb.phone.factory_file, image(), "{what} {dir:?}");
-            assert!(lb.phone.phone.wrong_tries() <= 1, "{what} {dir:?}");
+            assert_eq!(lb.phone.phone.wrong_tries(), 0, "{what} {dir:?}");
         }
     }
-}
-
-#[test]
-fn the_link_finishes_itself_when_the_computer_never_comes_back() {
-    // Provisioned, restarted, and no installer: ten minutes after the
-    // session is up in each of three boots, then the end.
-    let state = Persistent {
-        stage: Stage::Provisioned,
-        token_hash: Some([1; 32]),
-        ..Persistent::default()
-    };
-    let mut state = state;
-    for boot in 1..=3u8 {
-        let mut p = sim_phone(state.clone(), true, false, 5);
-        assert_eq!(p.state_file.late_boots, boot);
-        assert_eq!(p.state_file.boot, 2);
-        assert!(!p.finished);
-        if boot == 1 {
-            p.feed(0, PhoneInput::DesktopUp);
-            assert_eq!(p.phone.deadline(), Some(600_000));
-            p.feed(599_999, PhoneInput::Tick);
-            assert!(!p.finished);
-            p.feed(600_000, PhoneInput::Tick);
-            assert!(p.finished);
-            assert_eq!(p.state_file.stage, Stage::Finished);
-            assert_eq!(p.state_file.token_hash, None);
-        } else {
-            state = p.state_file.clone();
-        }
-        if boot == 1 {
-            // Take the other road for the next boots: the phone restarted before the ten minutes
-            state = Persistent {
-                late_boots: 1,
-                boot: 2,
-                ..state
-            };
-        }
-    }
-    let p = sim_phone(state, true, false, 5);
-    assert!(p.finished, "a fourth boot does not offer the link");
 }
 
 #[test]

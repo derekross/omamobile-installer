@@ -7,6 +7,9 @@
 //! The flow asks for one step at a time with a [`Command`]; the machine does
 //! the step's messages, and after a lost link it says `hello` again, pairs
 //! again with the token and takes the step up where the phone says it is.
+//! Every `hello` carries a nonce drawn anew; until the phone echoes it,
+//! whatever arrives is passed over, so an answer left from another run of
+//! the installer is never taken for this one's (INSTALL-LINK-PLAN §5.3).
 //!
 //! There is no way to send bytes of the caller's choosing: a command is one
 //! of a closed list, and each becomes typed messages (INSTALL-LINK-PLAN
@@ -16,7 +19,7 @@ use crate::digest::{ct_eq, serial_proof};
 use crate::frame::{self, FrameError, Kind, DEFAULT_MAX_DATA, MAX_DATA_LIMIT, MIN_MAX_DATA};
 use crate::json::Value;
 use crate::msg::*;
-use crate::PROTOCOL;
+use crate::{Entropy, PROTOCOL};
 
 /// Names the answer to an effect.
 pub type Ticket = u64;
@@ -33,6 +36,12 @@ pub const BUSY_TRIES: u32 = 120;
 /// Sessions that ended in a protocol error, one after the other, before the
 /// machine stops trying.
 pub const STRIKES: u32 = 3;
+/// While the phone shows no code and this run holds no token, `hello` is
+/// said again this often (§2.8).
+pub const REHELLO_MS: u64 = 5_000;
+/// A transfer whose stream the phone suspended is begun again this many
+/// times before the step gives up.
+pub const FACTORY_TRIES: u32 = 5;
 
 /// What the installer knows before any frame.
 #[derive(Clone, PartialEq, Eq)]
@@ -45,11 +54,6 @@ pub struct HostConfig {
     pub serial: Vec<u8>,
     /// The token a run before this one recorded.
     pub token: Option<Token>,
-    /// The number of this run's first message. A run should not begin where
-    /// the one before it did: an answer to that run's `hello`, still under
-    /// way on the bus, would be taken for the answer to this one's. The time
-    /// in seconds, or a random number, will do (LINK.md D3).
-    pub first_id: u64,
 }
 
 impl HostConfig {
@@ -61,7 +65,6 @@ impl HostConfig {
             max_data: DEFAULT_MAX_DATA,
             serial: serial.to_vec(),
             token: None,
-            first_id: 1,
         }
     }
 }
@@ -151,9 +154,13 @@ pub enum HostEffect {
     BackupDiscard {
         name: String,
     },
-    /// Every partition is verified and the phone has committed: write
-    /// `SHA256SUMS`, `partitions.txt` and `NV-BACKUP` as `tools/nv-backup` does.
+    /// Every partition is verified: write `SHA256SUMS`, `partitions.txt`
+    /// and `NV-BACKUP` as `tools/nv-backup` does, and sync them and the
+    /// directory. `backup-commit` is sent only after this has succeeded, so
+    /// a backup the phone has recorded as done is whole on the computer
+    /// (§5.5). Answer: [`HostOutcome::Done`].
     BackupFinish {
+        ticket: Ticket,
         parts: Vec<(BackupPart, [u8; 32])>,
     },
     /// `len` bytes of the factory image at `offset`. Answer: [`HostOutcome::Data`].
@@ -168,6 +175,7 @@ pub enum HostEffect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostOutcome {
     Failed,
+    Done,
     Have(u64),
     Digest([u8; 32]),
     Data(Vec<u8>),
@@ -180,8 +188,6 @@ pub enum Stop {
     WrongPhone,
     /// No protocol number in common; the phone's list.
     Version { phone: Vec<u32> },
-    /// The phone can show no code and this run holds no token it takes.
-    CannotPair,
     /// The phone keeps answering outside protocol 1.
     Protocol,
 }
@@ -195,12 +201,20 @@ pub enum Event {
         device: String,
         link: String,
     },
-    /// Ask the owner for the code on the phone's screen.
+    /// Ask the owner for the code the phone shows.
     NeedCode,
+    /// The phone shows no code, and the owner can make it show one: "Unlock
+    /// your phone and tap Setup is not finished" (§2.8). The machine says
+    /// `hello` again every five seconds until a code is there.
+    NeedTap,
+    /// The phone can show no code now and this run holds no token: the
+    /// owner's session is not up. The machine keeps asking.
+    NeedSession,
     WrongCode {
         left: u32,
     },
-    /// Pairing is locked; 0 is until the phone restarts.
+    /// `pair` is locked; 0 is until someone acts at the phone (a volume
+    /// key, or a tap on the notice) or it restarts.
     Locked {
         wait_s: u32,
     },
@@ -231,8 +245,11 @@ pub enum Event {
     },
     FactoryVerified,
     /// Empty `steps`: learned from `status`, the list was missed.
+    /// `optional_failed` is there either way: the optional steps that
+    /// failed in the run that succeeded ("Cameras: not set up", §6.6).
     ProvisionDone {
         steps: Vec<StepResult>,
+        optional_failed: Vec<String>,
     },
     Restarting,
     Restarted,
@@ -288,15 +305,16 @@ pub enum HostOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Conn {
     Down,
-    Hello {
-        id: u64,
-    },
+    /// `hello` is out: every frame is passed over until one echoes its nonce.
+    Hello,
     NeedCode,
     Pairing {
         id: u64,
         by_code: bool,
     },
-    /// Locked, or closed with `bye`: nothing goes out until something changes.
+    /// No code is shown and no token is held: `hello` again in a while.
+    Waiting,
+    /// Closed with `bye`, or finished: nothing goes out until something changes.
     Idle,
     Ready,
     Stopped,
@@ -321,10 +339,15 @@ enum Phase {
     BVerify {
         digest: [u8; 32],
     },
+    BFinish(Ticket),
     BCommit,
     FBegin,
     FRead {
         ticket: Ticket,
+        offset: u64,
+    },
+    /// At the window's edge: nothing more is sent until an `ack` is read.
+    FWait {
         offset: u64,
     },
     FEnd,
@@ -341,6 +364,9 @@ struct Step {
     parts: Vec<BackupPart>,
     sums: Vec<[u8; 32]>,
     tries: u32,
+    /// The image: the last acknowledged offset read, and the window.
+    acked: u64,
+    window: u64,
 }
 
 /// The computer's side of the link.
@@ -353,7 +379,13 @@ pub struct Host {
     rx_next: u32,
     next_id: u64,
     max_data: u32,
+    /// The nonce of the `hello` that is out, or that began this session.
+    host_nonce: [u8; 32],
+    /// The phone's.
     nonce: [u8; 32],
+    hello_due: bool,
+    discarded: u64,
+    said: Option<(PairMode, bool)>,
     pair: PairMode,
     stage: Stage,
     token: Option<Token>,
@@ -380,13 +412,17 @@ impl Host {
         Host {
             token: cfg.token,
             max_data: cfg.max_data,
-            next_id: cfg.first_id.clamp(1, 1 << 52),
+            next_id: 1,
             cfg,
             link_up: false,
             conn: Conn::Down,
             tx_next: 0,
             rx_next: 0,
+            host_nonce: [0; 32],
             nonce: [0; 32],
+            hello_due: false,
+            discarded: 0,
+            said: None,
             pair: PairMode::Locked,
             stage: Stage::Waiting,
             step: None,
@@ -417,16 +453,22 @@ impl Host {
     pub fn max_data(&self) -> u32 {
         self.max_data
     }
+    /// Frames passed over while waiting for the answer to this run's own
+    /// `hello`: what another run, or a session that is over, left on the bus.
+    pub fn discarded(&self) -> u64 {
+        self.discarded
+    }
 
     fn awaiting(&self) -> bool {
         match (&self.conn, &self.step) {
-            (Conn::Hello { .. } | Conn::Pairing { .. }, _) => true,
+            (Conn::Hello | Conn::Pairing { .. }, _) => true,
             (Conn::Ready, Some(s)) => !matches!(
                 s.phase,
                 Phase::Start
                     | Phase::Wait
                     | Phase::BOpen(_)
                     | Phase::BHash(_)
+                    | Phase::BFinish(_)
                     | Phase::FRead { .. }
             ),
             _ => false,
@@ -450,7 +492,14 @@ impl Host {
     }
 
     /// One step: what happened at `now` (milliseconds), and what to do.
-    pub fn handle(&mut self, now: u64, input: HostInput<'_>) -> Vec<HostOutput> {
+    /// `rng` is the operating system's source (`crypto.getRandomValues` in
+    /// the page): each `hello` draws its nonce from it.
+    pub fn handle(
+        &mut self,
+        now: u64,
+        input: HostInput<'_>,
+        rng: &mut dyn Entropy,
+    ) -> Vec<HostOutput> {
         let mut out = Vec::new();
         if self.conn == Conn::Stopped {
             return out;
@@ -458,7 +507,8 @@ impl Host {
         match input {
             HostInput::LinkUp => {
                 self.link_up = true;
-                self.hello(now, &mut out);
+                self.said = None;
+                self.hello();
             }
             HostInput::LinkDown => {
                 self.link_up = false;
@@ -467,6 +517,7 @@ impl Host {
                 }
                 self.conn = Conn::Down;
                 self.rehello_at = None;
+                self.hello_due = false;
                 self.rewind();
             }
             HostInput::Frame(bytes) => self.on_frame(now, bytes, &mut out),
@@ -474,6 +525,9 @@ impl Host {
             HostInput::Command(cmd) => self.on_command(now, cmd, &mut out),
             HostInput::Done(ticket, outcome) => self.on_done(now, ticket, outcome, &mut out),
             HostInput::Fault => self.fail_step(now, &mut out),
+        }
+        if core::mem::take(&mut self.hello_due) && self.conn != Conn::Stopped {
+            self.say_hello(now, rng, &mut out);
         }
         out
     }
@@ -498,25 +552,30 @@ impl Host {
         Some(id)
     }
 
-    /// `hello` is always frame 0 and starts the numbering again (LINK.md D2).
-    fn hello(&mut self, now: u64, out: &mut Out) {
+    /// Start again from `hello`: it goes out when this input is done with.
+    fn hello(&mut self) {
         self.rehello_at = None;
-        if !self.link_up {
-            self.conn = Conn::Down;
-            return;
-        }
+        self.conn = Conn::Down;
+        self.rewind();
+        self.hello_due = self.link_up;
+    }
+
+    /// `hello` is always frame 0 and starts the numbering again, with a
+    /// nonce that names this `hello` and no other (§5.3).
+    fn say_hello(&mut self, now: u64, rng: &mut dyn Entropy, out: &mut Out) {
         self.tx_next = 0;
         self.rx_next = 0;
         self.max_data = self.cfg.max_data;
-        self.rewind();
+        rng.fill(&mut self.host_nonce);
         let h = HostHello {
             proto: self.cfg.protos.clone(),
             installer_name: self.cfg.installer_name.clone(),
             installer_version: self.cfg.installer_version.clone(),
             max_data: self.cfg.max_data,
+            nonce: self.host_nonce,
         };
         match self.send(now, HostMsg::Hello(h), out) {
-            Some(id) => self.conn = Conn::Hello { id },
+            Some(_) => self.conn = Conn::Hello,
             None => self.stop(Stop::Protocol, out),
         }
     }
@@ -546,7 +605,7 @@ impl Host {
     }
 
     /// The session is over without `bye`: say so, and start again.
-    fn lost(&mut self, now: u64, strike: bool, out: &mut Out) {
+    fn lost(&mut self, _now: u64, strike: bool, out: &mut Out) {
         ev(out, Event::LinkLost);
         if strike {
             self.strikes += 1;
@@ -554,38 +613,63 @@ impl Host {
                 return self.stop(Stop::Protocol, out);
             }
         }
-        self.hello(now, out);
+        self.hello();
+    }
+
+    /// No code is shown and this run holds no token: tell the flow what the
+    /// owner can do about it, once, and say `hello` again in five seconds.
+    fn wait_for_owner(&mut self, now: u64, mode: PairMode, wait_s: u32, out: &mut Out) {
+        self.conn = Conn::Waiting;
+        self.rehello_at = Some(now + REHELLO_MS);
+        let key = (mode, wait_s == 0);
+        if self.said != Some(key) {
+            self.said = Some(key);
+            ev(
+                out,
+                match mode {
+                    PairMode::Ask => Event::NeedTap,
+                    PairMode::Token => Event::NeedSession,
+                    _ => Event::Locked { wait_s },
+                },
+            );
+        }
     }
 
     // --- Frames ----------------------------------------------------------------
 
     fn on_frame(&mut self, now: u64, bytes: &[u8], out: &mut Out) {
         let decoded = frame::decode(bytes, self.max_data);
-        if let Conn::Hello { id } = self.conn {
-            // Until the phone's own `hello` (frame 0, answering ours),
-            // whatever arrives is from a session that is over.
-            let Ok(f) = decoded else { return };
-            if f.kind != Kind::Message || f.seq != 0 {
-                return;
-            }
-            let Ok(PhoneFrame { re: Some(re), msg }) = PhoneFrame::parse(f.payload) else {
+        if self.conn == Conn::Hello {
+            // From sending `hello` until a frame echoes its nonce, every
+            // frame is passed over, whatever its seq, `re` or digest, and
+            // none is counted as an error: it is from another run of the
+            // installer, or from a session that is over (§5.3).
+            let mine = decoded.ok().and_then(|f| {
+                if f.kind != Kind::Message || f.seq != 0 {
+                    return None;
+                }
+                match PhoneFrame::parse(f.payload).ok()?.msg {
+                    PhoneMsg::Hello(h) if h.host_nonce == self.host_nonce => Some(Ok(h)),
+                    PhoneMsg::Error(ErrorMsg {
+                        code: ErrorCode::Version { proto, host_nonce },
+                        ..
+                    }) if host_nonce == self.host_nonce => Some(Err(proto)),
+                    _ => None,
+                }
+            });
+            let Some(answer) = mine else {
+                self.discarded += 1;
                 return;
             };
-            if re != id {
-                return;
-            }
+            // That frame is frame 0; from it on `seq` is checked
             self.rx_next = 1;
             self.quiet_since = now;
-            return match msg {
-                PhoneMsg::Hello(h) => self.on_hello(now, h, out),
-                PhoneMsg::Error(ErrorMsg {
-                    code: ErrorCode::Version { proto },
-                    ..
-                }) => self.stop(Stop::Version { phone: proto }, out),
-                _ => self.lost(now, true, out),
+            return match answer {
+                Ok(h) => self.on_hello(now, h, out),
+                Err(phone) => self.stop(Stop::Version { phone }, out),
             };
         }
-        if matches!(self.conn, Conn::Down | Conn::Idle) {
+        if matches!(self.conn, Conn::Down | Conn::Idle | Conn::Waiting) {
             return;
         }
         let f = match decoded {
@@ -619,24 +703,21 @@ impl Host {
                 link: h.link,
             },
         );
-        match (h.pair, self.token) {
-            (PairMode::Locked, _) => {
-                self.conn = Conn::Idle;
-                ev(out, Event::Locked { wait_s: h.wait_s });
-                if h.wait_s > 0 {
-                    self.rehello_at = Some(now + h.wait_s as u64 * 1000 + 500);
-                }
-            }
-            (_, Some(token)) => match self.send(now, HostMsg::Resume { token }, out) {
+        match (self.token, h.pair) {
+            // `resume` is taken in every one of the four, a lock included
+            (Some(token), _) => match self.send(now, HostMsg::Resume { token }, out) {
                 Some(id) => self.conn = Conn::Pairing { id, by_code: false },
                 None => self.stop(Stop::Protocol, out),
             },
-            (PairMode::Code, None) => {
-                self.conn = Conn::NeedCode;
-                ev(out, Event::NeedCode);
-            }
-            (PairMode::Token, None) => self.stop(Stop::CannotPair, out),
+            (None, PairMode::Code) => self.need_code(out),
+            (None, mode) => self.wait_for_owner(now, mode, h.wait_s, out),
         }
+    }
+
+    fn need_code(&mut self, out: &mut Out) {
+        self.conn = Conn::NeedCode;
+        self.said = None;
+        ev(out, Event::NeedCode);
     }
 
     fn on_data(&mut self, now: u64, offset: u64, payload: &[u8], out: &mut Out) {
@@ -649,7 +730,7 @@ impl Host {
         let (Phase::BData { next }, Some(part)) = (&mut s.phase, s.parts.get(s.sums.len())) else {
             return self.lost(now, true, out);
         };
-        let end = offset + payload.len() as u64;
+        let end = offset.saturating_add(payload.len() as u64);
         if offset != *next || end > part.size {
             return self.lost(now, true, out);
         }
@@ -695,6 +776,20 @@ impl Host {
                 }
                 return self.lost(now, false, out);
             }
+            (None, PhoneMsg::Error(e)) if e.code == ErrorCode::NotAllowed => {
+                // A data frame of ours met no open stream (§5.1): the phone
+                // suspended it behind our back, or `abort` overtook it. Not
+                // an error of either side's.
+                let at = self.step.as_ref().map(|s| (&s.cmd, &s.phase));
+                return match at {
+                    Some((Command::Factory(_), Phase::FRead { .. } | Phase::FWait { .. })) => {
+                        self.factory_again(now, out)
+                    }
+                    // The answer to `factory-end`, or to `abort`, follows
+                    Some((Command::Factory(_), Phase::FEnd)) | Some((Command::Abort, _)) => {}
+                    _ => self.lost(now, true, out),
+                };
+            }
             (None, PhoneMsg::ProvisionDone { .. } | PhoneMsg::Error(_)) => {
                 // The end of provisioning comes by itself, whatever the
                 // flow is doing. A step that waits for it ends with it; one
@@ -704,7 +799,17 @@ impl Host {
                     .as_ref()
                     .map(|s| (s.cmd == Command::Provision, s.phase == Phase::Wait));
                 let event = match m.msg {
-                    PhoneMsg::ProvisionDone { steps } => Event::ProvisionDone { steps },
+                    PhoneMsg::ProvisionDone { steps } => {
+                        let optional_failed = steps
+                            .iter()
+                            .filter(|s| s.state == StepState::Failed)
+                            .map(|s| s.step.clone())
+                            .collect();
+                        Event::ProvisionDone {
+                            steps,
+                            optional_failed,
+                        }
+                    }
                     PhoneMsg::Error(error)
                         if matches!(error.code, ErrorCode::ProvisionFailed { .. }) =>
                     {
@@ -748,12 +853,19 @@ impl Host {
                     return;
                 }
                 ErrorCode::NotPaired => return self.lost(now, false, out),
+                // `factory-end` met a suspended stream: begin again, and go
+                // on from the offset the phone answers
+                ErrorCode::NotAllowed
+                    if step.phase == Phase::FEnd && step.tries + 1 < FACTORY_TRIES =>
+                {
+                    return self.factory_again(now, out);
+                }
                 ErrorCode::BackupMismatch if matches!(step.phase, Phase::BVerify { .. }) => {
                     let part = step.parts[step.sums.len()].name.clone();
                     do_(out, HostEffect::BackupDiscard { name: part });
                     step.tries += 1;
                     if step.tries < BACKUP_TRIES {
-                        return self.backup_next(now, out);
+                        return self.backup_next(out);
                     }
                 }
                 _ => {}
@@ -775,7 +887,7 @@ impl Host {
                 step.parts = parts;
                 step.sums.clear();
                 step.tries = 0;
-                self.backup_next(now, out)
+                self.backup_next(out)
             }
             (
                 Phase::BBegin { offset },
@@ -811,22 +923,53 @@ impl Host {
             (Phase::BVerify { digest }, Some(_), PhoneMsg::BackupVerified) => {
                 step.sums.push(digest);
                 step.tries = 0;
-                self.backup_next(now, out)
+                self.backup_next(out)
             }
-            (Phase::BCommit, Some(_), PhoneMsg::BackupDone) => {
-                let parts = step
-                    .parts
-                    .iter()
-                    .cloned()
-                    .zip(step.sums.iter().copied())
-                    .collect();
-                do_(out, HostEffect::BackupFinish { parts });
-                self.done(out, Event::BackupDone)
-            }
-            (Phase::FBegin, Some(_), PhoneMsg::FactoryReady { offset }) => {
+            (Phase::BCommit, Some(_), PhoneMsg::BackupDone) => self.done(out, Event::BackupDone),
+            (
+                Phase::FBegin,
+                Some(_),
+                PhoneMsg::FactoryReady {
+                    offset,
+                    ack_every,
+                    window,
+                },
+            ) => {
+                // A window that does not reach the next acknowledgement
+                // could never be left
+                if window < ack_every.saturating_add(self.max_data as u64) {
+                    return self.lost(now, true, out);
+                }
+                step.acked = offset;
+                step.window = window;
                 self.factory_next(now, offset, out)
             }
-            (Phase::FRead { .. } | Phase::FEnd, None, PhoneMsg::Ack { offset }) => {
+            (
+                Phase::FRead { offset: sent, .. } | Phase::FWait { offset: sent },
+                None,
+                PhoneMsg::Ack { offset },
+            ) => {
+                // The window's base: only ever forward, never past what
+                // was sent
+                if offset <= step.acked || offset > sent {
+                    return self.lost(now, true, out);
+                }
+                step.acked = offset;
+                step.tries = 0;
+                ev(out, Event::FactoryAcked { offset });
+                if step.phase == (Phase::FWait { offset: sent }) {
+                    self.factory_next(now, sent, out)
+                }
+            }
+            (Phase::FEnd, None, PhoneMsg::Ack { offset }) => {
+                let size = match &step.cmd {
+                    Command::Factory(b) => b.size,
+                    _ => 0,
+                };
+                if offset <= step.acked || offset > size {
+                    return self.lost(now, true, out);
+                }
+                step.acked = offset;
                 ev(out, Event::FactoryAcked { offset })
             }
             (Phase::FEnd, Some(_), PhoneMsg::FactoryVerified) => {
@@ -849,7 +992,8 @@ impl Host {
                 }
                 // The phone being set up is the phone that was flashed, or
                 // nothing more is said to it.
-                if !ct_eq(&proof, &serial_proof(&self.nonce, &self.cfg.serial)) {
+                let mine = serial_proof(&self.host_nonce, &self.nonce, &self.cfg.serial);
+                if !ct_eq(&proof, &mine) {
                     let _ = self.send(now, HostMsg::Bye, out);
                     return self.stop(Stop::WrongPhone, out);
                 }
@@ -859,30 +1003,29 @@ impl Host {
                 }
                 self.conn = Conn::Ready;
                 self.strikes = 0;
+                self.said = None;
                 ev(out, Event::Paired { stage: self.stage });
                 self.run(now, out);
             }
             PhoneMsg::Error(e) => match e.code {
-                ErrorCode::BadCode { left } => {
-                    self.conn = Conn::NeedCode;
+                ErrorCode::BadCode { left } if by_code => {
                     ev(out, Event::WrongCode { left });
-                    ev(out, Event::NeedCode);
+                    self.need_code(out);
                 }
-                ErrorCode::Locked { wait_s } => {
-                    self.conn = Conn::Idle;
-                    ev(out, Event::Locked { wait_s });
-                    if wait_s > 0 {
-                        self.rehello_at = Some(now + wait_s as u64 * 1000 + 500);
-                    }
+                ErrorCode::Locked { wait_s } if by_code => {
+                    self.wait_for_owner(now, PairMode::Locked, wait_s, out)
                 }
+                // The code went away between `hello` and `pair` (its window
+                // was closed, its ten minutes ran out): ask again
+                ErrorCode::NotAllowed if by_code => self.hello(),
+                // The phone holds another token, or none: this one is of no
+                // use any more. A code can still pair (§2.8).
                 ErrorCode::BadToken | ErrorCode::NotAllowed if !by_code => {
                     self.token = None;
                     do_(out, HostEffect::ForgetToken);
-                    if self.pair == PairMode::Code {
-                        self.conn = Conn::NeedCode;
-                        ev(out, Event::NeedCode);
-                    } else {
-                        self.stop(Stop::CannotPair, out);
+                    match self.pair {
+                        PairMode::Code => self.need_code(out),
+                        mode => self.wait_for_owner(now, mode, 0, out),
                     }
                 }
                 _ => self.lost(now, true, out),
@@ -926,7 +1069,7 @@ impl Host {
                 if self.conn == Conn::Ready {
                     self.run(now, out);
                 } else if self.conn == Conn::Idle && self.link_up {
-                    self.hello(now, out);
+                    self.hello();
                 }
             }
         }
@@ -1027,7 +1170,15 @@ impl Host {
             },
             Command::Provision => {
                 if !s.stage.before_provisioned() {
-                    self.done(out, Event::ProvisionDone { steps: Vec::new() })
+                    // The event was missed; `status` still says which
+                    // optional steps failed (§6.6)
+                    self.done(
+                        out,
+                        Event::ProvisionDone {
+                            steps: Vec::new(),
+                            optional_failed: s.provision_optional_failed,
+                        },
+                    )
                 } else if s.provision_state == JobState::Running {
                     step.phase = Phase::Wait;
                     step.id = None;
@@ -1089,7 +1240,7 @@ impl Host {
     }
 
     /// The next partition of the backup, or the commit.
-    fn backup_next(&mut self, now: u64, out: &mut Out) {
+    fn backup_next(&mut self, out: &mut Out) {
         let Some(step) = &mut self.step else { return };
         match step.parts.get(step.sums.len()) {
             Some(part) => {
@@ -1105,11 +1256,40 @@ impl Host {
                     },
                 );
             }
+            // §5.5: the backup's last files are written and synced before
+            // `backup-commit` is sent
             None => {
-                step.phase = Phase::BCommit;
-                self.ask(now, HostMsg::BackupCommit, out);
+                self.tickets += 1;
+                step.id = None;
+                step.phase = Phase::BFinish(self.tickets);
+                let parts = step
+                    .parts
+                    .iter()
+                    .cloned()
+                    .zip(step.sums.iter().copied())
+                    .collect();
+                do_(
+                    out,
+                    HostEffect::BackupFinish {
+                        ticket: self.tickets,
+                        parts,
+                    },
+                );
             }
         }
+    }
+
+    /// The image's stream is gone on the phone: `factory-begin` again, and
+    /// on from the offset it answers.
+    fn factory_again(&mut self, now: u64, out: &mut Out) {
+        let Some(step) = &mut self.step else { return };
+        step.tries += 1;
+        if step.tries >= FACTORY_TRIES {
+            return self.fail_step(now, out);
+        }
+        step.phase = Phase::Start;
+        step.id = None;
+        self.run(now, out);
     }
 
     /// The next piece of the factory image, or its end.
@@ -1125,13 +1305,20 @@ impl Host {
             step.phase = Phase::FEnd;
             return self.ask(now, HostMsg::FactoryEnd, out);
         }
-        self.tickets += 1;
+        let len = (b.size - offset).min(self.max_data as u64) as u32;
         step.id = None;
+        // §5.7: never a byte sent beyond the last acknowledgement read plus
+        // the window. At its edge: stop, and wait for an `ack`.
+        if offset + len as u64 > step.acked.saturating_add(step.window) {
+            step.phase = Phase::FWait { offset };
+            self.quiet_since = now;
+            return;
+        }
+        self.tickets += 1;
         step.phase = Phase::FRead {
             ticket: self.tickets,
             offset,
         };
-        let len = (b.size - offset).min(self.max_data as u64) as u32;
         do_(
             out,
             HostEffect::FactoryRead {
@@ -1197,11 +1384,17 @@ impl Host {
                     _ => self.fail_step(now, out),
                 }
             }
-            (Phase::BOpen(t) | Phase::BHash(t) | Phase::FRead { ticket: t, .. }, _)
-                if t == ticket =>
-            {
-                self.fail_step(now, out)
+            (Phase::BFinish(t), HostOutcome::Done) if t == ticket => {
+                step.phase = Phase::BCommit;
+                self.ask(now, HostMsg::BackupCommit, out);
             }
+            (
+                Phase::BOpen(t)
+                | Phase::BHash(t)
+                | Phase::BFinish(t)
+                | Phase::FRead { ticket: t, .. },
+                _,
+            ) if t == ticket => self.fail_step(now, out),
             _ => {} // an answer nobody waits for
         }
     }
@@ -1218,7 +1411,7 @@ impl Host {
         );
         let streaming = matches!(
             step.phase,
-            Phase::BBegin { .. } | Phase::BData { .. } | Phase::FRead { .. }
+            Phase::BBegin { .. } | Phase::BData { .. } | Phase::FRead { .. } | Phase::FWait { .. }
         );
         if streaming && self.conn == Conn::Ready {
             self.step = Some(new_step(Command::Abort));
@@ -1228,7 +1421,7 @@ impl Host {
 
     fn on_tick(&mut self, now: u64, out: &mut Out) {
         if self.rehello_at.is_some_and(|t| now >= t) {
-            return self.hello(now, out);
+            return self.hello();
         }
         if self.awaiting() && now >= self.quiet_since + SILENCE_MS {
             return self.lost(now, false, out);
@@ -1253,6 +1446,8 @@ fn new_step(cmd: Command) -> Step {
         parts: Vec::new(),
         sums: Vec::new(),
         tries: 0,
+        acked: 0,
+        window: 0,
     }
 }
 

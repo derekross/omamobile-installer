@@ -5,7 +5,8 @@
 //! same files are kept there, INSTALL-LINK-PLAN §12 Q8), and this test
 //! fails when the encoding changes by a single byte.
 //!
-//! A deliberate change of the wire is a new protocol number. To write the
+//! Protocol 1 is fixed at the crate's first tag (INSTALL-LINK-PLAN §13, N4);
+//! from then on a change of the wire is a new protocol number. To write the
 //! files anew: `OMIL_GOLDEN_WRITE=1 cargo test -p omamobile-link --test golden`.
 mod common;
 use common::*;
@@ -328,7 +329,7 @@ fn the_golden_files_read_back_as_what_they_say() {
     }
     assert_eq!(
         messages,
-        20 + 42 + 3,
+        20 + 44 + 3,
         "every message of the host's and the phone's, the padded one, the two at the limit"
     );
     assert_eq!(datas, 4);
@@ -343,7 +344,7 @@ fn every_kind_of_frame_and_message_has_a_golden_file() {
     let all = all();
     let named = |prefix: &str| all.iter().filter(|g| g.name.starts_with(prefix)).count();
     assert_eq!(named("host-"), 20);
-    assert_eq!(named("phone-"), 23 + 19);
+    assert_eq!(named("phone-"), 25 + 19);
     for t in HOST_TYPES {
         assert!(
             all.iter()

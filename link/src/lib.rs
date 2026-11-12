@@ -2,8 +2,9 @@
 //! The install link's protocol: what a freshly installed Omarchy Mobile
 //! phone and the installer say to each other over USB at the phone's first
 //! start. Protocol 1, as omarchy-mobile's `docs/INSTALL-LINK-PLAN.md` §5
-//! lays it out; `docs/LINK.md` in this repository says how the crate is
-//! meant to be used and where it had to differ from that document.
+//! lays it out since its correction of 2026-11-12; `docs/LINK.md` in this
+//! repository says how the crate is meant to be used and where it still
+//! differs from that document. The number is fixed at the crate's first tag.
 //!
 //! The crate does no I/O, reads no clock and draws no random numbers. It
 //! turns bytes into frames and messages and back ([`frame`], [`msg`]),
@@ -28,8 +29,9 @@ pub mod sim;
 pub const PROTOCOL: u32 = 1;
 
 /// Random bytes, from the caller: the crate never draws its own, so a test
-/// decides the code, the token and the nonce. The phone's daemon fills this
-/// from `getrandom`.
+/// decides the code, the token and both sides' nonces. The phone's daemon
+/// fills this from `getrandom`; the installer from the operating system's
+/// source (`crypto.getRandomValues` in the page).
 pub trait Entropy {
     fn fill(&mut self, buf: &mut [u8]);
 }

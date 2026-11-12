@@ -11,7 +11,7 @@
 //! shell reports them with the same [`Problem`] type.
 //!
 //! Where INSTALL-LINK-PLAN §5.5 and first boot disagree, first boot's rule is
-//! the one here; docs/LINK.md lists each such point.
+//! the one here, as that section itself says.
 use core::fmt;
 
 /// The fields of `answers`, by their names on the wire.

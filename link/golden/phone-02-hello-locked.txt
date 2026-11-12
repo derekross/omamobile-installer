@@ -4,10 +4,10 @@ direction: phone to host
 kind: 1 (message)
 flags: 0
 seq: 1
-len: 208
+len: 288
 offset: 0
-payload sha256: cf9dd40282d3259a305c40ca4ec71c0ef728dfc397e90a741bc75456d9389dd9
+payload sha256: c24cb9a43c734d530fda192f92db6a21e15289a5a32562a33beddbf9865182ae
 pad byte: no
-frame bytes: 264
-frame sha256: d259ffeded71298124009e318db4b32ce9156fd6ca8f60be84aefe7790566d76
-payload: {"t":"hello","re":1,"proto":1,"link":"0.0.1","device":"cheetah","max_data":1048576,"nonce":"404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f","stage":"provisioned","pair":"locked","wait_s":30}
+frame bytes: 344
+frame sha256: b7b5d7d9879672f5eb0cafe57d2dc01ba9dfb3b14e5b7e458dbaaa48796959c7
+payload: {"t":"hello","re":1,"proto":1,"link":"0.0.1","device":"cheetah","max_data":1048576,"nonce":"404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f","host_nonce":"606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f","stage":"provisioned","pair":"locked","wait_s":30}

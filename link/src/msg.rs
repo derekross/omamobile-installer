@@ -7,7 +7,7 @@
 //! limit or outside its form, a number outside its range, a list that is too
 //! long. `hello` (both ways) and the `version` error are the exception: they
 //! pass keys they do not know, so two sides that speak different protocol
-//! numbers can still find that out (docs/LINK.md, D1).
+//! numbers can still find that out (INSTALL-LINK-PLAN §5.2).
 //!
 //! A message is written only if this reader would take it back
 //! ([`HostFrame::to_json`], [`PhoneFrame::to_json`]): neither side can send
@@ -157,23 +157,29 @@ macro_rules! wire_enum {
 }
 
 wire_enum!(
-    /// `hello.pair`: what the host can pair with now.
-    PairMode { Code => "code", Token => "token", Locked => "locked" }
+    /// `hello.pair`: what the host can pair with now (§5.3). `code`: a code
+    /// is showing, `pair` is taken. `ask`: no code is showing; the owner can
+    /// make the phone show one (§2.8). `token`: no code can be shown now,
+    /// and the phone holds a token. `locked`: `pair` is locked for `wait_s`
+    /// seconds; 0 is until someone acts at the phone or it restarts, or: no
+    /// code can be shown and no token exists. `resume` is taken in every one
+    /// of the four whenever the phone holds a token.
+    PairMode { Code => "code", Ask => "ask", Token => "token", Locked => "locked" }
 );
 wire_enum!(
     /// A job on the phone: first boot's setup, provisioning.
     JobState { None => "none", Running => "running", Done => "done", Failed => "failed" }
 );
 wire_enum!(
-    /// `status.backup.state` (this crate's values, LINK.md D11).
+    /// `status.backup.state` (§5.4).
     BackupState { None => "none", Listed => "listed", Done => "done" }
 );
 wire_enum!(
-    /// `status.factory.state` (this crate's values, LINK.md D11).
+    /// `status.factory.state` (§5.4).
     FactoryState { None => "none", Partial => "partial", Verified => "verified" }
 );
 wire_enum!(
-    /// `progress.what` (§5.6 names the first two; LINK.md D12).
+    /// `progress.what` (§5.6).
     What {
         FactoryCheck => "factory-check",
         Provision => "provision",
@@ -460,7 +466,8 @@ fn open<'a>(
             let id = items
                 .iter()
                 .find(|(k, _)| k == "id")
-                .and_then(|(_, v)| v.as_u64());
+                .and_then(|(_, v)| v.as_u64())
+                .filter(|n| *n >= 1);
             Err(MsgError::UnknownType { id })
         }
     }
@@ -477,6 +484,9 @@ pub struct HostHello {
     pub installer_version: String,
     /// 1024 to 4194304.
     pub max_data: u32,
+    /// 32 random bytes, drawn anew for every `hello` sent (§5.3): the phone
+    /// echoes them, and the host takes no frame for an answer until it does.
+    pub nonce: [u8; 32],
 }
 
 /// `factory-begin`.
@@ -565,7 +575,7 @@ impl HostMsg {
 /// One message from the host: its number and what it says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostFrame {
-    /// A whole number that goes up by one (§5.2).
+    /// A whole number from 1 to 2^53 - 1; the host counts up (§5.2).
     pub id: u64,
     pub msg: HostMsg,
 }
@@ -597,7 +607,8 @@ impl HostFrame {
                 i.str("name", &h.installer_name)
                     .str("version", &h.installer_version);
                 w.raw("installer", &i.end())
-                    .num("max_data", h.max_data as u64);
+                    .num("max_data", h.max_data as u64)
+                    .str("nonce", &to_hex(&h.nonce));
             }
             HostMsg::Pair { code } => {
                 w.str("code", code.digits());
@@ -663,7 +674,8 @@ impl HostFrame {
         let (t, _) = open(&v, &HOST_TYPES)?;
         let mut rd = Rd::new(t, "", "", &v, t == "hello")?;
         rd.opt("t");
-        let id = rd.num("id", MAX_NUMBER)?;
+        let v = rd.req("id")?;
+        let id = rd.check_num("id", v, 1, MAX_NUMBER)?;
         let msg = match t {
             "hello" => {
                 let list = rd.list("proto", MAX_PROTOS)?;
@@ -690,6 +702,7 @@ impl HostFrame {
                     installer_name,
                     installer_version,
                     max_data,
+                    nonce: rd.hex32("nonce")?,
                 })
             }
             "ping" => HostMsg::Ping,
@@ -766,10 +779,12 @@ pub struct PhoneHello {
     pub max_data: u32,
     /// New per session.
     pub nonce: [u8; 32],
+    /// The nonce of the host's `hello` this one answers, echoed.
+    pub host_nonce: [u8; 32],
     pub stage: Stage,
     pub pair: PairMode,
-    /// Seconds until pairing may be tried. 0 when `pair` is not `locked`;
-    /// with `locked`, 0 means until the phone restarts (LINK.md D9).
+    /// Seconds until `pair` may be tried. 0 when `pair` is not `locked`;
+    /// with `locked`, 0 means until someone acts at the phone or it restarts.
     pub wait_s: u32,
 }
 
@@ -822,6 +837,14 @@ pub struct Status {
     pub provision_step: String,
     pub provision_n: u32,
     pub provision_of: u32,
+    /// The optional steps that failed in a run that succeeded (§6.6): what
+    /// an installer that lost `provision-done` still has to show.
+    pub provision_optional_failed: Vec<String>,
+    /// Setup boots left (§2.2); 3 while none is counted.
+    pub link_boots_left: u8,
+    /// Seconds until the link closes for this boot; 0 while that clock is
+    /// not running.
+    pub link_closes_s: u32,
     /// Percent.
     pub battery: u8,
     pub charging: bool,
@@ -849,9 +872,11 @@ pub struct StepResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
     Protocol,
-    /// With the phone's protocol numbers.
+    /// With the phone's protocol numbers, and the nonce of the `hello` it
+    /// answers.
     Version {
         proto: Vec<u32>,
+        host_nonce: [u8; 32],
     },
     Unknown,
     NotAllowed,
@@ -860,7 +885,8 @@ pub enum ErrorCode {
     BadCode {
         left: u32,
     },
-    /// With the seconds to wait; 0 is until the phone restarts.
+    /// With the seconds to wait; 0 is until someone acts at the phone or it
+    /// restarts.
     Locked {
         wait_s: u32,
     },
@@ -980,8 +1006,13 @@ pub enum PhoneMsg {
     BackupVerified,
     BackupDone,
     Aborted,
+    /// `offset`: where the transfer goes on. `ack_every`: the bytes between
+    /// acknowledgements. `window`: the host never has bytes sent beyond the
+    /// last acknowledged offset it has read plus this (§5.7).
     FactoryReady {
         offset: u64,
+        ack_every: u64,
+        window: u64,
     },
     Ack {
         offset: u64,
@@ -1101,6 +1132,7 @@ impl PhoneFrame {
                     .str("device", &h.device)
                     .num("max_data", h.max_data as u64)
                     .str("nonce", &to_hex(&h.nonce))
+                    .str("host_nonce", &to_hex(&h.host_nonce))
                     .str("stage", h.stage.as_str())
                     .str("pair", h.pair.as_str())
                     .num("wait_s", h.wait_s as u64);
@@ -1149,8 +1181,16 @@ impl PhoneFrame {
                 p.str("state", s.provision_state.as_str())
                     .str("step", &s.provision_step)
                     .num("n", s.provision_n as u64)
-                    .num("of", s.provision_of as u64);
+                    .num("of", s.provision_of as u64)
+                    .raw(
+                        "optional_failed",
+                        &array(s.provision_optional_failed.iter().map(|x| quoted(x))),
+                    );
+                let mut l = ObjWriter::new();
+                l.num("boots_left", s.link_boots_left as u64)
+                    .num("closes_s", s.link_closes_s as u64);
                 w.raw("provision", &p.end())
+                    .raw("link", &l.end())
                     .num("battery", s.battery as u64)
                     .bool("charging", s.charging)
                     .num("free", s.free);
@@ -1175,7 +1215,16 @@ impl PhoneFrame {
             PhoneMsg::DataEnd { name } => {
                 w.str("name", name);
             }
-            PhoneMsg::FactoryReady { offset } | PhoneMsg::Ack { offset } => {
+            PhoneMsg::FactoryReady {
+                offset,
+                ack_every,
+                window,
+            } => {
+                w.num("offset", *offset)
+                    .num("ack_every", *ack_every)
+                    .num("window", *window);
+            }
+            PhoneMsg::Ack { offset } => {
                 w.num("offset", *offset);
             }
             PhoneMsg::Progress(p) => {
@@ -1203,8 +1252,9 @@ impl PhoneFrame {
                     .str("message", &e.message)
                     .str("stage", e.stage.as_str());
                 match &e.code {
-                    ErrorCode::Version { proto } => {
-                        w.raw("proto", &array(proto.iter().map(u32::to_string)));
+                    ErrorCode::Version { proto, host_nonce } => {
+                        w.raw("proto", &array(proto.iter().map(u32::to_string)))
+                            .str("host_nonce", &to_hex(host_nonce));
                     }
                     ErrorCode::BadCode { left } => {
                         w.num("left", *left as u64);
@@ -1267,7 +1317,7 @@ impl PhoneFrame {
         let re = match (PhoneMsg::re_rule(t), rd.opt("re")) {
             (Re::Event, Some(_)) => return rd.err("re", Why::Unknown),
             (Re::Reply, None) => return rd.err("re", Why::Missing),
-            (_, Some(v)) => Some(rd.check_num("re", v, 0, MAX_NUMBER)?),
+            (_, Some(v)) => Some(rd.check_num("re", v, 1, MAX_NUMBER)?),
             (_, None) => None,
         };
         let msg = match t {
@@ -1285,6 +1335,7 @@ impl PhoneFrame {
                     device,
                     max_data,
                     nonce: rd.hex32("nonce")?,
+                    host_nonce: rd.hex32("host_nonce")?,
                     stage: rd.word("stage", Stage::from_wire)?,
                     pair: rd.word("pair", PairMode::from_wire)?,
                     wait_s: rd.num32("wait_s")?,
@@ -1341,7 +1392,13 @@ impl PhoneFrame {
                 let provision_step = p.str("step", MAX_TEXT, is_text)?;
                 let provision_n = p.num32("n")?;
                 let provision_of = p.num32("of")?;
+                let provision_optional_failed =
+                    p.strings("optional_failed", MAX_STEPS, MAX_TEXT, is_text1)?;
                 p.end()?;
+                let mut l = rd.child("link")?;
+                let link_boots_left = l.num("boots_left", 255)? as u8;
+                let link_closes_s = l.num32("closes_s")?;
+                l.end()?;
                 PhoneMsg::Status(Box::new(Status {
                     stage,
                     boot,
@@ -1358,6 +1415,9 @@ impl PhoneFrame {
                     provision_step,
                     provision_n,
                     provision_of,
+                    provision_optional_failed,
+                    link_boots_left,
+                    link_closes_s,
                     battery: rd.num("battery", 100)? as u8,
                     charging: rd.boolean("charging")?,
                     free: rd.num("free", MAX_NUMBER)?,
@@ -1384,9 +1444,20 @@ impl PhoneFrame {
             "backup-verified" => PhoneMsg::BackupVerified,
             "backup-done" => PhoneMsg::BackupDone,
             "aborted" => PhoneMsg::Aborted,
-            "factory-ready" => PhoneMsg::FactoryReady {
-                offset: rd.num("offset", MAX_NUMBER)?,
-            },
+            "factory-ready" => {
+                let offset = rd.num("offset", MAX_NUMBER)?;
+                let v = rd.req("ack_every")?;
+                let ack_every = rd.check_num("ack_every", v, 1, MAX_NUMBER)?;
+                let v = rd.req("window")?;
+                // A window smaller than the distance between two
+                // acknowledgements could never be left
+                let window = rd.check_num("window", v, ack_every, MAX_NUMBER)?;
+                PhoneMsg::FactoryReady {
+                    offset,
+                    ack_every,
+                    window,
+                }
+            }
             "ack" => PhoneMsg::Ack {
                 offset: rd.num("offset", MAX_NUMBER)?,
             },
@@ -1423,7 +1494,10 @@ impl PhoneFrame {
                         for v in list {
                             proto.push(rd.check_num("proto", v, 1, 65535)? as u32);
                         }
-                        ErrorCode::Version { proto }
+                        ErrorCode::Version {
+                            proto,
+                            host_nonce: rd.hex32("host_nonce")?,
+                        }
                     }
                     "unknown" => ErrorCode::Unknown,
                     "not-allowed" => ErrorCode::NotAllowed,

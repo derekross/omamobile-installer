@@ -12,7 +12,7 @@ use omamobile_link::host::*;
 use omamobile_link::json::Value;
 use omamobile_link::msg::*;
 use omamobile_link::phone::*;
-use omamobile_link::sim::TestRng;
+use omamobile_link::sim::{found_after, TestRng};
 
 fn rank(s: Stage) -> u8 {
     match s {
@@ -120,7 +120,7 @@ fn the_phone_walked_at_random() {
         let mut rng = TestRng(seed);
         let mut entropy = TestRng(seed + 1000);
         let (mut phone, out) =
-            Phone::start(phone_config(), Persistent::default(), true, 0, &mut entropy);
+            Phone::start(phone_config(), &Found::first_start("boot"), 0, &mut entropy);
         let mut pending: Vec<PhoneOutput> = out;
         let (mut now, mut seq, mut id) = (0u64, 0u32, 0u64);
         let mut asked: Vec<Effect> = Vec::new();
@@ -132,6 +132,7 @@ fn the_phone_walked_at_random() {
         let mut backup_step = 0usize;
         let mut on_disk = Persistent::default();
         let mut restart: Option<bool> = None;
+        let mut agent_up = false;
         for _ in 0..3000 {
             steps += 1;
             // Read what the machine put out
@@ -144,7 +145,11 @@ fn the_phone_walked_at_random() {
                             sent_types.insert(m.msg.t());
                             match m.msg {
                                 PhoneMsg::Paired { token: Some(t), .. } => token = Some(t),
-                                PhoneMsg::FactoryReady { offset } => stream = Some(offset),
+                                PhoneMsg::FactoryReady { offset, .. } => stream = Some(offset),
+                                PhoneMsg::Hello(h) => {
+                                    // What `hello` says can pair is so
+                                    assert_eq!(h.pair == PairMode::Code, phone.code().is_some());
+                                }
                                 PhoneMsg::Error(_)
                                 | PhoneMsg::FactoryVerified
                                 | PhoneMsg::Aborted => stream = None,
@@ -152,7 +157,16 @@ fn the_phone_walked_at_random() {
                             }
                         }
                     }
-                    PhoneOutput::Do(Effect::Screen(Screen::Code(c))) => code = Some(c),
+                    PhoneOutput::Do(Effect::Screen(Screen::Code(c)))
+                    | PhoneOutput::Do(Effect::Agent(AgentLine::Code { code: c, .. })) => {
+                        code = Some(c)
+                    }
+                    PhoneOutput::Do(Effect::Agent(line)) => {
+                        // Every line is one the socket carries (§2.8)
+                        let text = line.line();
+                        let word = text.split(' ').next().unwrap();
+                        assert!(["open", "paired", "closed", "ended"].contains(&word));
+                    }
                     PhoneOutput::Do(Effect::Persist(p)) => {
                         assert!(
                             rank(p.stage) >= top,
@@ -164,7 +178,9 @@ fn the_phone_walked_at_random() {
                         assert_eq!(Persistent::from_json(p.to_json().as_bytes()).unwrap(), p);
                         on_disk = p;
                     }
-                    PhoneOutput::Do(Effect::Restart) => restart = Some(true),
+                    // The planned restart; ten unpaired minutes, and the
+                    // owner restarts the phone; a fault
+                    PhoneOutput::Do(Effect::Restart | Effect::Close) => restart = Some(true),
                     PhoneOutput::Do(Effect::Stop) => restart = Some(false),
                     PhoneOutput::Do(e) => {
                         if ticket_of(&e).is_some() {
@@ -174,19 +190,37 @@ fn the_phone_walked_at_random() {
                 }
             }
             if let Some(new_boot) = restart.take() {
-                // The planned restart, or the daemon started again after a
-                // fault: a new machine from the state file
-                let mut cfg = phone_config();
-                cfg.code_screen = !new_boot;
-                let (p, out) = Phone::start(cfg, on_disk.clone(), new_boot, now, &mut entropy);
+                // A restart, or the daemon started again after a fault: a
+                // new machine from what is on the phone, with the files of
+                // the third table as chance left them
+                let mut found = found_after(&on_disk, new_boot);
+                if rng.next_u64().is_multiple_of(3) {
+                    found.image_len = pick(
+                        &mut rng,
+                        &[
+                            None,
+                            Some(0),
+                            Some(4096),
+                            Some(5000),
+                            Some(IMAGE_LEN as u64),
+                        ],
+                    );
+                    found.pending_sums = !rng.next_u64().is_multiple_of(4);
+                    found.work_dir = rng.next_u64().is_multiple_of(2);
+                    found.leftovers = rng.next_u64().is_multiple_of(2);
+                    found.provision_result = pick(
+                        &mut rng,
+                        &[None, Some(result(None)), Some(result(Some("modem")))],
+                    );
+                }
+                let (p, out) = Phone::start(phone_config(), &found, now, &mut entropy);
                 phone = p;
                 pending = out;
                 asked.clear();
                 stream = None;
                 helloed = false;
-                if new_boot {
-                    code = None;
-                }
+                agent_up = false;
+                code = None;
                 phone.handle(now, PhoneInput::LinkUp, &mut entropy);
                 continue;
             }
@@ -201,12 +235,16 @@ fn the_phone_walked_at_random() {
                 *seq += 1;
                 bytes
             };
+            let mut nonce = [0u8; 32];
+            omamobile_link::Entropy::fill(&mut rng, &mut nonce);
             let hello = HostMsg::Hello(HostHello {
                 proto: vec![1],
                 installer_name: "walk".into(),
                 installer_version: "1".into(),
                 max_data: MAX_DATA,
+                nonce,
             });
+            let mut owner: Option<PhoneInput> = None;
             let input_bytes;
             let roll = rng.next_u64() % 100;
             // Most of the time: a shell that works and an installer that
@@ -224,13 +262,32 @@ fn the_phone_walked_at_random() {
                         Some(hello)
                     } else {
                         helloed = false;
-                        match (code, token) {
+                        match (phone.code().and(code), token) {
                             (_, Some(token)) if rng.next_u64().is_multiple_of(2) => {
                                 Some(HostMsg::Resume { token })
                             }
                             (Some(code), _) => Some(HostMsg::Pair { code }),
-                            (None, Some(token)) => Some(HostMsg::Resume { token }),
-                            _ => None,
+                            (None, Some(token)) if !rng.next_u64().is_multiple_of(4) => {
+                                Some(HostMsg::Resume { token })
+                            }
+                            _ => {
+                                // The owner at the phone: a volume key at
+                                // the first-start screen, or the session's
+                                // agent and a tap on its notice
+                                owner = Some(
+                                    if st.stage.before_provisioned()
+                                        && st.stage != Stage::FirstbootDone
+                                    {
+                                        PhoneInput::Key
+                                    } else if !agent_up {
+                                        agent_up = true;
+                                        PhoneInput::AgentUp
+                                    } else {
+                                        PhoneInput::AgentShow
+                                    },
+                                );
+                                None
+                            }
                         }
                     }
                 } else {
@@ -276,6 +333,7 @@ fn the_phone_walked_at_random() {
                     }
                 };
                 match (msg, st.stage, stream) {
+                    _ if owner.is_some() => owner.take().unwrap(),
                     (Some(msg), _, _) => {
                         input_bytes = send(msg, &mut seq, &mut id);
                         PhoneInput::Frame(&input_bytes)
@@ -299,14 +357,11 @@ fn the_phone_walked_at_random() {
                     }
                     (None, Stage::FirstbootDone, _) if st.provision == JobState::Running => {
                         PhoneInput::ProvisionEnded {
-                            steps: vec![StepResult {
-                                step: "camera".into(),
-                                state: StepState::Failed,
-                            }],
-                            failed: if rng.next_u64().is_multiple_of(4) {
-                                Some("modem".into())
-                            } else {
-                                None
+                            result: match rng.next_u64() % 8 {
+                                0 => None,
+                                1 => Some(result(Some("modem"))),
+                                2 | 3 => Some(result(Some("camera"))),
+                                _ => Some(result(None)),
                             },
                         }
                     }
@@ -343,14 +398,16 @@ fn the_phone_walked_at_random() {
                         },
                     },
                     16 if rng.next_u64().is_multiple_of(4) => PhoneInput::ProvisionEnded {
-                        steps: vec![StepResult {
-                            step: "not a step\n".into(),
-                            state: StepState::Failed,
-                        }],
-                        failed: if rng.next_u64().is_multiple_of(3) {
-                            Some("m\u{e9}".into())
-                        } else {
-                            None
+                        result: match rng.next_u64() % 3 {
+                            0 => None,
+                            1 => Some(vec![]),
+                            _ => Some(vec![StepResult {
+                                step: "not a step\n\u{e9}".into(),
+                                state: pick(
+                                    &mut rng,
+                                    &[StepState::Failed, StepState::Ok, StepState::Skipped],
+                                ),
+                            }]),
                         },
                     },
                     17 => PhoneInput::Progress(Progress {
@@ -359,8 +416,36 @@ fn the_phone_walked_at_random() {
                         done: 1,
                         total: 2,
                     }),
-                    18 => PhoneInput::DesktopUp,
-                    19 => PhoneInput::CodeScreen(!rng.next_u64().is_multiple_of(8)),
+                    18 => PhoneInput::SessionUp,
+                    19 => {
+                        let i = pick(
+                            &mut rng,
+                            &[
+                                PhoneInput::AgentUp,
+                                PhoneInput::AgentShow,
+                                PhoneInput::AgentHide,
+                                PhoneInput::AgentDown,
+                                PhoneInput::Key,
+                            ],
+                        );
+                        agent_up = match i {
+                            PhoneInput::AgentUp => true,
+                            PhoneInput::AgentDown => false,
+                            _ => agent_up,
+                        };
+                        i
+                    }
+                    23 if rng.next_u64().is_multiple_of(2) => {
+                        // A wrong code
+                        input_bytes = send(
+                            HostMsg::Pair {
+                                code: Code::from_number(rng.next_u64() as u32),
+                            },
+                            &mut seq,
+                            &mut id,
+                        );
+                        PhoneInput::Frame(&input_bytes)
+                    }
                     20 if rng.next_u64().is_multiple_of(100) => PhoneInput::Fault,
                     21 | 22 => {
                         // A data frame, in or out of place
@@ -411,7 +496,7 @@ fn the_phone_walked_at_random() {
 }
 
 /// What a phone that keeps to the protocol answers to a message.
-fn right_answer(m: &HostFrame) -> Vec<PhoneFrame> {
+fn right_answer(m: &HostFrame, host_nonce: &[u8; 32]) -> Vec<PhoneFrame> {
     let re = Some(m.id);
     let one = |msg: PhoneMsg| vec![PhoneFrame { re, msg }];
     let sample = |name: &str| {
@@ -423,21 +508,29 @@ fn right_answer(m: &HostFrame) -> Vec<PhoneFrame> {
             .msg
     };
     match &m.msg {
-        HostMsg::Hello(_) => {
+        HostMsg::Hello(hello) => {
             let PhoneMsg::Hello(mut h) = sample("hello") else {
                 unreachable!()
             };
             h.max_data = MAX_DATA;
+            h.host_nonce = hello.nonce;
+            // Now and then no code is on show
+            (h.pair, h.wait_s) = match hello.nonce[0] % 9 {
+                0 => (PairMode::Ask, 0),
+                1 => (PairMode::Token, 0),
+                2 => (PairMode::Locked, 30),
+                _ => (PairMode::Code, 0),
+            };
             one(PhoneMsg::Hello(h))
         }
         HostMsg::Ping => one(PhoneMsg::Pong),
         HostMsg::Pair { .. } => one(PhoneMsg::Paired {
             token: Some(Token([4; 32])),
-            serial_proof: serial_proof(&digest(0x40), SERIAL),
+            serial_proof: serial_proof(host_nonce, &digest(0x40), SERIAL),
         }),
         HostMsg::Resume { .. } => one(PhoneMsg::Paired {
             token: None,
-            serial_proof: serial_proof(&digest(0x40), SERIAL),
+            serial_proof: serial_proof(host_nonce, &digest(0x40), SERIAL),
         }),
         HostMsg::Bye => one(PhoneMsg::Bye),
         HostMsg::Status => {
@@ -492,6 +585,8 @@ fn right_answer(m: &HostFrame) -> Vec<PhoneFrame> {
         HostMsg::Abort => one(PhoneMsg::Aborted),
         HostMsg::FactoryBegin(_) => one(PhoneMsg::FactoryReady {
             offset: (m.id % 3) * 4096,
+            ack_every: TEST_ACK_EVERY,
+            window: TEST_WINDOW,
         }),
         HostMsg::FactoryEnd => one(PhoneMsg::FactoryVerified),
         HostMsg::Provision => vec![
@@ -501,7 +596,9 @@ fn right_answer(m: &HostFrame) -> Vec<PhoneFrame> {
             },
             PhoneFrame {
                 re: None,
-                msg: PhoneMsg::ProvisionDone { steps: vec![] },
+                msg: PhoneMsg::ProvisionDone {
+                    steps: result(Some("camera")),
+                },
             },
         ],
         HostMsg::Restart => one(PhoneMsg::Restarting),
@@ -535,8 +632,10 @@ fn the_host_walked_at_random() {
     let mut steps = 0u32;
     for seed in 0..60u64 {
         let mut rng = TestRng(seed);
+        let mut entropy = TestRng(seed + 5000);
         let mut host = Host::new(host_config());
         let (mut now, mut seq, mut last_id) = (0u64, 0u32, 0u64);
+        let mut host_nonce = [0u8; 32];
         let mut asked: Vec<HostEffect> = Vec::new();
         let mut answers_due: std::collections::VecDeque<PhoneFrame> = Default::default();
         let mut pending: Vec<HostOutput> = Vec::new();
@@ -550,12 +649,24 @@ fn the_host_walked_at_random() {
                             let m = HostFrame::parse(f.payload).expect("a valid message");
                             last_id = m.id;
                             sent_types.insert(m.msg.t());
-                            if m.msg.t() == "hello" {
+                            if let HostMsg::Hello(h) = &m.msg {
                                 assert_eq!(f.seq, 0);
+                                assert_ne!(h.nonce, host_nonce, "a nonce drawn anew");
+                                host_nonce = h.nonce;
                                 seq = 0;
                                 answers_due.clear();
                             }
-                            answers_due.extend(right_answer(&m));
+                            answers_due.extend(right_answer(&m, &host_nonce));
+                        } else {
+                            // The phone acknowledges at each line and at
+                            // the end; the host is never past its window
+                            let end = f.offset + f.payload.len() as u64;
+                            if end.is_multiple_of(TEST_ACK_EVERY) || end == IMAGE_LEN as u64 {
+                                answers_due.push_back(PhoneFrame {
+                                    re: None,
+                                    msg: PhoneMsg::Ack { offset: end },
+                                });
+                            }
                         }
                     }
                     HostOutput::Do(e) => {
@@ -563,6 +674,7 @@ fn the_host_walked_at_random() {
                             e,
                             HostEffect::BackupOpen { .. }
                                 | HostEffect::BackupDigest { .. }
+                                | HostEffect::BackupFinish { .. }
                                 | HostEffect::FactoryRead { .. }
                         ) {
                             asked.push(e);
@@ -582,7 +694,6 @@ fn the_host_walked_at_random() {
             if host.stopped() {
                 // Another run of the installer, with or without a token
                 let mut cfg = host_config();
-                cfg.first_id = last_id + 100;
                 cfg.token = (seed % 2 == 0).then_some(Token([4; 32]));
                 host = Host::new(cfg);
                 asked.clear();
@@ -612,7 +723,7 @@ fn the_host_walked_at_random() {
                         )
                         .unwrap();
                         seq += 1;
-                        pending.extend(host.handle(now, HostInput::Frame(&b)));
+                        pending.extend(host.handle(now, HostInput::Frame(&b), &mut entropy));
                     }
                 }
                 bytes = frame::encode(
@@ -633,6 +744,9 @@ fn the_host_walked_at_random() {
                     }
                     HostEffect::BackupDigest { ticket, .. } => {
                         HostInput::Done(ticket, HostOutcome::Digest([1; 32]))
+                    }
+                    HostEffect::BackupFinish { ticket, .. } => {
+                        HostInput::Done(ticket, HostOutcome::Done)
                     }
                     HostEffect::FactoryRead {
                         ticket,
@@ -657,12 +771,14 @@ fn the_host_walked_at_random() {
                         let t = match asked.remove(0) {
                             HostEffect::BackupOpen { ticket, .. }
                             | HostEffect::BackupDigest { ticket, .. }
+                            | HostEffect::BackupFinish { ticket, .. }
                             | HostEffect::FactoryRead { ticket, .. } => ticket,
                             _ => 0,
                         };
                         let n = pick(&mut rng, &[0usize, 5, 100, 1024]);
-                        let o = match rng.next_u64() % 5 {
+                        let o = match rng.next_u64() % 6 {
                             0 => HostOutcome::Failed,
+                            5 => HostOutcome::Done,
                             1 => HostOutcome::Have(rng.next_u64() % 5000),
                             2 => HostOutcome::Digest([1; 32]),
                             _ => HostOutcome::Data(rng.bytes(n)),
@@ -692,7 +808,7 @@ fn the_host_walked_at_random() {
                         // A message of the phone's nobody asked for
                         let mut f = pick(&mut rng, &samples);
                         if let (Some(re), true) = (&mut f.re, !rng.next_u64().is_multiple_of(4)) {
-                            *re = last_id;
+                            *re = last_id.max(1);
                         }
                         bytes = frame::encode(
                             Kind::Message,
@@ -708,7 +824,7 @@ fn the_host_walked_at_random() {
                     _ => HostInput::Tick,
                 }
             };
-            pending.extend(host.handle(now, input));
+            pending.extend(host.handle(now, input, &mut entropy));
         }
     }
     let missing: Vec<&&str> = HOST_TYPES
@@ -718,6 +834,9 @@ fn the_host_walked_at_random() {
     assert!(missing.is_empty(), "never sent: {missing:?}");
     for e in [
         "NeedCode",
+        "NeedTap",
+        "NeedSession",
+        "Locked",
         "Paired",
         "LinkLost",
         "Stopped",

@@ -1,0 +1,13 @@
+frame: phone-31-error-bad-code
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 30
+len: 96
+offset: 0
+payload sha256: bd666ce6301f7cbc7b7df2e5630febd6ef947f60fbcc82a8ccd50ce947be54e3
+pad byte: no
+frame bytes: 152
+frame sha256: 7199d34a348f93f9ea48b55d2400549f321edc44f1c7b439330a941d8f033918
+payload: {"t":"error","re":21,"code":"bad-code","message":"wrong code","stage":"firstboot-done","left":4}

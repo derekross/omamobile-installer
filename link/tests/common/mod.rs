@@ -2,6 +2,8 @@
 //! What the link's tests share: answers that first boot takes, and one of
 //! every message of protocol 1 (the golden frames are made of these).
 #![allow(dead_code)]
+// A host written out by hand, for the phone's machine alone
+pub mod client;
 // The two machines, their stand-ins and the loopback between them
 pub mod rig;
 
@@ -65,6 +67,9 @@ pub fn status() -> Status {
         provision_step: String::new(),
         provision_n: 0,
         provision_of: 0,
+        provision_optional_failed: vec![],
+        link_boots_left: 3,
+        link_closes_s: 0,
         battery: 80,
         charging: true,
         free: 100_000_000_000,
@@ -87,6 +92,7 @@ pub fn host_samples() -> Vec<(&'static str, HostFrame)> {
                 installer_name: "omamobile-install".into(),
                 installer_version: "0.0.1".into(),
                 max_data: 1048576,
+                nonce: digest(0x60),
             }),
         ),
         ("ping", HostMsg::Ping),
@@ -157,7 +163,10 @@ pub fn host_samples() -> Vec<(&'static str, HostFrame)> {
 pub fn error_codes() -> Vec<ErrorCode> {
     vec![
         ErrorCode::Protocol,
-        ErrorCode::Version { proto: vec![1] },
+        ErrorCode::Version {
+            proto: vec![1],
+            host_nonce: digest(0x60),
+        },
         ErrorCode::Unknown,
         ErrorCode::NotAllowed,
         ErrorCode::NotPaired,
@@ -200,6 +209,7 @@ pub fn phone_samples() -> Vec<(String, PhoneFrame)> {
         device: "cheetah".into(),
         max_data: 1048576,
         nonce: digest(0x40),
+        host_nonce: digest(0x60),
         stage: Stage::Waiting,
         pair: PairMode::Code,
         wait_s: 0,
@@ -210,6 +220,24 @@ pub fn phone_samples() -> Vec<(String, PhoneFrame)> {
         stage: Stage::Provisioned,
         ..hello.clone()
     };
+    // After first boot: no code on show, the owner can ask for one
+    let ask = PhoneHello {
+        pair: PairMode::Ask,
+        stage: Stage::FirstbootDone,
+        ..hello.clone()
+    };
+    let mut after = status();
+    after.stage = Stage::Provisioned;
+    after.boot = 2;
+    after.backup_state = BackupState::Done;
+    after.backup_parts = vec![];
+    after.factory_state = FactoryState::None;
+    after.factory_have = 0;
+    after.factory_size = 0;
+    after.provision_state = JobState::Done;
+    after.provision_optional_failed = vec!["camera".into()];
+    after.link_boots_left = 2;
+    after.link_closes_s = 600;
     let report = Value::Obj(vec![
         ("device".into(), Value::Str("cheetah".into())),
         (
@@ -225,6 +253,7 @@ pub fn phone_samples() -> Vec<(String, PhoneFrame)> {
     let mut v: Vec<(String, PhoneFrame)> = vec![
         ("hello", Some(1), PhoneMsg::Hello(hello)),
         ("hello-locked", Some(1), PhoneMsg::Hello(locked)),
+        ("hello-ask", Some(1), PhoneMsg::Hello(ask)),
         ("pong", Some(2), PhoneMsg::Pong),
         (
             "paired",
@@ -244,6 +273,11 @@ pub fn phone_samples() -> Vec<(String, PhoneFrame)> {
         ),
         ("bye", Some(5), PhoneMsg::Bye),
         ("status", Some(6), PhoneMsg::Status(Box::new(status()))),
+        (
+            "status-provisioned",
+            Some(6),
+            PhoneMsg::Status(Box::new(after)),
+        ),
         ("answers-ok", Some(7), PhoneMsg::AnswersOk),
         (
             "backup-parts",
@@ -279,7 +313,11 @@ pub fn phone_samples() -> Vec<(String, PhoneFrame)> {
         (
             "factory-ready",
             Some(15),
-            PhoneMsg::FactoryReady { offset: 67108864 },
+            PhoneMsg::FactoryReady {
+                offset: 67108864,
+                ack_every: 67108864,
+                window: 134217728,
+            },
         ),
         ("ack", None, PhoneMsg::Ack { offset: 134217728 }),
         ("factory-verified", Some(16), PhoneMsg::FactoryVerified),

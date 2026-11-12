@@ -1,0 +1,13 @@
+frame: phone-43-error-battery
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 42
+len: 107
+offset: 0
+payload sha256: e82ced8f43ef0e5c8b2e31fe4c51868c87c7d229a2ce33e4778af1762cbab98d
+pad byte: no
+frame bytes: 163
+frame sha256: db20e1d1538b0e0fdd1b9c2d7f27be6146b59d20b78acc1a09f63d16f2df7946
+payload: {"t":"error","re":21,"code":"battery","message":"charge the phone, or plug it in","stage":"firstboot-done"}

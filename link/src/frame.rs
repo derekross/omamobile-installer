@@ -10,7 +10,7 @@
 //! | 4 | 1 | frame version, 1 |
 //! | 5 | 1 | kind: 1 message (JSON), 2 data (raw bytes) |
 //! | 6 | 2 | flags: bit 0 = a pad byte follows the payload |
-//! | 8 | 4 | seq |
+//! | 8 | 4 | seq: 0 for a `hello` and for the frame that answers it, then +1 per frame, per direction |
 //! | 12 | 4 | len, the payload's bytes |
 //! | 16 | 8 | offset (data), 0 (message) |
 //! | 24 | 32 | SHA-256 of the payload |
@@ -30,7 +30,7 @@ pub const HEADER_LEN: usize = 56;
 pub const MAX_MESSAGE: usize = 262_144;
 /// The most a side may offer as `max_data`.
 pub const MAX_DATA_LIMIT: u32 = 4_194_304;
-/// The least a side may offer as `max_data` (this crate's choice, LINK.md D7).
+/// The least a side may offer as `max_data` (§5.3).
 pub const MIN_MAX_DATA: u32 = 1024;
 /// The phone's `max_data` unless its shell says otherwise.
 pub const DEFAULT_MAX_DATA: u32 = 1_048_576;

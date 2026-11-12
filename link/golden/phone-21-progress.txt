@@ -1,0 +1,13 @@
+frame: phone-21-progress
+progress, sent by itself (no re)
+direction: phone to host
+kind: 1 (message)
+flags: 1
+seq: 20
+len: 72
+offset: 0
+payload sha256: e56316fe899e14bb947348174a629d4847e475e139f304861a0a93295008205e
+pad byte: yes
+frame bytes: 129
+frame sha256: 6ca788df2a0401889f8a5ff3cb584ffc17f009b7bb695d377f8748b41fdb9c59
+payload: {"t":"progress","what":"provision","step":"firmware","done":1,"total":6}

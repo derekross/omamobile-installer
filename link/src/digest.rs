@@ -83,7 +83,10 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// The label of INSTALL-LINK-PLAN §5.3's serial proof.
 pub const SERIAL_LABEL: &[u8] = b"omil-serial-v1";
 
-/// SHA-256("omil-serial-v1" ‖ the 32 nonce bytes ‖ the serial's bytes).
-pub fn serial_proof(nonce: &[u8; 32], serial: &[u8]) -> [u8; 32] {
-    sha256_parts(&[SERIAL_LABEL, nonce, serial])
+/// SHA-256("omil-serial-v1" ‖ the host's 32 nonce bytes ‖ the phone's 32
+/// nonce bytes ‖ the serial's bytes): bound to both sides' nonces, so a
+/// proof made for another run of the installer, or for another session of
+/// the phone, is not this one's.
+pub fn serial_proof(host_nonce: &[u8; 32], phone_nonce: &[u8; 32], serial: &[u8]) -> [u8; 32] {
+    sha256_parts(&[SERIAL_LABEL, host_nonce, phone_nonce, serial])
 }

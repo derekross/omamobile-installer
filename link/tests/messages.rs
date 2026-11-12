@@ -60,7 +60,19 @@ fn the_writing_is_the_same_every_time_and_has_no_spaces() {
     let (_, f) = &host_samples()[0];
     assert_eq!(
         f.to_json().unwrap(),
-        r#"{"t":"hello","id":1,"proto":[1],"installer":{"name":"omamobile-install","version":"0.0.1"},"max_data":1048576}"#
+        r#"{"t":"hello","id":1,"proto":[1],"installer":{"name":"omamobile-install","version":"0.0.1"},"max_data":1048576,"nonce":"606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"}"#
+    );
+    let ready = PhoneFrame {
+        re: Some(15),
+        msg: PhoneMsg::FactoryReady {
+            offset: 0,
+            ack_every: 67108864,
+            window: 134217728,
+        },
+    };
+    assert_eq!(
+        ready.to_json().unwrap(),
+        r#"{"t":"factory-ready","re":15,"offset":0,"ack_every":67108864,"window":134217728}"#
     );
     let ack = PhoneFrame {
         re: None,
@@ -225,27 +237,41 @@ fn every_message_is_read_strictly() {
         );
         n += 1;
     }
-    assert_eq!(n, 20 + 23 + 19);
+    assert_eq!(n, 20 + 25 + 19);
 }
 
 #[test]
 fn hello_and_the_version_error_pass_keys_from_a_later_protocol() {
     // Two sides that speak different numbers must still be able to say so
-    let h = host(
-        r#"{"t":"hello","id":1,"proto":[1,2],"installer":{"name":"x","version":"2","build":"b"},"max_data":4096,"features":["a"]}"#,
-    );
+    let nonce = "ab".repeat(32);
+    let h = host(&format!(
+        r#"{{"t":"hello","id":1,"proto":[1,2],"installer":{{"name":"x","version":"2","build":"b"}},"max_data":4096,"nonce":"{nonce}","features":["a"]}}"#
+    ));
     assert!(
         matches!(h, Ok(HostFrame { msg: HostMsg::Hello(ref x), .. }) if x.proto == [1, 2]),
         "{h:?}"
     );
-    let e = phone(
-        r#"{"t":"error","re":1,"code":"version","message":"m","stage":"waiting","proto":[2,3],"min":2}"#,
-    );
+    let e = phone(&format!(
+        r#"{{"t":"error","re":1,"code":"version","message":"m","stage":"waiting","proto":[2,3],"host_nonce":"{nonce}","min":2}}"#
+    ));
     assert!(
-        matches!(e, Ok(PhoneFrame { msg: PhoneMsg::Error(ref x), .. }) if x.code == ErrorCode::Version { proto: vec![2, 3] })
+        matches!(e, Ok(PhoneFrame { msg: PhoneMsg::Error(ref x), .. }) if x.code == ErrorCode::Version { proto: vec![2, 3], host_nonce: [0xab; 32] })
     );
-    // What they do know stays strict
+    // What they do know stays strict: the nonce among it, which is what
+    // ties an answer to this run of the installer (§5.3)
     assert_eq!(why(host(r#"{"t":"hello","id":1,"proto":[1],"installer":{"name":"x","version":"2"},"max_data":"4096"}"#)).1, Why::Type);
+    assert_eq!(
+        why(host(
+            r#"{"t":"hello","id":1,"proto":[1],"installer":{"name":"x","version":"2"},"max_data":4096}"#
+        )),
+        ("nonce".to_string(), Why::Missing)
+    );
+    assert_eq!(
+        why(phone(
+            r#"{"t":"error","re":1,"code":"version","message":"m","stage":"waiting","proto":[2,3]}"#
+        )),
+        ("host_nonce".to_string(), Why::Missing)
+    );
     // ... and no other message is lenient
     assert_eq!(
         why(host(r#"{"t":"ping","id":1,"features":[]}"#)),
@@ -327,6 +353,19 @@ fn id_and_re() {
         ("id".to_string(), Why::Range)
     );
     assert!(host(r#"{"t":"ping","id":9007199254740991}"#).is_ok());
+    // From 1: 0 is no id
+    assert_eq!(
+        why(host(r#"{"t":"ping","id":0}"#)),
+        ("id".to_string(), Why::Range)
+    );
+    assert_eq!(
+        why(phone(r#"{"t":"pong","re":0}"#)),
+        ("re".to_string(), Why::Range)
+    );
+    assert_eq!(
+        host(r#"{"t":"shell","id":0}"#),
+        Err(MsgError::UnknownType { id: None })
+    );
     // An answer has `re`; what comes by itself has none; `error` is either
     assert_eq!(
         why(phone(r#"{"t":"pong"}"#)),
@@ -347,9 +386,19 @@ fn id_and_re() {
 fn limits_and_forms_of_the_hosts_fields() {
     let hello = |proto: &str, max: &str| {
         host(&format!(
-            r#"{{"t":"hello","id":1,"proto":{proto},"installer":{{"name":"n","version":"v"}},"max_data":{max}}}"#
+            r#"{{"t":"hello","id":1,"proto":{proto},"installer":{{"name":"n","version":"v"}},"max_data":{max},"nonce":"{}"}}"#,
+            "0f".repeat(32)
         ))
     };
+    let nonce = |n: &str| {
+        host(&format!(
+            r#"{{"t":"hello","id":1,"proto":[1],"installer":{{"name":"n","version":"v"}},"max_data":4096,"nonce":"{n}"}}"#
+        ))
+    };
+    assert!(nonce(&"0f".repeat(32)).is_ok());
+    assert_eq!(why(nonce(&"0F".repeat(32))).1, Why::Format);
+    assert_eq!(why(nonce(&"0f".repeat(31))).1, Why::Format);
+    assert_eq!(why(nonce("")).1, Why::Format);
     assert!(hello("[1]", "1024").is_ok() && hello("[1]", "4194304").is_ok());
     assert_eq!(
         why(hello("[1]", "4194305")),
@@ -383,7 +432,8 @@ fn limits_and_forms_of_the_hosts_fields() {
     );
     let named = |name: &str| {
         host(&format!(
-            r#"{{"t":"hello","id":1,"proto":[1],"installer":{{"name":"{name}","version":"v"}},"max_data":4096}}"#
+            r#"{{"t":"hello","id":1,"proto":[1],"installer":{{"name":"{name}","version":"v"}},"max_data":4096,"nonce":"{}"}}"#,
+            "0f".repeat(32)
         ))
     };
     assert_eq!(
@@ -500,6 +550,26 @@ fn limits_and_forms_of_the_phones_fields() {
     assert_eq!(field("hello", "proto", "0").1, Why::Range);
     assert_eq!(field("hello", "max_data", "4194305").1, Why::Range);
     assert_eq!(field("hello", "nonce", "\"abcd\"").1, Why::Format);
+    assert_eq!(field("hello", "host_nonce", "\"abcd\"").1, Why::Format);
+    for pair in ["code", "ask", "token", "locked"] {
+        assert!(phone(&set("hello", "pair", &format!("\"{pair}\""))).is_ok());
+    }
+    // The window is never less than the distance between acknowledgements
+    assert_eq!(field("factory-ready", "ack_every", "0").1, Why::Range);
+    assert_eq!(field("factory-ready", "window", "67108863").1, Why::Range);
+    assert!(phone(&set("factory-ready", "window", "67108864")).is_ok());
+    assert_eq!(
+        field("status", "link", r#"{"boots_left":256,"closes_s":0}"#),
+        ("link.boots_left".to_string(), Why::Range)
+    );
+    assert_eq!(
+        field(
+            "status",
+            "provision",
+            r#"{"state":"done","step":"","n":0,"of":0,"optional_failed":[""]}"#
+        ),
+        ("provision.optional_failed".to_string(), Why::Format)
+    );
     assert_eq!(field("hello", "stage", "\"ready\"").1, Why::Format);
     assert_eq!(field("hello", "pair", "\"none\"").1, Why::Format);
     assert_eq!(field("hello", "device", "\"Cheetah\"").1, Why::Format);
@@ -590,12 +660,14 @@ fn nothing_is_written_that_would_not_be_read() {
             installer_name: "n".into(),
             installer_version: "v".into(),
             max_data: 4096,
+            nonce: [1; 32],
         }),
         HostMsg::Hello(HostHello {
             proto: vec![1],
             installer_name: "n".into(),
             installer_version: "v".into(),
             max_data: 5_000_000,
+            nonce: [1; 32],
         }),
         HostMsg::FactoryBegin(FactoryBegin {
             size: 0,
@@ -628,6 +700,15 @@ fn nothing_is_written_that_would_not_be_read() {
             }),
         ),
         (None, PhoneMsg::Ack { offset: u64::MAX }),
+        (
+            Some(1),
+            PhoneMsg::FactoryReady {
+                offset: 0,
+                ack_every: 4096,
+                window: 4095,
+            },
+        ),
+        (Some(0), PhoneMsg::Pong),
     ];
     for (re, msg) in bad {
         assert!(

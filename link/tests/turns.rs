@@ -7,155 +7,17 @@
 //! out of turn gets its refusal and the phone stays where it was. Only a
 //! wrong frame ends the session.
 mod common;
+use common::client::*;
 use common::rig::*;
 use common::*;
-use omamobile_link::digest::{serial_proof, sha256};
+use omamobile_link::digest::sha256;
 use omamobile_link::frame::{self, FrameError, Kind};
 use omamobile_link::msg::*;
 use omamobile_link::phone::*;
 use omamobile_link::sim::SimPhone;
 
-/// A host written out by hand: it numbers its frames and messages and reads
-/// what comes back.
-struct Client {
-    seq: u32,
-    id: u64,
-    rx: u32,
-    nonce: [u8; 32],
-    token: Option<Token>,
-    now: u64,
-}
-
-#[derive(Debug, PartialEq)]
-enum Got {
-    Msg(PhoneFrame),
-    Data { offset: u64, len: usize },
-}
-
-impl Got {
-    /// The message's type, or `error:<code>`.
-    fn name(&self) -> String {
-        match self {
-            Got::Msg(PhoneFrame {
-                msg: PhoneMsg::Error(e),
-                ..
-            }) => format!("error:{}", e.code.as_str()),
-            Got::Msg(f) => f.msg.t().to_string(),
-            Got::Data { .. } => "data".to_string(),
-        }
-    }
-}
-
-impl Client {
-    fn new() -> Client {
-        Client {
-            seq: 0,
-            id: 0,
-            rx: 0,
-            nonce: [0; 32],
-            token: None,
-            now: 0,
-        }
-    }
-
-    fn read(&mut self, frames: Vec<Vec<u8>>) -> Vec<Got> {
-        frames
-            .iter()
-            .map(|b| {
-                let f = frame::decode(b, MAX_DATA).expect("the phone sends valid frames");
-                assert_eq!(f.seq, self.rx, "the phone's frames are numbered one by one");
-                self.rx += 1;
-                match f.kind {
-                    Kind::Message => Got::Msg(
-                        PhoneFrame::parse(f.payload).expect("the phone sends valid messages"),
-                    ),
-                    Kind::Data => Got::Data {
-                        offset: f.offset,
-                        len: f.payload.len(),
-                    },
-                }
-            })
-            .collect()
-    }
-
-    fn raw(&mut self, p: &mut SimPhone, bytes: &[u8]) -> Vec<Got> {
-        let frames = p.feed(self.now, PhoneInput::Frame(bytes));
-        self.read(frames)
-    }
-
-    fn payload(&mut self, p: &mut SimPhone, json: &str) -> Vec<Got> {
-        let bytes = frame::encode(Kind::Message, self.seq, 0, json.as_bytes(), MAX_DATA).unwrap();
-        self.seq += 1;
-        self.raw(p, &bytes)
-    }
-
-    fn send(&mut self, p: &mut SimPhone, msg: HostMsg) -> Vec<Got> {
-        self.id += 1;
-        let id = self.id;
-        let json = HostFrame { id, msg }.to_json().unwrap();
-        let got = self.payload(p, &json);
-        // An answer names the message it answers
-        for g in &got {
-            if let Got::Msg(PhoneFrame { re: Some(re), .. }) = g {
-                assert_eq!(*re, id);
-            }
-        }
-        got
-    }
-
-    fn data(&mut self, p: &mut SimPhone, offset: u64, bytes: &[u8]) -> Vec<Got> {
-        let f = frame::encode(Kind::Data, self.seq, offset, bytes, MAX_DATA).unwrap();
-        self.seq += 1;
-        self.raw(p, &f)
-    }
-
-    fn hello(&mut self, p: &mut SimPhone) -> PhoneHello {
-        self.seq = 0;
-        self.rx = 0;
-        let h = HostHello {
-            proto: vec![1],
-            installer_name: "test".into(),
-            installer_version: "1".into(),
-            max_data: 4096,
-        };
-        match self.send(p, HostMsg::Hello(h)).pop() {
-            Some(Got::Msg(PhoneFrame {
-                msg: PhoneMsg::Hello(h),
-                ..
-            })) => {
-                self.nonce = h.nonce;
-                h
-            }
-            other => panic!("no hello: {other:?}"),
-        }
-    }
-
-    fn pair(&mut self, p: &mut SimPhone) {
-        let code = p.phone.code().expect("a code on the screen");
-        match self.send(p, HostMsg::Pair { code }).pop() {
-            Some(Got::Msg(PhoneFrame {
-                msg:
-                    PhoneMsg::Paired {
-                        token: Some(t),
-                        serial_proof: proof,
-                    },
-                ..
-            })) => {
-                assert_eq!(proof, serial_proof(&self.nonce, SERIAL));
-                self.token = Some(t);
-            }
-            other => panic!("not paired: {other:?}"),
-        }
-    }
-
-    fn one(&mut self, p: &mut SimPhone, msg: HostMsg) -> String {
-        let got = self.send(p, msg);
-        got.first().map_or("nothing".to_string(), Got::name)
-    }
-}
-
 fn up() -> (SimPhone, Client) {
-    let mut p = sim_phone(Persistent::default(), true, true, 1);
+    let mut p = new_phone(1);
     p.feed(0, PhoneInput::LinkUp);
     (p, Client::new())
 }
@@ -165,54 +27,6 @@ fn paired() -> (SimPhone, Client) {
     c.hello(&mut p);
     c.pair(&mut p);
     (p, c)
-}
-
-fn begin(image: &[u8]) -> HostMsg {
-    HostMsg::FactoryBegin(factory_begin(image))
-}
-
-fn backup_all(p: &mut SimPhone, c: &mut Client) {
-    assert_eq!(c.one(p, HostMsg::BackupList), "backup-parts");
-    for (found, bytes) in parts() {
-        let got = c.send(
-            p,
-            HostMsg::BackupRead {
-                name: found.name.clone(),
-                offset: 0,
-            },
-        );
-        assert_eq!(got.first().unwrap().name(), "data-begin");
-        assert_eq!(got.last().unwrap().name(), "data-end");
-        let read: usize = got
-            .iter()
-            .map(|g| {
-                if let Got::Data { len, .. } = g {
-                    *len
-                } else {
-                    0
-                }
-            })
-            .sum();
-        assert_eq!(read, bytes.len());
-        assert_eq!(
-            c.one(
-                p,
-                HostMsg::BackupVerify {
-                    name: found.name,
-                    sha256: sha256(&bytes)
-                }
-            ),
-            "backup-verified"
-        );
-    }
-}
-
-fn send_image(p: &mut SimPhone, c: &mut Client) {
-    let img = image();
-    assert_eq!(c.one(p, begin(&img)), "factory-ready");
-    for (i, chunk) in img.chunks(MAX_DATA as usize).enumerate() {
-        c.data(p, i as u64 * MAX_DATA as u64, chunk);
-    }
 }
 
 /// The states a phone can be found in, by name, each built from nothing.
@@ -261,8 +75,7 @@ fn build(state: &str) -> (SimPhone, Client) {
             let f = p.feed(
                 0,
                 PhoneInput::ProvisionEnded {
-                    steps: vec![],
-                    failed: None,
+                    result: Some(result(None)),
                 },
             );
             assert_eq!(c.read(f)[0].name(), "provision-done");
@@ -323,23 +136,15 @@ fn build(state: &str) -> (SimPhone, Client) {
         "provisioning" => through(4),
         "provisioned" => through(5),
         "after the restart" | "after the restart, unpaired" => {
-            let (p, mut c) = through(5);
-            let mut p2 = sim_phone(p.state_file.clone(), true, false, 3);
-            p2.feed(0, PhoneInput::LinkUp);
-            let h = c.hello(&mut p2);
-            assert_eq!(h.pair, PairMode::Token);
+            let (mut p, mut c) = through(5);
+            p.start(true, 0);
+            p.feed(0, PhoneInput::LinkUp);
+            let h = c.hello(&mut p);
+            assert_eq!(h.pair, PairMode::Token, "the session is not up yet");
             if state == "after the restart" {
-                assert_eq!(
-                    c.one(
-                        &mut p2,
-                        HostMsg::Resume {
-                            token: c.token.unwrap()
-                        }
-                    ),
-                    "paired"
-                );
+                assert_eq!(c.resume(&mut p), "paired");
             }
-            (p2, c)
+            (p, c)
         }
         "a step is running" => {
             let (mut p, mut c) = through(2);
@@ -404,10 +209,10 @@ fn expected(state: &str, t: &str) -> &'static str {
                 _ => "error:not-allowed",
             }
         }
+        // Never locked (§2.5); with no token on the phone it is out of turn
         "resume" => {
             return match state {
                 "after the restart, unpaired" => "paired",
-                "locked" => "error:locked",
                 _ => "error:not-allowed",
             }
         }
@@ -427,7 +232,7 @@ fn expected(state: &str, t: &str) -> &'static str {
         return "error:busy";
     }
     if image_stream {
-        // LINK.md D15: with the image's stream open, only its own messages
+        // §5.6: with the image's stream open, only its own messages
         return match (t, state) {
             ("factory-end", "image all sent") => "factory-verified",
             _ => "error:not-allowed",
@@ -450,7 +255,8 @@ fn expected(state: &str, t: &str) -> &'static str {
             "firstboot-failed" => "error:firstboot-failed",
             _ => ok(state == "ready to provision", "provision-started"),
         },
-        "restart" => ok(!before_provisioned, "restarting"),
+        // Once, in the boot in which provisioning ended (§2.7)
+        "restart" => ok(state == "provisioned", "restarting"),
         "smoke" => ok(state == "after the restart", "smoke-report"),
         "finish" => ok(!before_provisioned, "finished"),
         other => panic!("{other}"),
@@ -600,10 +406,6 @@ fn wrong_frames(c: &Client) -> Vec<(&'static str, Vec<u8>)> {
         ("short", good[..40].to_vec()),
         ("empty", vec![]),
         (
-            "data with no stream",
-            frame::encode(Kind::Data, c.seq, 0, b"abc", MAX_DATA).unwrap(),
-        ),
-        (
             "data over max_data",
             frame::encode(Kind::Data, c.seq, 0, &[0; 2048], 4096).unwrap(),
         ),
@@ -624,15 +426,16 @@ fn wrong_frames(c: &Client) -> Vec<(&'static str, Vec<u8>)> {
         ),
         (
             "a hello that is not frame 0",
-            msg(
-                r#"{"t":"hello","id":1,"proto":[1],"installer":{"name":"n","version":"v"},"max_data":4096}"#,
-            ),
+            msg(&format!(
+                r#"{{"t":"hello","id":1,"proto":[1],"installer":{{"name":"n","version":"v"}},"max_data":4096,"nonce":"{}"}}"#,
+                "ab".repeat(32)
+            )),
         ),
     ]
 }
 
 #[test]
-fn every_wrong_frame_ends_the_session_and_counts() {
+fn every_wrong_frame_ends_the_session_and_counts_nothing() {
     for state in [
         "unpaired",
         "waiting",
@@ -641,9 +444,6 @@ fn every_wrong_frame_ends_the_session_and_counts() {
     ] {
         let (_, c) = build(state);
         for (what, bytes) in wrong_frames(&c) {
-            if what == "data with no stream" && state == "image stream open" {
-                continue;
-            }
             let (mut p, mut c) = build(state);
             let before = (p.state_file.clone(), p.phone.stage());
             let got = c.raw(&mut p, &bytes);
@@ -653,7 +453,11 @@ fn every_wrong_frame_ends_the_session_and_counts() {
                 "{what} in \"{state}\": {got:?}"
             );
             assert!(!p.phone.paired(), "{what}: the session is over");
-            assert_eq!(p.phone.wrong_tries(), 1, "{what}: a wrong try is counted");
+            assert_eq!(
+                p.phone.wrong_tries(),
+                0,
+                "{what}: only a wrong code is counted (§2.5)"
+            );
             assert_eq!(
                 (p.state_file.clone(), p.phone.stage()),
                 before,
@@ -671,39 +475,45 @@ fn every_wrong_frame_ends_the_session_and_counts() {
                 "nothing",
                 "{what}: no session, no answer"
             );
-            assert_eq!(
-                p.phone.wrong_tries(),
-                1,
-                "{what}: what follows without a session is not counted again"
-            );
             // A hello starts again; a token pairs again where one exists
             let h = c.hello(&mut p);
             assert_eq!(h.stage, before.1);
-            if let Some(token) = c.token {
-                assert_eq!(c.one(&mut p, HostMsg::Resume { token }), "paired", "{what}");
+            assert_ne!(h.pair, PairMode::Locked, "{what}: no lock");
+            if c.token.is_some() {
+                assert_eq!(c.resume(&mut p), "paired", "{what}");
             }
         }
     }
 }
 
 #[test]
-fn five_wrong_frames_lock_pairing_like_five_wrong_codes() {
-    let (mut p, mut c) = up();
-    for n in 1..=5 {
-        c.hello(&mut p);
-        c.raw(&mut p, b"garbage");
-        assert_eq!(p.phone.wrong_tries(), n);
+fn a_data_frame_with_no_stream_is_answered_once_and_the_session_goes_on() {
+    // §5.1: what an honest host sends after its stream was suspended behind
+    // its back. Not a frame error.
+    for state in ["unpaired", "waiting", "ready to provision", "provisioned"] {
+        let (mut p, mut c) = build(state);
+        let was_paired = p.phone.paired();
+        let before = (p.state_file.clone(), p.factory_file.clone());
+        let got = c.data(&mut p, 0, b"abc");
+        assert!(
+            matches!(&got[..], [Got::Msg(PhoneFrame { re: None, msg: PhoneMsg::Error(e) })] if e.code == ErrorCode::NotAllowed),
+            "{state}: {got:?}"
+        );
+        // The frames behind it are dropped in silence, until a message
+        for i in 1..=5u64 {
+            assert!(c.data(&mut p, i * 3, b"abc").is_empty(), "{state}");
+        }
+        assert_eq!(c.one(&mut p, HostMsg::Ping), "pong", "{state}");
+        assert_eq!(p.phone.paired(), was_paired, "{state}: the session is kept");
+        assert_eq!(c.data(&mut p, 0, b"abc").len(), 1, "{state}: once again");
+        assert_eq!(p.phone.wrong_tries(), 0, "{state}");
+        assert!(p.notes.contains(&Note::LateData));
+        assert_eq!(
+            (p.state_file.clone(), p.factory_file.clone()),
+            before,
+            "{state}: nothing was written"
+        );
     }
-    let h = c.hello(&mut p);
-    assert_eq!((h.pair, h.wait_s), (PairMode::Locked, 30));
-    assert!(p.screens.contains(&Screen::Locked { wait_s: 30 }));
-    // The lock ends by the clock: the screen shows the new code again
-    assert_eq!(p.phone.deadline(), Some(30_000));
-    p.feed(30_000, PhoneInput::Tick);
-    c.now = 30_000;
-    assert_eq!(c.hello(&mut p).pair, PairMode::Code);
-    assert!(matches!(p.screens.last(), Some(Screen::Code(_))));
-    c.pair(&mut p);
 }
 
 #[test]
@@ -818,14 +628,24 @@ fn a_stream_with_no_frame_for_two_minutes_is_suspended() {
     p.feed(c.now, PhoneInput::Tick);
     assert!(p.notes.contains(&Note::StreamIdle));
     // The session is still there (the ping kept it), the stream is not
+    // The host, which knows nothing of it, sends on: told once, not ended
+    let got = c.data(&mut p, 1024, &img[1024..2048]);
+    assert_eq!(got[0].name(), "error:not-allowed");
+    assert!(c.data(&mut p, 2048, &img[2048..3072]).is_empty());
     assert_eq!(c.one(&mut p, HostMsg::FactoryEnd), "error:not-allowed");
+    assert!(p.phone.paired());
+    assert_eq!(p.phone.wrong_tries(), 0);
     // It goes on from the last acknowledged offset: nothing was, so from 0
     let got = c.send(&mut p, begin(&img));
     assert!(
         matches!(
             &got[..],
             [Got::Msg(PhoneFrame {
-                msg: PhoneMsg::FactoryReady { offset: 0 },
+                msg: PhoneMsg::FactoryReady {
+                    offset: 0,
+                    ack_every: TEST_ACK_EVERY,
+                    window: TEST_WINDOW
+                },
                 ..
             })]
         ),
@@ -894,15 +714,7 @@ fn an_answer_that_comes_after_its_session_is_not_sent_into_the_next() {
     p.feed(0, PhoneInput::LinkDown);
     p.feed(0, PhoneInput::LinkUp);
     c.hello(&mut p);
-    assert_eq!(
-        c.one(
-            &mut p,
-            HostMsg::Resume {
-                token: c.token.unwrap()
-            }
-        ),
-        "paired"
-    );
+    assert_eq!(c.resume(&mut p), "paired");
     // Still at it: another step is told so
     assert_eq!(c.one(&mut p, HostMsg::BackupList), "error:busy");
     p.hold = false;
@@ -1057,20 +869,25 @@ fn the_state_file_carries_the_install_across_a_daemon_restart() {
             !text.contains(&omamobile_link::digest::to_hex(&c.token.unwrap().0)),
             "the token is not in the file, only its digest"
         );
-        let again = sim_phone(s.clone(), false, false, 8);
-        assert_eq!(again.phone.stage(), s.stage);
+        let again = sim_phone(s.clone(), false, 8);
         assert_eq!(again.finished, s.stage == Stage::Finished);
+        if !again.finished {
+            assert_eq!(again.phone.stage(), s.stage);
+            assert_eq!(again.state_file, s, "nothing to square: nothing written");
+        }
     }
     // A file that is not one is refused, not guessed at
     for bad in [
         "",
         "{}",
         r#"{"v":2,"stage":"waiting"}"#,
-        r#"{"v":1,"stage":"ready","boot":1,"late_boots":0,"backup_done":false,"provision":"none","provision_failed":"","firstboot_failed":[]}"#,
+        r#"{"v":1,"stage":"ready","boot":1,"boot_id":"","setup_boots":0,"boots_allowed":3,"backup_done":false,"provision":"none","provision_failed":"","optional_failed":[],"firstboot_failed":[]}"#,
+        // The state file of the crate's first version, before the tag
+        r#"{"v":1,"stage":"waiting","boot":1,"late_boots":0,"backup_done":false,"provision":"none","provision_failed":"","firstboot_failed":[]}"#,
     ] {
         assert!(Persistent::from_json(bad.as_bytes()).is_err(), "{bad}");
     }
-    let ok = r#"{"v":1,"stage":"waiting","boot":1,"late_boots":0,"backup_done":false,"provision":"none","provision_failed":"","firstboot_failed":[]}"#;
+    let ok = r#"{"v":1,"stage":"waiting","boot":1,"boot_id":"","setup_boots":0,"boots_allowed":3,"backup_done":false,"provision":"none","provision_failed":"","optional_failed":[],"firstboot_failed":[]}"#;
     assert_eq!(
         Persistent::from_json(ok.as_bytes()).unwrap(),
         Persistent::default()
@@ -1090,15 +907,7 @@ fn hello_starts_the_numbering_again_both_ways() {
     again.token = c.token;
     again.hello(&mut p);
     assert_eq!((again.seq, again.rx), (1, 1));
-    assert_eq!(
-        again.one(
-            &mut p,
-            HostMsg::Resume {
-                token: again.token.unwrap()
-            }
-        ),
-        "paired"
-    );
+    assert_eq!(again.resume(&mut p), "paired");
     assert_eq!(p.phone.wrong_tries(), 0);
     // Each session has its own nonce, so its own serial proof
     assert_ne!(again.nonce, c.nonce);
