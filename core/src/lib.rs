@@ -20,6 +20,10 @@
 //!   address in the signed build index and decided here, answer by answer.
 //! - [`text`]: what a phone, a server or a file name says, made fit to print
 //!   before it is kept, compared or put on a screen.
+//! - [`flow`]: the install as one state machine for every front end, with
+//!   the write path behind a typed confirmation;
+//! - [`firstboot`]: the owner's answers as the files a first start reads.
+//!   Nothing puts them on a phone yet.
 //!
 //! Nothing here does I/O on its own: bytes come in from the caller, and the
 //! only ways out are the transport trait and, for Google's factory image, a
@@ -31,6 +35,7 @@ pub mod device_conf;
 pub mod download;
 pub mod error;
 pub mod fastboot;
+pub mod firstboot;
 pub mod flow;
 pub mod hash;
 pub mod install;
