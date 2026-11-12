@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Builds and runs the Qt Test binary. Offscreen: no window opens on the
+# desktop. The tool is the stand-in in tests/, so there is no Rust build, no
+# phone and no USB. OMAINSTALL_SHOTS=DIR also saves screenshots there.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+mkdir -p "$ROOT/build/tests"
+cd "$ROOT/build/tests"
+
+qmake6 "$ROOT/tests/omainstall_tests.pro"
+make -j"$(nproc)"
+# QML warnings go to the journal unless told otherwise, and a test that
+# loads the window fails on any of them.
+QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_FORCE_STDERR_LOGGING=1 \
+    ./omainstall_tests "$@"
