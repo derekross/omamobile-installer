@@ -767,6 +767,9 @@ pub enum AgentLine {
     Code { code: Code, valid_s: u32 },
     /// A host is paired: no notice, no window.
     Paired,
+    /// The twentieth wrong code (§2.5): the window closes and the notice
+    /// says why. The owner's tap (`show`) is the act that clears it.
+    Locked,
     /// The link is closed for this boot.
     Closed { boots_left: u8 },
     /// The link ended.
@@ -786,6 +789,7 @@ impl AgentLine {
             } => format!("open {boots_left} {closes_s}"),
             AgentLine::Code { code, valid_s } => format!("code {} {valid_s}", code.digits()),
             AgentLine::Paired => "paired".to_string(),
+            AgentLine::Locked => "locked".to_string(),
             AgentLine::Closed { boots_left } => format!("closed {boots_left}"),
             AgentLine::Ended { reason, missing } => {
                 let mut s = format!("ended {reason}");
@@ -1493,6 +1497,8 @@ impl Phone {
                     code,
                     valid_s: until.saturating_sub(now).div_ceil(1000) as u32,
                 },
+                // Twenty wrong codes: say why no code is on show (§2.8)
+                _ if self.lock == Lock::Act => AgentLine::Locked,
                 _ => AgentLine::Open {
                     boots_left: self.p.boots_left(),
                     closes_s: self.closes_s(now),

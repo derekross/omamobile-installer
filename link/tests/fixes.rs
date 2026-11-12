@@ -914,6 +914,14 @@ fn count_twenty_wrong_codes_lock_until_an_act_and_never_lock_resume() {
         let h = other.hello(&mut p);
         assert_eq!((h.pair, h.wait_s), (PairMode::Locked, 0));
         assert_eq!(p.phone.code(), None);
+        if session {
+            // The window closed, and the agent is told why (§2.8): `locked`,
+            // and nothing after it until the owner acts
+            assert_eq!(p.agent.last(), Some(&AgentLine::Locked));
+            assert_eq!(AgentLine::Locked.line(), "locked");
+        } else {
+            assert!(!p.agent.contains(&AgentLine::Locked), "no agent there");
+        }
         // The wrong act does nothing: a volume key in the session, the
         // agent at the first-start screen
         p.feed(
@@ -928,6 +936,7 @@ fn count_twenty_wrong_codes_lock_until_an_act_and_never_lock_resume() {
         // One act at the phone: the count from nothing, and a new code
         if session {
             tap(&mut p, now);
+            assert!(matches!(p.agent.last(), Some(AgentLine::Code { .. })));
         } else {
             p.feed(now, PhoneInput::Key);
             assert!(matches!(p.screens.last(), Some(Screen::Code(_))));

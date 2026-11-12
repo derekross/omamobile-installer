@@ -52,7 +52,7 @@ ep IN, one write per frame   <--     Send(bytes)
 2. **The loop.** Feed one input, get a list, carry it out *in order*, then feed the next. A `Send` is one write to the IN endpoint. An effect without a ticket (`Screen`, `Persist`, `FactoryWrite`, ...) must succeed before the next item is touched: if it cannot, stop working through the list and feed `PhoneInput::Fault`. That order is what makes the plan's "recorded on disk before the reply that announces it" true, and it is §6.5's write order: `Persist` always comes before the `Send` of the reply; the state says `provisioned` before the image is deleted; it says `finished` before `finished` is sent.
 3. **Effects with a ticket** (`ReadFacts`, `CheckAnswers`, `StartFirstboot`, `BackupList`, `BackupDigest`, `FactoryDigest`, `Smoke`, ...) have an answer, which comes back as `PhoneInput::Done(ticket, outcome)`, at once or minutes later. The machine goes on answering `ping`, `status` and a new `hello` meanwhile, sends `progress` every five seconds to the session that waits, and tells every other step `busy`. An answer for a session that has ended is applied where it changed something (a verified partition, a started first boot) and is not sent to the next session.
 4. **Jobs that outlive a session** report by themselves: `PhoneInput::FirstbootEnded`, `Progress`, and `ProvisionEnded { result }`, which carries the worker's result file as it is (`None`: it left none). The machine judges it: a run succeeds when every required step is `ok`; the optional steps that failed are kept for `status`.
-5. **The owner at the phone.** `PhoneInput::Key`: a volume key while the first-start screen is up. `AgentUp` / `AgentDown`: the session agent connected to the daemon's socket, or left. `AgentShow` / `AgentHide`: its `show` and `hide`. `SessionUp`: three minutes after the display manager started with no agent yet. The machine answers with `Effect::Agent(AgentLine)`, whose `line()` is the text the socket carries (`open 2 600`, `code DIGITS 600`, `paired`, `closed 2`, `ended finished`). The line with the code is for the socket and nothing else.
+5. **The owner at the phone.** `PhoneInput::Key`: a volume key while the first-start screen is up. `AgentUp` / `AgentDown`: the session agent connected to the daemon's socket, or left. `AgentShow` / `AgentHide`: its `show` and `hide`. `SessionUp`: three minutes after the display manager started with no agent yet. The machine answers with `Effect::Agent(AgentLine)`, whose `line()` is the text the socket carries (`open 2 600`, `code DIGITS 600`, `locked`, `paired`, `closed 2`, `ended finished`). The line with the code is for the socket and nothing else.
 6. **The clock.** `phone.deadline()` is when the next `Tick` is due (a lock ending, a session or a stream gone quiet, `progress` owed, the session's code window, the ten unpaired minutes of the plan's §2.2). No tick is needed before it. `Effect::Close` closes the link for this boot.
 7. **Read buffer.** `frame::read_buffer_len(config.max_data)`; one frame per completed read.
 8. **Flow control is the shell's (the plan's §5.7).** The machine has no notion of a write that blocks. The daemon must: read the OUT endpoint independently of its writes to the IN endpoint; keep at most 8 frames queued and stop reading while 8 wait; give a write 30 s and then cancel what it queued and feed `PhoneInput::LinkDown`; and on `Effect::DropUnsent` (a new `hello` ended a session) cancel that session's frames the bus has not taken, before it writes the answer.
@@ -191,7 +191,7 @@ The plan's §11.3 names a test for each fix at stage L2, against the daemon. The
 
 ### Guards removed, one at a time
 
-After the change, each of these 36 guards was taken out of the source alone and the tests run (`cargo test -p omamobile-link --tests`); each time a test failed. One survived at first (the serial proof computed without the host's nonce: both sides use the same function, so neither noticed) and got its own test.
+After the change, each of these 37 guards was taken out of the source alone and the tests run (`cargo test -p omamobile-link --tests`); each time a test failed. One survived at first (the serial proof computed without the host's nonce: both sides use the same function, so neither noticed) and got its own test.
 
 | | The guard | Caught by |
 | --- | --- | --- |
@@ -214,6 +214,7 @@ After the change, each of these 36 guards was taken out of the source alone and 
 | F3 | `reopen` only when the budget is spent | `startup::budget_reopen_gives_one_more_setup_boot` |
 | F4 | `pair` is refused while locked | `fixes::count_twenty_...` |
 | F4 | The twentieth wrong code locks until an act | the same |
+| P4 | The agent is told `locked`, not `open`, after the twentieth | the same |
 | F4 | A late data frame is answered once | `turns::a_data_frame_with_no_stream_...` |
 | F4 | A volume key counts only at the first-start screen | `fixes::count_twenty_...` |
 | F5 | A required step that is not `ok` fails the run | `fixes::a_camera_only_failure_...` |
@@ -274,7 +275,7 @@ The first version reported seven places where the plan as written led somewhere 
 
 Two more things in the corrected plan look wrong beside P1 to P3 above; neither is the crate's to settle:
 
-- **The agent's socket has no line for a lock.** §2.8 fixes the lines (`open`, `code`, `paired`, `closed`, `ended`); §8 has the session say "Too many wrong codes from the computer ... Tap to show a new code". After the twentieth wrong code the crate sends `open` again: the window closes, the notice is back, and a tap (an act at the phone) shows a new code. What the owner cannot be told with these lines is why the window closed. After the fifth the window gets the new code, and the installer says the wait.
+- **The agent's socket had no line for a lock.** §2.8 now has one (the plan's P4, accepted): after the twentieth wrong code the crate sends `locked` (`AgentLine::Locked`) where it sent `open`: the window closes, the notice says why, and a tap (an act at the phone) shows a new code. An agent that connects while that lock holds is told `locked` too. After the fifth the window gets the new code, and the installer says the wait.
 - **`reopen` "takes effect at the next boot"** (§2.8) is the unit's to keep, not the state file's. If the daemon is started in the boot `reopen` ran in, it finds a boot it has not counted, counts it, and offers the link at once: one boot is still all that is granted, but the gadget changes in a running session.
 
 ## 8. What stage L2 will need that is not here
