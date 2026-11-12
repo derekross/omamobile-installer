@@ -16,6 +16,11 @@
 //!   -> activate_and_reboot
 //! ```
 //!
+//! That is the order of Omarchy Mobile's `tools/install-phone`: slot B's
+//! boot images in the descriptor's order, `userdata`, `set_active:b` (what
+//! `fastboot --set-active=b` sends), `reboot`. Nothing else is done about
+//! the slots: no other slot is made active, and no slot is marked.
+//!
 //! What it can send: `getvar:`, `download:`, `flash:<p>` where `<p>` is a
 //! [`Partition`] of the verified release (slot B's boot images, `userdata`),
 //! `set_active:b` and `reboot`; and one question outside the session,
@@ -38,6 +43,9 @@
 //! and every dry-run session) can send nothing that writes or stages a
 //! write: no `flash:`, no `download:`, no `set_active:b`, no `reboot`. And
 //! a `download:` carries exactly eight hex digits.
+//!
+//! A session that stops partway says how far it got ([`Session::reach`]),
+//! from what the phone confirmed: the flow's stop is worded from that.
 use crate::bundle::{VerifiedImage, VerifiedRelease, VerifiedRootImage};
 use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
@@ -105,6 +113,39 @@ fn allowed(command: &str, flashable: &[String]) -> bool {
     // What stages a write or changes the phone: only where a flash can leave
     !flashable.is_empty()
         && (command == "set_active:b" || command == "reboot" || is_download(command))
+}
+
+/// How far a session's writes got, from what the phone confirmed. A
+/// `download:` alone changes nothing on a phone (it is held in memory until
+/// a `flash:`), so only `flash:`, `set_active:b` and `reboot` count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteReach {
+    /// No command that changes the phone was sent.
+    Nothing,
+    /// Slot B's boot images: `done` of `of` were written and confirmed.
+    /// `in_doubt`: the next one's `flash:` was sent and not confirmed, so
+    /// that partition may be partly written. `userdata` is untouched.
+    BootImages { done: u32, of: u32, in_doubt: bool },
+    /// Every boot image is written, and `userdata` was begun: `pieces`
+    /// sparse images were confirmed, and one more may be partly written.
+    Userdata { pieces: u32 },
+    /// Every image is written and confirmed. Slot B was not made active.
+    Written,
+    /// As `Written`; `set_active:b` was sent and not confirmed.
+    SlotInDoubt,
+    /// Slot B is the active slot. `reboot` was not confirmed.
+    SlotSet,
+    /// Everything, and the phone confirmed the restart.
+    Rebooted,
+}
+
+/// What a walk of the root image through a session found: the raw image's
+/// size, `userdata`'s size on the phone, and how many sparse images it took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserdataWalk {
+    pub image_len: u64,
+    pub partition_size: u64,
+    pub pieces: u32,
 }
 
 /// A USB (or fake) link to a phone in fastboot mode: one bulk OUT and one
@@ -487,6 +528,13 @@ pub struct Session<T: Transport> {
     /// The bootloader-slot check was skipped by the maintainer's override.
     /// Only ever true together with `dry_run`.
     slot_check_skipped: bool,
+    /// The phone's size for each boot image's partition, in the plan's order.
+    boot_partition_sizes: Vec<u64>,
+    /// The root image's size, when it was checked against `userdata` before
+    /// the first write ([`Self::preflight_userdata`]).
+    userdata_preflight: Option<u64>,
+    userdata_walk: Option<UserdataWalk>,
+    reach: WriteReach,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -606,6 +654,7 @@ impl<T: Transport> Session<T> {
             )));
         }
         // Each image must fit its slot B partition, a footer image exactly.
+        let mut boot_partition_sizes = Vec::with_capacity(m.boot_writes.len());
         for w in &m.boot_writes {
             let name = w.partition.name();
             let psize = parse_size(&client.getvar(&format!("partition-size:{name}")).await?)
@@ -630,6 +679,7 @@ impl<T: Transport> Session<T> {
                     w.source
                 )));
             }
+            boot_partition_sizes.push(psize);
         }
         let baseband = client
             .getvar("version-baseband")
@@ -651,7 +701,51 @@ impl<T: Transport> Session<T> {
             state: State::Boot(0),
             dry_run: options.dry_run,
             slot_check_skipped,
+            boot_partition_sizes,
+            userdata_preflight: None,
+            userdata_walk: None,
+            reach: WriteReach::Nothing,
         })
+    }
+
+    /// The phone's size for each boot image's partition, in the plan's
+    /// order, as read by the checks.
+    pub fn boot_partition_sizes(&self) -> &[u64] {
+        &self.boot_partition_sizes
+    }
+    /// What the walk of the root image found, once it was begun.
+    pub fn userdata_walk(&self) -> Option<UserdataWalk> {
+        self.userdata_walk
+    }
+    /// How far this session's writes got. In a dry run: nothing, always.
+    pub fn reach(&self) -> WriteReach {
+        self.reach
+    }
+
+    async fn userdata_size(&mut self) -> Result<u64> {
+        parse_size(&self.client.getvar("partition-size:userdata").await?)
+            .ok_or_else(|| Error::Phone("the phone reports no partition-size for userdata".into()))
+    }
+
+    /// Before the first write: the root image, `image_len` bytes unpacked
+    /// (as a dry run of the same release found), must fit `userdata`. The
+    /// boot images were checked at `connect`; with this every image is
+    /// checked against its partition before anything is written. The root
+    /// image that is then streamed must be that size.
+    pub async fn preflight_userdata(&mut self, image_len: u64) -> Result<()> {
+        if self.state != State::Boot(0) {
+            return Err(Error::Refused(
+                "userdata's size is checked before the first write".into(),
+            ));
+        }
+        let size = self.userdata_size().await?;
+        if image_len > size {
+            return Err(Error::Phone(format!(
+                "the root image is {image_len} bytes, larger than userdata ({size} bytes)"
+            )));
+        }
+        self.userdata_preflight = Some(image_len);
+        Ok(())
     }
 
     pub fn facts(&self) -> &PhoneFacts {
@@ -750,9 +844,36 @@ impl<T: Transport> Session<T> {
         }
         self.may_write()?;
         self.client.download(data).await?;
+        // From here the partition may be partly written until the phone
+        // confirms: recorded before the command leaves
+        let boots = self.release.manifest().boot_writes.len() as u32;
+        let before = self.reach;
+        self.reach = match before {
+            WriteReach::Nothing => WriteReach::BootImages {
+                done: 0,
+                of: boots,
+                in_doubt: true,
+            },
+            WriteReach::BootImages { done, of, .. } if done < of => WriteReach::BootImages {
+                done,
+                of,
+                in_doubt: true,
+            },
+            WriteReach::BootImages { .. } => WriteReach::Userdata { pieces: 0 },
+            other => other,
+        };
         self.client
             .simple(&format!("flash:{}", partition.name()))
             .await?;
+        self.reach = match self.reach {
+            WriteReach::BootImages { done, of, .. } => WriteReach::BootImages {
+                done: done + 1,
+                of,
+                in_doubt: false,
+            },
+            WriteReach::Userdata { pieces } => WriteReach::Userdata { pieces: pieces + 1 },
+            other => other,
+        };
         Ok(())
     }
 
@@ -801,15 +922,25 @@ impl<T: Transport> Session<T> {
                 "the root image was verified against another release".into(),
             ));
         }
-        let size =
-            parse_size(&self.client.getvar("partition-size:userdata").await?).ok_or_else(|| {
-                Error::Phone("the phone reports no partition-size for userdata".into())
-            })?;
+        if self
+            .userdata_preflight
+            .is_some_and(|checked| checked != image_len)
+        {
+            return Err(Error::Refused(format!(
+                "the root image is {image_len} bytes, not the size that was checked against userdata before the first write"
+            )));
+        }
+        let size = self.userdata_size().await?;
         if image_len > size {
             return Err(Error::Phone(format!(
                 "the root image is {image_len} bytes, larger than userdata ({size} bytes)"
             )));
         }
+        self.userdata_walk = Some(UserdataWalk {
+            image_len,
+            partition_size: size,
+            pieces: 0,
+        });
         self.state = State::Userdata {
             image_len,
             segments: 0,
@@ -844,6 +975,9 @@ impl<T: Transport> Session<T> {
                     image_len,
                     segments: segments + 1,
                 };
+                if let Some(walk) = self.userdata_walk.as_mut() {
+                    walk.pieces = segments + 1;
+                }
                 Ok(())
             }
             Err(e) => self.fail(e),
@@ -854,6 +988,9 @@ impl<T: Transport> Session<T> {
         match self.state {
             State::Userdata { segments, .. } if segments > 0 => {
                 self.state = State::UserdataDone;
+                if !self.dry_run {
+                    self.reach = WriteReach::Written;
+                }
                 Ok(())
             }
             _ => Err(Error::Refused("userdata has not been written".into())),
@@ -879,12 +1016,19 @@ impl<T: Transport> Session<T> {
         if let Err(e) = self.may_write() {
             return self.fail(e);
         }
+        self.reach = WriteReach::SlotInDoubt;
         if let Err(e) = self.client.simple("set_active:b").await {
+            // FAIL is the phone's answer: the slot was not changed
+            if matches!(e, Error::DeviceFail { .. }) {
+                self.reach = WriteReach::Written;
+            }
             return self.fail(e);
         }
+        self.reach = WriteReach::SlotSet;
         match self.client.simple("reboot").await {
             Ok(_) => {
                 self.state = State::Rebooted;
+                self.reach = WriteReach::Rebooted;
                 Ok(())
             }
             Err(e) => self.fail(e),
