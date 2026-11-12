@@ -22,7 +22,7 @@ No identifier goes into this file or into anything committed: no serial number, 
 - **Nothing after the restart:** no radio backup, none of Google's files, no check.
 - **The installer restarts the phone itself,** straight after `set_active:b`. There is no pause between the two, so there is no moment to read `getvar` between them. Step 6 catches the phone in Fastboot Mode on its way up instead.
 
-So the session does not end with a phone to use. **It ends by installing again with `tools/install-guided` from the omarchy-mobile checkout** (step 8), which is the installer that did a real install on this phone.
+So the session does not end with a phone to use. **It ends by installing again with `tools/install-guided --start-over` from the omarchy-mobile checkout** (step 8), which is the installer that did a real install on this phone. Without `--start-over` that tool would find its record of the earlier install and write nothing.
 
 ## What could not be verified without a real phone, and the step that answers each
 
@@ -183,11 +183,13 @@ done
 
 ### 7. What the phone shows (no command)
 
+**Keep the cable in, to a computer that is awake, from the restart on.** Slot B's initramfs has a USB safety net (omarchy-mobile `initramfs/init`, "Self-recovery for bring-up"): if no USB host has configured the phone's USB gadget 45 s after it starts, it prints why on the screen, waits 20 s more (and for the root file system to finish growing), and panics on purpose. That is about 65 s after the start; the panic restarts the phone, and each such start spends one of slot B's tries. Out of tries, the bootloader starts stock Android from slot A, which rewrites the radio partitions. A cable to a charger, or to a computer that is asleep, counts as no host. If the cable does come out, put it back and count the restart in the results.
+
 Watch the screen for five minutes. Nothing can be sent to the phone and nothing is.
 
 - **Expect (inferred from the root image's build and the first-start unit, never seen):** the boot logo; the root file system grows; `omamobile-firstboot` does not run (it runs only while `firstboot.conf` exists); the display manager comes up with no account to sign in to, or the screen stays on the logo. The phone may show up as a USB network device on the computer; SSH is refused (no key anywhere, root locked).
 - **Pass, for this run's purpose:** the phone gets past the bootloader and the kernel's logo into the system written in step 5, and does not fall back to slot A. That is the evidence that the pieces of `userdata` hold a file system.
-- **Stop:** stock Android's recovery or its "Try again / Factory data reset" screen: slot B did not start and the bootloader fell back. **Choose neither.** Hold Volume Down + Power about 20 s for Fastboot Mode (omarchy-mobile AGENTS.md §4) and go to step 8. A stock start writes the radio partitions: take a fresh read-only `nv-backup` after step 8 and say so in the results.
+- **Stop:** "omamobile: no USB host, crashing in 20 s" on the screen, or the phone restarting by itself about a minute after each start: the safety net above found no USB host. Check the cable and the computer before the next start; do not let it run through slot B's tries. Stock Android's recovery or its "Try again / Factory data reset" screen: slot B did not start and the bootloader fell back. **Choose neither.** Hold Volume Down + Power about 20 s for Fastboot Mode (omarchy-mobile AGENTS.md §4) and go to step 8. A stock start writes the radio partitions: take a fresh read-only `nv-backup` after step 8 and say so in the results.
 - **Record:** what was on the screen at 30 s, 2 min and 5 min, in words. A photo only if it shows no network name.
 - **Rollback:** step 8.
 - **Risk:** none (watching).
@@ -198,12 +200,24 @@ Volume Down + Power, about 20 s, for Fastboot Mode. Then:
 
 ```sh
 cd <OMARCHY_MOBILE>
-tools/install-guided --dry-run --reinstall --bootloader-slots-match <BOOTLOADER>
-tools/install-guided --reinstall --bootloader-slots-match <BOOTLOADER>
+tools/install-guided --status
+tools/install-guided --start-over --dry-run --reinstall --bootloader-slots-match <BOOTLOADER>
+tools/install-guided --start-over --reinstall --bootloader-slots-match <BOOTLOADER>
+tools/install-guided --status
 ```
 
-- **Pass:** `install-guided` runs through its own steps (the install, the USB connection, `nv-backup`, `phone-provision`, `phone-smoke`), and the phone is the working install it was before step 5. `tools/nv-backup --check <NV_BACKUP_DIR>` matches, unless step 7 met a stock start.
-- **Stop:** as `docs/INSTALL-GUIDED.md` says for each of its steps.
+**`--start-over` is what makes this step do anything.** This computer holds `install-guided`'s record of the install that put Omarchy Mobile on this phone, and that record says it finished. Without `--start-over`, `install-guided` reads the record, prints "This phone was installed on …" and "To install again from the start …", and exits with status 0 **without writing anything**, for `--dry-run` as well: a recovery step that reports success and leaves the phone as step 5 left it. `--start-over` deletes that record and nothing else (the `state` file and `report.json` in `~/.local/state/omamobile-install/cheetah/`). The radio backup in `<NV_BACKUP_DIR>` and the factory image in `~/.cache/omamobile-install/factory/` stay where they are: its help says so, and the code removes only those two files. It is on both commands on purpose: a dry run records nothing, so the second one finds no record and its `--start-over` does nothing.
+
+The reinstall takes its own radio backup into a new, dated folder (`~/omamobile-backup/cheetah-radio-backup-<date>-<time>`, or under `--backup-dir`); `<NV_BACKUP_DIR>` is not written.
+
+- **Expect:** the first `--status` shows the earlier install, every step `done`. Each of the two runs then prints "The record of the earlier install is forgotten" (the first one) and goes through its steps by number: "Step 1 of 11: Checking this computer and the download" onwards. The second asks for the codename and prints "Step 5 of 11: Writing Omarchy Mobile to the phone" with `install-phone`'s own flash output under it.
+- **Pass, all of:**
+  - neither run printed "This phone was installed on";
+  - the second run showed the write step doing the write (the codename typed, `install-phone`'s flashes of the five `_b` images and `userdata`), then its own steps to the end (the USB connection, the first start, `nv-backup`, `phone-provision`, the restart, `phone-smoke`);
+  - the last `--status` reads `started` today, "Writing Omarchy Mobile to the phone" `done`, and every later step `done`;
+  - the phone is the working install it was before step 5, with the account `install-guided` just asked for (the phone step 5 left had none: an account is itself the proof that this install ran);
+  - `tools/nv-backup --check <NV_BACKUP_DIR>` matches, unless step 7 met a stock start.
+- **Stop:** "This phone was installed on …" (a run without `--start-over`: nothing was written; run it again with the option). Otherwise as `docs/INSTALL-GUIDED.md` says for each of its steps.
 - **Rollback:** `fastboot --set-active=a` and stock Android, as omarchy-mobile's INSTALL.md describes.
 - **Risk:** medium (it erases `userdata` again, as every install).
 
