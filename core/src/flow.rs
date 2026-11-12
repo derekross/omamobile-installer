@@ -280,8 +280,10 @@ pub enum PhoneFact {
     TwoPhones { unlock_shown: bool },
 }
 
-/// Whether starting the installer again can get past a stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether starting the installer again can get past a stop. On a screen
+/// ([`Screen::retry`]) it reads `whenever`, `after-fix` or `stops-again`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Retry {
     /// Nothing has to change first.
     Whenever,
@@ -673,6 +675,10 @@ pub struct Screen {
     pub state: &'static str,
     /// For `stopped`: [`Stop::id`].
     pub stop: Option<&'static str>,
+    /// For `stopped`: whether starting the installer again can get past the
+    /// stop ([`Stop::retry`]), so a front end offers "start again" where it
+    /// can help and not where it can't. `None` on every other screen.
+    pub retry: Option<Retry>,
     pub title: String,
     /// Said before everything else on the screen, and made to stand out:
     /// a check was skipped by the maintainer's override.
@@ -1675,6 +1681,7 @@ impl Flow {
         let mut s = Screen {
             state: "",
             stop: None,
+            retry: None,
             title: String::new(),
             notice: self
                 .slot_check_skipped
@@ -1929,6 +1936,7 @@ impl Flow {
             Step::Stopped(stop) => {
                 s.state = "stopped";
                 s.stop = Some(stop.id());
+                s.retry = Some(stop.retry);
                 s.title = stop.title.clone();
                 s.body = stop.message.clone();
                 s.footer = stop.footer();
