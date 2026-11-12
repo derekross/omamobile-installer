@@ -8,7 +8,7 @@ The desktop window of the [Omarchy Mobile installer](../README.md): it guides a 
 
 It is a front end and nothing more. The installer's core (Rust, `../core`) decides the order of the steps, every refusal and every sentence about the phone; the window draws what the core says and hands in what the person did. The two talk through the command-line tool, `omamobile-install`, which the app starts and exchanges JSON lines with. That protocol and the rest of the design are in [docs/APP.md](../docs/APP.md).
 
-**The tool's side of that protocol is not built yet.** Until it is, the app runs only against the stand-in in `tests/`, which replays screens recorded from the core.
+The tool's side of that protocol is `omamobile-install json` (`../cli/src/json.rs`). The app's tests drive it with the tool's pretend phone, and a stand-in in `tests/` that replays screens recorded from the core. **The app has not been run with a phone connected to it.**
 
 ## Shortcuts
 
@@ -40,18 +40,18 @@ The tool is looked for beside the app's binary, then on `PATH`. `OMAINSTALL_TOOL
 
 ## Build and test
 
-Needs `qt6-base`, `qt6-declarative`, `make` and a C++ compiler (all part of Omarchy), and `python3` for the tests' stand-in.
+Needs `qt6-base`, `qt6-declarative`, `make` and a C++ compiler (all part of Omarchy), and `python3` for the tests' stand-in. The tests against the real tool also need the Rust toolchain (`cargo`); without it they are skipped, and the run says so.
 
 ```sh
 bin/build       # build/omainstall
-bin/test        # the Qt Test binary, offscreen: no window opens, no phone, no USB, no Rust build
+bin/test        # the Qt Test binary, offscreen: no window opens, no phone, no USB
 bin/install     # makepkg -fsi: the app in the launcher (asks for your password)
 
 OMAINSTALL_SHOTS=/some/dir bin/test     # also saves a picture of each screen there
 OMAINSTALL_TOOL=$PWD/tests/stand-in-tool build/omainstall      # try the window against the stand-in
 ```
 
-The tests never start a real `omamobile-install`: every one names the stand-in, or a path that does not exist.
+`bin/test` first builds `omamobile-install` with its pretend phone (`cargo build --features fake-phone`), and the tests whose names begin with `theRealTool` run the app against it: the straight path to the dry run with a download from a stand-in for Google's server in the test, eight stops, a locked phone, two phones, a file handed in, and a download cancelled and gone on with. Each of them starts the tool through a small script that adds `--fake-phone`, so no USB device is opened, and ends by reading the pretend phone's record: reads only. Every other test names the stand-in, or a path that does not exist.
 
 `tests/fixtures/screens/` holds the core's own screens, one JSON file for each state and each kind of stop. `tests/record-screens/run` writes them again from the core as it is now (it needs the Rust toolchain; the tests do not).
 
@@ -65,7 +65,7 @@ The tests never start a real `omamobile-install`: every one names the stand-in, 
 | `src/theme.{h,cpp}`, `translator.{h,cpp}` | Omarchy's accent, Hyprland's rounding and Omarchy's language, followed live |
 | `src/i18n/de.json` | German, as the working example of a translation |
 | `src/cli.{h,cpp}` | `omainstall check` |
-| `tests/` | The Qt tests, the stand-in for the tool, the recorded screens and the program that records them |
+| `tests/` | The Qt tests (against the stand-in and against the real tool), the stand-in for the tool, the recorded screens and the program that records them |
 | `pkgbuild/` | The Arch package, the `.desktop` file and the icon |
 
 ## Licence

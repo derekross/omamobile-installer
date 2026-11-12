@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-QT += core gui qml quick quickcontrols2 testlib dbus
+QT += core gui qml quick quickcontrols2 testlib dbus network
 CONFIG += c++17 testcase
 TARGET = omainstall_tests
 TEMPLATE = app
