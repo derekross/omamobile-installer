@@ -2030,7 +2030,49 @@ impl Flow {
                 s.footer = stop.footer();
             }
         }
+        s.fit_to_print();
         s
+    }
+}
+
+impl Screen {
+    /// The last thing done to a screen: every string of it through
+    /// [`crate::text::plain`]. A phone's answers were made plain where they
+    /// were read; this is for everything else a screen is built from (the
+    /// name of a file the owner picked, what an HTTP client said of a
+    /// server's answer, the release's own names), and for the phone's again.
+    fn fit_to_print(&mut self) {
+        use crate::text::plain;
+        let each = |list: &mut Vec<String>| list.iter_mut().for_each(|s| *s = plain(s));
+        self.title = plain(&self.title);
+        for text in [&mut self.notice, &mut self.link, &mut self.problem]
+            .into_iter()
+            .flatten()
+        {
+            *text = plain(text);
+        }
+        each(&mut self.body);
+        each(&mut self.plan);
+        each(&mut self.footer);
+        if let Some(quote) = &mut self.quote {
+            quote.intro = plain(&quote.intro);
+            each(&mut quote.lines);
+            each(&mut quote.after);
+            for link in &mut quote.links {
+                link.label = plain(&link.label);
+                link.url = plain(&link.url);
+            }
+        }
+        for step in &mut self.steps {
+            step.text = plain(&step.text);
+            if let Some(command) = &mut step.command {
+                *command = plain(command);
+            }
+        }
+        if let Some(file) = &mut self.file {
+            file.name = plain(&file.name);
+            file.build = plain(&file.build);
+        }
     }
 }
 

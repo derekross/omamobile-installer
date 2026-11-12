@@ -308,7 +308,9 @@ impl<T: Transport> Client<T> {
                     packet.len()
                 )));
             }
-            let text = String::from_utf8_lossy(&packet[4..]).into_owned();
+            // What a phone says ends up in sentences a front end prints:
+            // nothing a terminal acts on is kept of it, from here on
+            let text = crate::text::plain(&String::from_utf8_lossy(&packet[4..]));
             match &packet[..4] {
                 b"OKAY" => return Ok(Reply::Okay(text)),
                 b"FAIL" => {
@@ -1187,6 +1189,43 @@ mod tests {
         assert!(options.dry_run);
         assert!(!options.reinstall && !options.maintainer_skip_bootloader_slot_check);
         assert_eq!(options.bootloader_slots_confirmed, None);
+    }
+
+    /// A phone that answers every command with the packets it was given.
+    struct Says(Vec<Vec<u8>>);
+    impl Transport for Says {
+        async fn send(&mut self, data: &[u8]) -> Result<usize> {
+            Ok(data.len())
+        }
+        async fn recv(&mut self) -> Result<Vec<u8>> {
+            Ok(self.0.remove(0))
+        }
+    }
+
+    #[test]
+    fn every_kind_of_answer_is_made_fit_to_print_where_it_is_read() {
+        // ESC sequences, a carriage return, a NUL, and a byte that is not UTF-8
+        let hostile = b"\x1b[2J\x1b]0;t\x07\rok\0\xff";
+        let shown = "\\u{1b}[2J\\u{1b}]0;t\\u{7} ok\\u{0}\u{fffd}";
+        let packet = |kind: &[u8]| [kind, &hostile[..]].concat();
+        // OKAY: a getvar's value
+        let mut client = Client::reading(Says(vec![packet(b"OKAY")]));
+        assert_eq!(block_on(client.getvar("product")).unwrap(), shown);
+        // FAIL: the phone's message, in the error a front end prints
+        let mut client = Client::reading(Says(vec![packet(b"FAIL")]));
+        let err = block_on(client.getvar("product")).unwrap_err();
+        assert!(
+            matches!(&err, Error::DeviceFail { message, .. } if message == shown),
+            "{err:?}"
+        );
+        assert!(!err.to_string().chars().any(char::is_control));
+        // INFO and TEXT: the lines of getvar:all
+        let mut client = Client::reading(Says(vec![
+            packet(b"INFO"),
+            packet(b"TEXT"),
+            b"OKAY".to_vec(),
+        ]));
+        assert_eq!(block_on(client.getvar_all()).unwrap(), [shown, shown]);
     }
 
     #[test]

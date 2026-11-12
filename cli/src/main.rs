@@ -52,6 +52,7 @@ use omamobile_installer_core::flow::{
 };
 use omamobile_installer_core::install::{flash_userdata_from_reader, UserdataStream};
 use omamobile_installer_core::signature::TrustedKeys;
+use omamobile_installer_core::text::plain;
 use omamobile_installer_core::{build_index, Error};
 use omamobile_installer_usb::UsbTransport;
 use pollster::block_on;
@@ -243,12 +244,14 @@ async fn cmd_devices() -> Res<()> {
     let mut n = 0;
     for info in nusb::list_devices().await?.filter(is_fastboot) {
         n += 1;
+        // Both strings are the device's own: nothing of them that a
+        // terminal acts on is printed
         println!(
             "{:04x}:{:04x} {} serial {}",
             info.vendor_id(),
             info.product_id(),
-            info.product_string().unwrap_or("?"),
-            info.serial_number().unwrap_or("?")
+            plain(info.product_string().unwrap_or("?")),
+            plain(info.serial_number().unwrap_or("?"))
         );
     }
     println!("{n} phone(s) in fastboot mode");

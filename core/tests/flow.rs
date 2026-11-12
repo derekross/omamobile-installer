@@ -1860,3 +1860,149 @@ fn a_screen_is_plain_data_for_any_front_end() {
         ]
     );
 }
+
+/// Every string of a screen, wherever it sits.
+fn strings_of(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|v| strings_of(v, out)),
+        Value::Object(map) => map.values().for_each(|v| strings_of(v, out)),
+        _ => {}
+    }
+}
+/// Nothing on the screen can move a terminal's cursor, clear it, set its
+/// title, ring its bell, turn the reading order round or end a C string.
+fn fit_to_print(flow: &Flow) -> String {
+    let mut strings = Vec::new();
+    strings_of(&serde_json::to_value(flow.screen()).unwrap(), &mut strings);
+    for s in &strings {
+        assert!(
+            !s.chars().any(|c| c.is_control()
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')),
+            "a control character on the screen: {s:?}"
+        );
+    }
+    strings.join(" ")
+}
+
+/// ESC sequences (clear the screen, set the window title), a carriage
+/// return that would overwrite the line, a NUL, a bell and a right-to-left
+/// override.
+const HOSTILE: &str = "\u{1b}[2J\u{1b}]0;gone\u{7}\rall is well\0\u{202e}";
+
+#[test]
+fn what_a_phone_says_is_made_fit_to_print_before_it_reaches_a_screen() {
+    let bundle = TestBundle::new();
+    // The product name, on the stop for another model
+    let other = phone("ready");
+    other.edit(|s| {
+        s.vars.insert("product".into(), format!("pan{HOSTILE}ther"));
+    });
+    let mut flow = flow_at(&bundle, &other, "phone");
+    look(&mut flow, &other).unwrap();
+    assert_eq!(stop(&flow).id(), "wrong-model");
+    let text = fit_to_print(&flow);
+    // Shown, with each such character spelled out where it stood
+    assert!(
+        text.contains("is a 'pan\\u{1b}[2J\\u{1b}]0;gone\\u{7} all is well\\u{0}\\u{202e}ther'"),
+        "{text}"
+    );
+    let StopKind::WrongModel { found } = &stop(&flow).kind else {
+        panic!()
+    };
+    assert!(!found.chars().any(char::is_control), "{found:?}");
+
+    // A name that is the codename but for a NUL is not the codename
+    let nearly = phone("ready");
+    nearly.edit(|s| {
+        s.vars.insert("product".into(), "cheetah\0".into());
+    });
+    let mut flow = flow_at(&bundle, &nearly, "phone");
+    look(&mut flow, &nearly).unwrap();
+    assert_eq!(stop(&flow).id(), "wrong-model");
+    fit_to_print(&flow);
+
+    // The bootloader and baseband versions, on the stop that names them
+    let odd = phone("ready");
+    odd.edit(|s| {
+        for name in [
+            "version-bootloader",
+            "version-bootloader-a",
+            "version-bootloader-b",
+        ] {
+            s.vars.insert(name.into(), format!("boot{HOSTILE}"));
+        }
+        s.vars
+            .insert("version-baseband".into(), format!("radio{HOSTILE}"));
+    });
+    let mut flow = flow_at(&bundle, &odd, "phone");
+    look(&mut flow, &odd).unwrap();
+    assert_eq!(stop(&flow).id(), "build-not-listed");
+    let text = fit_to_print(&flow);
+    assert!(
+        text.contains("boot\\u{1b}[2J") && text.contains("radio\\u{1b}[2J"),
+        "{text}"
+    );
+
+    // Two bootloader copies that differ, each named
+    let differ = phone("slots-differ");
+    differ.edit(|s| {
+        s.vars
+            .insert("version-bootloader-b".into(), format!("b{HOSTILE}"));
+    });
+    let mut flow = flow_at(&bundle, &differ, "phone");
+    look(&mut flow, &differ).unwrap();
+    assert_eq!(stop(&flow).id(), "bootloader-slots-differ");
+    fit_to_print(&flow);
+
+    // A phone's FAIL message, in an error a front end prints, and on the
+    // stop the dry run makes of it
+    let failing = phone("ready");
+    let mut flow = flow_at(&bundle, &failing, "dry-run");
+    failing.edit(|s| {
+        s.fail_on.push("getvar:max-download-size".into());
+    });
+    assert!(block_on(flow.dry_run(failing.clone())).unwrap().is_none());
+    assert_eq!(stop(&flow).id(), "dry-run-refused");
+    fit_to_print(&flow);
+    let plain = phone("ready");
+    plain.edit(|s| {
+        s.vars.insert("current-slot".into(), HOSTILE.into());
+    });
+    let mut flow = flow_at(&bundle, &plain, "phone");
+    let err = look(&mut flow, &plain).unwrap_err().to_string();
+    assert!(!err.chars().any(char::is_control), "{err:?}");
+    assert!(err.contains("\\u{1b}[2J"), "{err}");
+
+    // The answer to the unlock question is read for a yes or no, and one
+    // that carries such characters is neither
+    let locked = phone("locked");
+    locked.edit(|s| s.unlock_ability = Some(format!("get_unlock_ability: 1{HOSTILE}")));
+    let mut flow = flow_at(&bundle, &locked, "phone");
+    look(&mut flow, &locked).unwrap();
+    assert_eq!(
+        flow.step(),
+        &Step::Unlock {
+            oem_unlocking: UnlockAbility::Unknown
+        }
+    );
+    fit_to_print(&flow);
+
+    // What a clean phone says is shown as it is
+    let clean = phone("other-model");
+    let mut flow = flow_at(&bundle, &clean, "phone");
+    look(&mut flow, &clean).unwrap();
+    assert!(fit_to_print(&flow).contains("is a 'panther'"));
+}
+
+#[test]
+fn a_file_name_with_control_characters_is_made_fit_to_print() {
+    let bundle = TestBundle::new();
+    let phone = phone("ready");
+    let mut flow = flow_at(&bundle, &phone, "factory-image");
+    let name = format!("wrong{HOSTILE}.zip");
+    assert!(flow.factory_zip(&name, 5).unwrap().is_none());
+    let text = fit_to_print(&flow);
+    assert!(text.contains("wrong\\u{1b}[2J"), "{text}");
+    assert!(text.contains("is not the file for this phone"));
+}

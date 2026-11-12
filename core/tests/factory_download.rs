@@ -1226,6 +1226,32 @@ fn a_download_that_stalls_is_an_interrupted_one_that_keeps_its_bytes_and_can_be_
 }
 
 #[test]
+fn what_a_server_or_an_http_client_says_is_made_fit_to_print() {
+    let bundle = TestBundle::new();
+    let phone = phone();
+    let size = bundle.factory_zip.len() as u64;
+    // An ESC sequence, a carriage return, a NUL and a bell, as a server
+    // could put them in a header that an HTTP client then quotes
+    let hostile = "bad header \u{1b}[2J\u{1b}]0;gone\u{7}\rall is well\0";
+    for failure in [
+        FetchFailure::Network(hostile.into()),
+        FetchFailure::Storage(hostile.into()),
+    ] {
+        let mut flow = accepted(&bundle, &phone);
+        let mut download = flow.factory_download(0).unwrap();
+        download.response(&ok(size)).unwrap();
+        flow.factory_download_done(download, Some(failure)).unwrap();
+        let screen = flow.screen();
+        let problem = screen.problem.unwrap();
+        assert!(!problem.chars().any(char::is_control), "{problem:?}");
+        assert!(
+            problem.contains("bad header \\u{1b}[2J\\u{1b}]0;gone\\u{7} all is well\\u{0}"),
+            "{problem}"
+        );
+    }
+}
+
+#[test]
 fn a_download_that_cannot_be_made_falls_back_to_the_owners_own_download() {
     let bundle = TestBundle::new();
     let phone = phone();
