@@ -17,6 +17,7 @@
 pub mod answers;
 pub mod digest;
 pub mod frame;
+pub mod host;
 pub mod json;
 pub mod msg;
 pub mod phone;

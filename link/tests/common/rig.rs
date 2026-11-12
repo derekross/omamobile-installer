@@ -66,3 +66,59 @@ pub fn sim_phone(state: Persistent, new_boot: bool, code_screen: bool, seed: u64
     p.parts = parts();
     p
 }
+
+// --- The installer's side, and the loopback ---------------------------------
+
+use super::answers;
+use omamobile_link::host::{Command, Event, HostConfig};
+use omamobile_link::msg::Stage;
+use omamobile_link::phone::PhoneInput;
+use omamobile_link::sim::{Loopback, SimHost};
+
+pub fn host_config() -> HostConfig {
+    HostConfig::new("omamobile-install", "0.0.1", SERIAL)
+}
+
+pub fn rig() -> Loopback {
+    let mut host = SimHost::new(host_config());
+    host.factory = image();
+    Loopback::new(sim_phone(Persistent::default(), true, true, 1), host)
+}
+
+/// Connect and pair with the code on the phone's screen.
+pub fn paired() -> Loopback {
+    let mut lb = rig();
+    lb.connect();
+    assert!(lb.saw(|e| *e == Event::NeedCode), "{:?}", lb.host.events);
+    let code = lb.phone.phone.code().expect("a code is shown");
+    lb.command(Command::Pair(code));
+    assert!(lb.host.host.ready(), "{:?}", lb.host.events);
+    lb
+}
+
+/// Paired, the answers in, first boot done.
+pub fn set_up() -> Loopback {
+    let mut lb = paired();
+    lb.command(Command::Answers(answers()));
+    assert!(
+        lb.saw(|e| *e == Event::AnswersAccepted),
+        "{:?}",
+        lb.host.events
+    );
+    lb.phone_input(PhoneInput::FirstbootEnded { failed: vec![] });
+    assert_eq!(lb.phone.phone.stage(), Stage::FirstbootDone);
+    lb.host.take_events();
+    lb
+}
+
+/// The phone restarts: a new daemon from the state file, the session on the
+/// screen (no code), the same partitions and image file.
+pub fn reboot(lb: &mut Loopback) {
+    lb.cut();
+    let state = lb.phone.state_file.clone();
+    let mut p = sim_phone(state, true, false, 99);
+    p.factory_file = core::mem::take(&mut lb.phone.factory_file);
+    p.sums = lb.phone.sums.take();
+    p.conf = lb.phone.conf.take();
+    lb.phone = p;
+}

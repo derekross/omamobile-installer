@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: MIT
-//! Stand-ins for tests: the phone's shell with its world in memory.
+//! Stand-ins for tests: both shells with their worlds in memory, and a
+//! loopback that carries frames between the two state machines and can
+//! lose, repeat, swap or damage any of them, or cut the link.
 //!
 //! Behind the `sim` feature: a shipping build has none of it. Nothing here
 //! opens a file or a device.
 use crate::answers::Problem;
 use crate::digest::sha256;
+use crate::host::{
+    Command, Event, Host, HostConfig, HostEffect, HostInput, HostOutcome, HostOutput,
+};
 use crate::json::Value;
+use crate::msg::{BackupPart, Token};
 use crate::phone::{
     Effect, Facts, Note, Outcome, PartFound, Persistent, Phone, PhoneConfig, PhoneInput,
     PhoneOutput, Screen, Ticket,
 };
 use crate::Entropy;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Numbers that look random and are the same every run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,5 +305,292 @@ impl SimPhone {
             }
         }
         frames
+    }
+}
+
+/// The installer's shell as a test sees it.
+pub struct SimHost {
+    pub host: Host,
+    /// The backup directory: `NAME.img` by name.
+    pub backup: BTreeMap<String, Vec<u8>>,
+    /// What `BackupFinish` wrote down.
+    pub backup_finished: Option<Vec<(BackupPart, [u8; 32])>>,
+    /// The factory image the download step verified.
+    pub factory: Vec<u8>,
+    /// The work directory's token.
+    pub token: Option<Token>,
+    pub events: Vec<Event>,
+}
+
+impl SimHost {
+    pub fn new(cfg: HostConfig) -> SimHost {
+        SimHost {
+            token: cfg.token,
+            host: Host::new(cfg),
+            backup: BTreeMap::new(),
+            backup_finished: None,
+            factory: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    pub fn feed(&mut self, now: u64, input: HostInput<'_>) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        let mut queue: VecDeque<HostOutput> = self.host.handle(now, input).into();
+        while let Some(o) = queue.pop_front() {
+            let answer = match o {
+                HostOutput::Send(f) => {
+                    frames.push(f);
+                    None
+                }
+                HostOutput::Event(e) => {
+                    self.events.push(e);
+                    None
+                }
+                HostOutput::Do(HostEffect::RecordToken(t)) => {
+                    self.token = Some(t);
+                    None
+                }
+                HostOutput::Do(HostEffect::ForgetToken) => {
+                    self.token = None;
+                    None
+                }
+                HostOutput::Do(HostEffect::BackupOpen { ticket, name, .. }) => Some((
+                    ticket,
+                    HostOutcome::Have(self.backup.get(&name).map_or(0, |f| f.len() as u64)),
+                )),
+                HostOutput::Do(HostEffect::BackupWrite { name, offset, data }) => {
+                    let f = self.backup.entry(name).or_default();
+                    f.truncate(offset as usize);
+                    f.extend_from_slice(&data);
+                    None
+                }
+                HostOutput::Do(HostEffect::BackupDigest { ticket, name }) => Some((
+                    ticket,
+                    match self.backup.get(&name) {
+                        Some(f) => HostOutcome::Digest(sha256(f)),
+                        None => HostOutcome::Failed,
+                    },
+                )),
+                HostOutput::Do(HostEffect::BackupDiscard { name }) => {
+                    self.backup.remove(&name);
+                    None
+                }
+                HostOutput::Do(HostEffect::BackupFinish { parts }) => {
+                    self.backup_finished = Some(parts);
+                    None
+                }
+                HostOutput::Do(HostEffect::FactoryRead {
+                    ticket,
+                    offset,
+                    len,
+                }) => Some((
+                    ticket,
+                    match self
+                        .factory
+                        .get(offset as usize..offset as usize + len as usize)
+                    {
+                        Some(d) => HostOutcome::Data(d.to_vec()),
+                        None => HostOutcome::Failed,
+                    },
+                )),
+            };
+            if let Some((ticket, outcome)) = answer {
+                queue.extend(self.host.handle(now, HostInput::Done(ticket, outcome)));
+            }
+        }
+        frames
+    }
+
+    /// The events since the last call.
+    pub fn take_events(&mut self) -> Vec<Event> {
+        core::mem::take(&mut self.events)
+    }
+}
+
+/// Which way a frame goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    ToPhone,
+    ToHost,
+}
+
+/// What becomes of a frame on the loopback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fate {
+    Deliver,
+    /// It never arrives.
+    Drop,
+    /// It arrives twice.
+    Duplicate,
+    /// It arrives after the next frame in its direction.
+    Swap,
+    /// The link goes down instead: this frame and all under way are lost.
+    Cut,
+}
+
+/// Decides a frame's fate: the direction, the frame's number in that
+/// direction since the loopback was made, and its bytes, which it may
+/// change (cut short, flip a bit).
+pub type Fault = Box<dyn FnMut(Dir, u64, &mut Vec<u8>) -> Fate>;
+
+/// The two machines joined in memory.
+pub struct Loopback {
+    pub phone: SimPhone,
+    pub host: SimHost,
+    pub now: u64,
+    pub up: bool,
+    pub fault: Option<Fault>,
+    queue: VecDeque<(Dir, Vec<u8>)>,
+    swapped: [Option<Vec<u8>>; 2],
+    count: [u64; 2],
+    /// Frames delivered, by direction.
+    pub delivered: [u64; 2],
+}
+
+impl Loopback {
+    pub fn new(phone: SimPhone, host: SimHost) -> Loopback {
+        Loopback {
+            phone,
+            host,
+            now: 0,
+            up: false,
+            fault: None,
+            queue: VecDeque::new(),
+            swapped: [None, None],
+            count: [0, 0],
+            delivered: [0, 0],
+        }
+    }
+
+    /// The cable goes in: the phone's function is enabled, the host finds it.
+    pub fn connect(&mut self) {
+        self.up = true;
+        let f = self.phone.feed(self.now, PhoneInput::LinkUp);
+        self.push(Dir::ToHost, f);
+        let f = self.host.feed(self.now, HostInput::LinkUp);
+        self.push(Dir::ToPhone, f);
+        self.run();
+    }
+
+    /// The cable comes out: whatever was under way is lost.
+    pub fn cut(&mut self) {
+        self.up = false;
+        self.queue.clear();
+        self.swapped = [None, None];
+        let _ = self.phone.feed(self.now, PhoneInput::LinkDown);
+        let _ = self.host.feed(self.now, HostInput::LinkDown);
+    }
+
+    fn push(&mut self, dir: Dir, frames: Vec<Vec<u8>>) {
+        if self.up {
+            self.queue.extend(frames.into_iter().map(|f| (dir, f)));
+        }
+    }
+
+    /// Carry frames until none is under way.
+    pub fn run(&mut self) {
+        let mut guard = 0u32;
+        while let Some((dir, mut bytes)) = self.queue.pop_front() {
+            guard += 1;
+            assert!(guard < 1_000_000, "the two machines never stop talking");
+            let i = dir as usize;
+            let n = self.count[i];
+            self.count[i] += 1;
+            let fate = match &mut self.fault {
+                Some(f) => f(dir, n, &mut bytes),
+                None => Fate::Deliver,
+            };
+            let mut arrive = Vec::new();
+            match fate {
+                Fate::Deliver => arrive.push(bytes),
+                Fate::Drop => {}
+                Fate::Duplicate => {
+                    arrive.push(bytes.clone());
+                    arrive.push(bytes);
+                }
+                Fate::Swap => {
+                    self.swapped[i] = Some(bytes);
+                    continue;
+                }
+                Fate::Cut => {
+                    self.cut();
+                    return;
+                }
+            }
+            if !arrive.is_empty() {
+                arrive.extend(self.swapped[i].take());
+            }
+            for b in arrive {
+                if !self.up {
+                    return;
+                }
+                self.delivered[i] += 1;
+                match dir {
+                    Dir::ToPhone => {
+                        let f = self.phone.feed(self.now, PhoneInput::Frame(&b));
+                        self.push(Dir::ToHost, f);
+                    }
+                    Dir::ToHost => {
+                        let f = self.host.feed(self.now, HostInput::Frame(&b));
+                        self.push(Dir::ToPhone, f);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The flow asks for a step.
+    pub fn command(&mut self, cmd: Command) {
+        let f = self.host.feed(self.now, HostInput::Command(cmd));
+        self.push(Dir::ToPhone, f);
+        self.run();
+    }
+
+    /// Something happened on the phone (first boot ended, provisioning ended).
+    pub fn phone_input(&mut self, input: PhoneInput<'_>) {
+        let f = self.phone.feed(self.now, input);
+        self.push(Dir::ToHost, f);
+        self.run();
+    }
+
+    /// Hand back the phone's held answers.
+    pub fn release(&mut self) {
+        let f = self.phone.release(self.now);
+        self.push(Dir::ToHost, f);
+        self.run();
+    }
+
+    /// Let `ms` pass, with every deadline on the way kept.
+    pub fn advance(&mut self, ms: u64) {
+        let end = self.now + ms;
+        loop {
+            let next = [self.phone.phone.deadline(), self.host.host.deadline()]
+                .into_iter()
+                .flatten()
+                .filter(|t| *t <= end)
+                .min();
+            let Some(t) = next else { break };
+            self.now = self.now.max(t);
+            let before = (self.phone.phone.deadline(), self.host.host.deadline());
+            let f = self.phone.feed(self.now, PhoneInput::Tick);
+            self.push(Dir::ToHost, f);
+            let f = self.host.feed(self.now, HostInput::Tick);
+            self.push(Dir::ToPhone, f);
+            self.run();
+            if before == (self.phone.phone.deadline(), self.host.host.deadline()) {
+                // A deadline that a tick does not move: step past it
+                self.now += 1;
+                if self.now > end {
+                    break;
+                }
+            }
+        }
+        self.now = end;
+    }
+
+    /// Does the host's event list hold one that `f` takes?
+    pub fn saw(&self, f: impl Fn(&Event) -> bool) -> bool {
+        self.host.events.iter().any(f)
     }
 }
