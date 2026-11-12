@@ -7,6 +7,12 @@
 // sentence on a screen are the core's. What is the page's own: the buttons,
 // the file picker, the form, and reading the picked file a piece at a time.
 //
+// One file is fetched from Google: its factory image, and only after the
+// person accepted Google's terms on the flow's terms step. The address is
+// the core's (from the release's signed build index), the page fetches it,
+// and the core decides what the answer and the bytes are worth. A fetch the
+// browser refuses falls back to the file the person saves from Google's page.
+//
 //   /            the published release's files, and a real phone over WebUSB
 //   /?pretend    a pretend phone and a test bundle (self-test builds only)
 //   /?selftest   the same, driven through every state by this script
@@ -25,6 +31,10 @@ let pretend = false; // a pretend phone and the built-in test bundle
 let flow = null; // core.InstallFlow
 let phone = null; // core.Phone: the one the person picked, or the pretend one
 let busy = Promise.resolve(); // the action in progress, for the self-test to wait on
+// Self-test builds only: a stand-in on this computer that answers in Google's
+// place ({ origin, mode }), so that a pretend run never reaches Google
+let standIn = null;
+const GOOGLE = "https://dl.google.com/";
 
 const show = (id, text, state) => {
   $(id).textContent = text;
@@ -45,6 +55,11 @@ async function bytes(url, optional = false) {
 async function start(tamper = "", slotOverride = false) {
   phone = null;
   if (pretend) {
+    if (!standIn) {
+      // Served by web/serve.py --stand-in; without it a pretend run fetches nothing
+      const config = await fetch("google-stand-in.json");
+      if (config.ok) standIn = { origin: (await config.json()).origin, mode: "allowed" };
+    }
     flow = core.InstallFlow.selftest($("reinstall").checked, tamper, slotOverride);
     phone = core.fake_phone($("scenario").value);
   } else {
@@ -113,6 +128,62 @@ async function takeFile(file) {
     if (bar) bar.value = done / Math.max(file.size, 1);
   }
   flow.zip_done();
+}
+
+// Fetch Google's factory image: what the core asks for, and nothing else.
+// The core is told the answer and given the bytes as they arrive; it counts
+// and hashes them, and its next screen says how it went. The page keeps no
+// byte of the file.
+async function download() {
+  const request = JSON.parse(flow.download_begin());
+  const bar = $("zip-progress");
+  if (bar) bar.hidden = false;
+  let failure = "";
+  let detail = "";
+  // In a pretend run the stand-in answers in Google's place, or nothing does
+  const target = !pretend ? request.url : standIn ? request.url.replace(GOOGLE, `${standIn.origin}/${standIn.mode}/`) : null;
+  const cameFrom = (url) => (pretend && standIn ? url.replace(`${standIn.origin}/${standIn.mode}/`, GOOGLE) : url);
+  let response = null;
+  if (!target) {
+    failure = "network";
+    detail = "a pretend run fetches nothing from Google, and this page was served without a stand-in (web/serve.py --stand-in)";
+  } else {
+    try {
+      // No cookie and no referrer go to Google. The browser follows a
+      // redirect itself; the core is told where the answer came from
+      response = await fetch(target, { mode: "cors", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" });
+    } catch {
+      // All a page learns: no connection, or a server that does not allow
+      // a page on another origin to read its files
+      failure = "no-answer";
+    }
+  }
+  if (response) {
+    // A length is the file's only when the body is sent as it is
+    const length = response.headers.get("content-encoding") ? null : response.headers.get("content-length");
+    if (flow.download_response(response.status, cameFrom(response.url), length === null ? undefined : Number(length))) {
+      const reader = response.body.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          // The core takes no byte past the file's size
+          if (!flow.download_body(value)) {
+            await reader.cancel();
+            break;
+          }
+          const [have, total] = flow.download_progress();
+          if (bar) bar.value = have / Math.max(total, 1);
+        }
+      } catch (e) {
+        failure = "network";
+        detail = e.message ?? String(e);
+      }
+    } else {
+      await response.body?.cancel();
+    }
+  }
+  flow.download_done(failure, detail);
 }
 
 // Hand the form's fields to the flow. Returns whether they were taken; when
@@ -201,12 +272,21 @@ function controls(s) {
         row.append(el("p", { className: "problem", textContent: "This browser has no WebUSB, so it can't reach a phone. A Chromium-based browser is needed." }));
       }
       break;
+    case "accept-terms":
+      row.append(
+        button("accept-terms", "I accept. Download the file from Google", () => flow.accept_google_terms(Date.now())),
+        button("decline-terms", "I will download it myself", () => flow.decline_google_terms()),
+        el("a", { id: "google", className: "button", href: s.link, target: "_blank", rel: "noopener noreferrer", textContent: "Open Google's page" }),
+      );
+      break;
+    case "download":
     case "take-file": {
       const input = el("input", { type: "file", id: "zip", accept: ".zip" });
       input.addEventListener("change", () => act(() => takeFile(input.files[0])));
+      if (s.action === "download") row.append(button("download", "Download from Google", download));
       row.append(
         el("a", { id: "google", className: "button", href: s.link, target: "_blank", rel: "noopener noreferrer", textContent: "Open Google's page" }),
-        el("label", {}, "The file you saved: ", input),
+        el("label", {}, s.action === "download" ? "Or the file you saved: " : "The file you saved: ", input),
       );
       if (pretend) {
         row.append(button("pretend-zip", "Use the pretend factory image", () => takeFile(new File([core.selftest_factory_zip()], s.file.name))));
@@ -248,6 +328,20 @@ function render() {
   // A check that was skipped: before everything else, and set apart
   if (s.notice) parts.push(el("p", { className: "notice", id: "notice", textContent: s.notice }));
   parts.push(...s.body.map((text) => el("p", { textContent: text })));
+  // Someone else's words: set apart as theirs, with the pages they name
+  if (s.quote) {
+    const link = (l) => el("li", {}, el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer", textContent: l.label }));
+    parts.push(
+      el(
+        "div",
+        { className: "quote", id: "quote" },
+        el("p", { textContent: s.quote.intro }),
+        el("blockquote", {}, ...s.quote.lines.map((text) => el("p", { textContent: text }))),
+        ...s.quote.after.map((text) => el("p", { textContent: text })),
+        el("ul", { className: "links" }, ...s.quote.links.map(link)),
+      ),
+    );
+  }
   if (s.steps.length) {
     parts.push(
       el(
@@ -318,6 +412,19 @@ async function selftest() {
     form.requestSubmit();
     await busy;
   };
+  // What the stand-in for Google's server was asked so far, and how it
+  // answers from now on
+  const asked = async () => (await (await fetch(`${standIn.origin}/asked`)).json()).length;
+  const google = (mode) => {
+    standIn.mode = mode;
+  };
+  // A ready pretend phone, taken to the step after Google's terms
+  const toFactoryImage = async (accept, scenario = "ready") => {
+    await begin(scenario);
+    await click("accept");
+    await click("look");
+    await click(accept ? "accept-terms" : "decline-terms");
+  };
   const marked = () => $("answers").querySelectorAll(".field-problem").length;
   const good = { username: "alex", password: "4812", password_again: "4812", hostname: "", timezone: "Europe/Paris", wifi_ssid: "", wifi_psk: "" };
 
@@ -330,6 +437,27 @@ async function selftest() {
   seen.push(state());
   await click("look");
   seen.push(state());
+  // Google's terms, before anything is downloaded
+  check("the page was served with a stand-in for Google's server, and a pretend run can reach nothing else of Google's", !!standIn && standIn.origin.startsWith("http://127.0.0.1:") && standIn.origin !== location.origin);
+  const before = await asked();
+  const quoted = [...document.querySelectorAll("#quote blockquote p")].map((p) => p.textContent);
+  check(
+    "the terms step quotes Google's words as Google's, apart from the page's own",
+    state() === "google-terms" &&
+      quoted.length === 2 &&
+      quoted[0] === "Downloading of the system image and use of the device software is subject to the Google Terms of Service" &&
+      quoted[1] === "By continuing, you agree to the Google Terms of Service and Privacy Policy" &&
+      $("quote").textContent.includes("These are Google's words, not Omarchy Mobile's") &&
+      $("quote").textContent.includes('"may also be subject to certain third-party terms of service, which can be found in Settings > About phone > Legal information"'),
+    text(),
+  );
+  const termsLinks = [...document.querySelectorAll("#quote .links a")].map((a) => a.href);
+  check("the terms step links Google's terms, its privacy policy and its page for this build", termsLinks.join(" ") === "https://policies.google.com/terms https://policies.google.com/privacy" && $("google").href === "https://developers.google.com/android/images#cheetah" && $("google").target === "_blank", termsLinks.join(" "));
+  check("the terms step says whose the files are and that nobody passes them on", text().includes("for use only on your own Pixel, and Google does not allow them to be redistributed") && text().includes("Omarchy Mobile does not host them or pass them on") && text().includes("downloads nothing until you accept"));
+  check("nothing is fetched and no file is taken before the terms are answered", !$("download") && !$("zip") && (await asked()) === before);
+  await click("decline-terms");
+  seen.push(state());
+  check("not accepted: the page offers no download, says so, and takes the file the person saved", state() === "factory-image" && !$("download") && !!$("zip") && text().includes("You did not accept Google's terms in the installer, so it downloads nothing") && (await asked()) === before, text());
   const zip = core.selftest_factory_zip();
   const name = JSON.parse(flow.screen()).file.name;
   check("Google's page is a link to developers.google.com, opened by the person", $("google").href.startsWith("https://developers.google.com/android/images") && $("google").target === "_blank");
@@ -351,12 +479,68 @@ async function selftest() {
   seen.push(state());
   await click("dry");
   seen.push(state());
-  check("the steps come in the flow's order", seen.join(" ") === "warning phone factory-image answers dry-run done", seen.join(" "));
+  check("the steps come in the flow's order", seen.join(" ") === "warning phone google-terms factory-image answers dry-run done", seen.join(" "));
   const plan = [...document.querySelectorAll("#screen .plan li")].map((li) => li.textContent);
   check("the dry run lists slot B's images, userdata, set_active and reboot", plan.length === 8 && plan[0].endsWith("flash:boot_b") && plan[5].startsWith("flash userdata") && plan[7] === "reboot", plan.join(" | "));
   check("the last screen says nothing was written and that the flow ends there", text().includes("Nothing was written") && text().includes("no step that writes to a phone"));
   check("the whole flow sent getvar and nothing else", onlyGetvar(), JSON.stringify(sent()));
   result.commands_in_a_whole_flow = sent().commands;
+
+  // 1b. Google's terms accepted: the page fetches the file. Each answer the
+  // stand-in can give, and what the browser makes of it
+  await toFactoryImage(true);
+  const first = await asked();
+  check("accepted: the next screen says so, with the build, and offers the download", state() === "factory-image" && /You accepted Google's terms for build TEST\.260101\.001 on 20\d\d-\d\d-\d\d at \d\d:\d\d UTC/.test(text()) && !!$("download") && !!$("zip") && (await asked()) === first, text());
+  google("allowed");
+  await click("download");
+  check("a server that lets the page read: the file is fetched, checked, and the flow goes on", state() === "answers" && (await asked()) === first + 1, `${state()} ${$("failure")?.textContent ?? ""}`);
+  google("refused");
+  await toFactoryImage(true);
+  await click("download");
+  check(
+    "a server that does not let the page read: the refusal is noticed, and the page falls back to the person's own download",
+    state() === "factory-image" && !$("download") && !!$("zip") && !$("failure") && text().includes("this browser got no answer from dl.google.com that a web page may read") && text().includes("download the image from Google's page yourself") && stepCount() === 3 && $("google").href.startsWith("https://developers.google.com/android/images"),
+    text(),
+  );
+  await pick(new File([zip], name));
+  check("after the fallback, the file the person saved is taken", state() === "answers");
+  google("unreachable");
+  await toFactoryImage(true);
+  await click("download");
+  check("a server that can't be reached falls back the same way", state() === "factory-image" && !$("download") && !!$("zip") && text().includes("this browser got no answer from dl.google.com"), text());
+  for (const [mode, says] of [
+    ["wrong", "its SHA-256 is another than the one the list records"],
+    ["longer", "sent more for"],
+    ["size", "offered a file of"],
+  ]) {
+    google(mode);
+    await toFactoryImage(true);
+    await click("download");
+    check(`a download that is not the listed file stops (${mode})`, stop() === "factory-download-mismatch" && text().includes(says) && text().includes("not what the release's signed list of Google's builds says") && text().includes("It has written nothing to it.") && !$("download") && !$("zip"), `${state()} ${stop()} ${text()}`);
+  }
+  google("moved");
+  await toFactoryImage(true);
+  await click("download");
+  check("an answer that came from another address in the end is not taken", state() === "factory-image" && !$("download") && text().includes("sent the installer on to another address"), text());
+  google("moved-same");
+  await toFactoryImage(true);
+  await click("download");
+  check("a redirect that stays on the same host is fine", state() === "answers", `${state()} ${text()}`);
+  google("missing");
+  await toFactoryImage(true);
+  await click("download");
+  check("a server that has no such file: said, with the person's own download", state() === "factory-image" && !$("download") && text().includes("HTTP status 404 instead of the file"), text());
+  google("broken");
+  await toFactoryImage(true);
+  await click("download");
+  check("a transfer that breaks off leaves the download open and says how far it came", state() === "factory-image" && !!$("download") && /stopped before it was complete: \d+ of 49152 bytes had arrived/.test(problem()), `${problem()} ${text()}`);
+  google("allowed");
+  await click("download");
+  check("and it can be tried again", state() === "answers");
+  await toFactoryImage(true);
+  await pick(new File([zip], name));
+  check("with the download on offer, a file the person saved is taken as well", state() === "answers");
+  google("allowed");
 
   // 2. A locked phone: the command is shown, nothing is sent
   await begin("locked");
@@ -370,7 +554,7 @@ async function selftest() {
   check("still locked: the same screen", state() === "unlock");
   await click("pretend-unlock");
   await click("look");
-  check("unlocked by its owner: on to the factory image", state() === "factory-image");
+  check("unlocked by its owner: on to Google's terms for the factory image", state() === "google-terms");
 
   await begin("locked-oem-off");
   await click("accept");
@@ -431,7 +615,9 @@ async function selftest() {
   check("nothing is said before a check was skipped", !notice());
   await click("accept");
   await click("look");
-  const noticed = [state() === "factory-image" && notice().startsWith(skipped) && notice().endsWith(notEvidence)];
+  const noticed = [state() === "google-terms" && notice().startsWith(skipped) && notice().endsWith(notEvidence)];
+  await click("decline-terms");
+  noticed.push(state() === "factory-image" && notice().endsWith(notEvidence));
   await click("pretend-zip");
   noticed.push(state() === "answers" && notice().endsWith(notEvidence));
   await answer(good);
@@ -448,11 +634,11 @@ async function selftest() {
   await begin("ready", { slotOverride: true });
   await click("accept");
   await click("look");
-  check("with the override, a phone that reports both slots gets no notice", state() === "factory-image" && !notice());
+  check("with the override, a phone that reports both slots gets no notice", state() === "google-terms" && !notice());
   await begin("slot-b", { reinstall: true });
   await click("accept");
   await click("look");
-  check("slot B, said to be a reinstall, goes on", state() === "factory-image");
+  check("slot B, said to be a reinstall, goes on", state() === "google-terms");
 
   // 5. The warning declined; a release and an index that fail their checks
   await begin("ready");

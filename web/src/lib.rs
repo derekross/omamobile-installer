@@ -14,6 +14,13 @@
 //! (`navigator.usb.requestDevice`, which needs a click), fetching files and
 //! reading the file the person picked. Bytes come in as `Uint8Array`s.
 //!
+//! Google's factory image is such a fetch. Once the owner has accepted
+//! Google's terms on the flow's terms step, the page asks this module what
+//! to fetch ([`InstallFlow::download_begin`]: the address from the release's
+//! signed build index, never one of the page's), fetches it, and hands the
+//! answer and the bytes back; the core decides the rest. A fetch the browser
+//! refuses falls back to the file the owner saves from Google's page.
+//!
 //! [`Install`] is the older, direct way to a session, kept for the write
 //! path's size and its self-test. On a real phone it is a dry run unless the
 //! module is built with `enable-writes`, which nothing turns on. The write
@@ -22,11 +29,12 @@
 use omamobile_installer_core::bundle::{
     self, ReleaseFiles, RootImageCheck, VerifiedRelease, VerifiedRootImage,
 };
+use omamobile_installer_core::download::{FactoryDownload, FetchFailure, FetchNext, FetchResponse};
 use omamobile_installer_core::fastboot::{
     PhoneId, PhoneOptions, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
 use omamobile_installer_core::flow::{
-    AnswersInput, FactoryZipCheck, Flow, FlowOptions, OwnerAnswers,
+    AnswersInput, DownloadEnd, FactoryZipCheck, Flow, FlowOptions, OwnerAnswers,
 };
 use omamobile_installer_core::install::UserdataStream;
 use omamobile_installer_core::signature::TrustedKeys;
@@ -222,6 +230,8 @@ pub async fn request_phone() -> Result<Phone, JsError> {
 pub struct InstallFlow {
     flow: Flow,
     check: Option<FactoryZipCheck>,
+    /// A download of the factory image, while the page carries it out.
+    download: Option<FactoryDownload>,
     /// The self-test bundle's images are built in, to walk through a dry run.
     #[cfg(feature = "selftest")]
     built_in: bool,
@@ -265,6 +275,7 @@ impl InstallFlow {
                 },
             ),
             check: None,
+            download: None,
             #[cfg(feature = "selftest")]
             built_in: false,
         }
@@ -298,6 +309,97 @@ impl InstallFlow {
         let id = phone.id()?;
         let mut transport = phone.open().await?;
         self.flow.read_phone(&mut transport, &id).await.map_err(js)
+    }
+
+    /// The owner accepted what Google's download page asks, as the terms
+    /// step shows it. `now_ms`: the browser's clock (`Date.now()`). Kept in
+    /// the flow, for its screens; this module sends it nowhere.
+    pub fn accept_google_terms(&mut self, now_ms: f64) -> Result<(), JsError> {
+        self.flow
+            .accept_google_terms((now_ms / 1000.0) as u64)
+            .map_err(js)
+    }
+    /// The owner did not accept: nothing is downloaded, and they hand in
+    /// the file they save from Google's page.
+    pub fn decline_google_terms(&mut self) -> Result<(), JsError> {
+        self.flow.decline_google_terms().map_err(js)
+    }
+
+    /// Start one try at downloading the factory image. Refused unless
+    /// Google's terms were accepted. Returns what to fetch, as JSON: `url`
+    /// (on `https://dl.google.com/`, from the signed build index) and
+    /// `size`. The page keeps no bytes between tries, so each starts at the
+    /// file's first byte.
+    pub fn download_begin(&mut self) -> Result<String, JsError> {
+        let download = self.flow.factory_download(0).map_err(js)?;
+        let request = download
+            .request()
+            .ok_or_else(|| JsError::new("there is nothing to fetch"))?;
+        let out = json!({"url": request.url(), "size": request.size() as f64}).to_string();
+        self.download = Some(download);
+        Ok(out)
+    }
+    /// The server's answer, before its body. A browser follows redirects
+    /// itself, so `final_url` is where the answer came from in the end; the
+    /// core checks it. `true`: feed the body to [`Self::download_body`].
+    /// `false`: read no body.
+    pub fn download_response(
+        &mut self,
+        status: u16,
+        final_url: &str,
+        content_length: Option<f64>,
+    ) -> Result<bool, JsError> {
+        let download = self
+            .download
+            .as_mut()
+            .ok_or_else(|| JsError::new("no download is under way"))?;
+        let answer = FetchResponse {
+            status,
+            final_url: Some(final_url),
+            content_length: content_length.map(|n| n as u64),
+            ..Default::default()
+        };
+        Ok(matches!(
+            download.response(&answer).map_err(js)?,
+            FetchNext::Body { .. }
+        ))
+    }
+    /// The next piece of the body. `false`: stop reading.
+    pub fn download_body(&mut self, chunk: &[u8]) -> bool {
+        self.download.as_mut().is_some_and(|d| d.body(chunk))
+    }
+    /// Bytes that have arrived, and the file's size.
+    pub fn download_progress(&self) -> Vec<f64> {
+        let (done, total) = self.download.as_ref().map_or((0, 0), |d| d.progress());
+        vec![done as f64, total as f64]
+    }
+    /// The try is over. `failure`: empty, or what kept the page from
+    /// carrying it out: `no-answer` (the browser's `fetch` was rejected
+    /// before any answer, which is all a page learns of a network error or
+    /// of a server that does not allow the read) or `network` (the transfer
+    /// broke), with the browser's `detail`. Returns `verified`, `kept` or
+    /// `discard`; the screen says the rest.
+    pub fn download_done(&mut self, failure: &str, detail: &str) -> Result<String, JsError> {
+        let download = self
+            .download
+            .take()
+            .ok_or_else(|| JsError::new("no download is under way"))?;
+        let failure = match failure {
+            "" => None,
+            "no-answer" => Some(FetchFailure::NoAnswer),
+            "network" => Some(FetchFailure::Network(detail.into())),
+            other => return Err(JsError::new(&format!("no failure is called {other}"))),
+        };
+        let end = self
+            .flow
+            .factory_download_done(download, failure)
+            .map_err(js)?;
+        Ok(match end {
+            DownloadEnd::Verified => "verified",
+            DownloadEnd::Kept => "kept",
+            DownloadEnd::Discard => "discard",
+        }
+        .into())
     }
 
     /// The file the person picked as the factory image: its name and size.
@@ -645,6 +747,7 @@ impl InstallFlow {
                 },
             ),
             check: None,
+            download: None,
             built_in: true,
         })
     }

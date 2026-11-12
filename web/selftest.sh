@@ -9,6 +9,9 @@
 # switched off for the run, and where bubblewrap is installed the browser
 # gets an empty /dev and no /sys/bus/usb.
 #
+# Nothing is fetched from Google either: the downloads of the factory image
+# go to a stand-in that web/serve.py runs on this computer.
+#
 #   web/selftest.sh            build (web/build.sh selftest), serve, run
 #   CHROMIUM=/path/to/chrome web/selftest.sh
 set -euo pipefail
@@ -26,7 +29,9 @@ fi
 work=$root/target/selftest
 rm -rf "$work"; mkdir -p "$work/profile"
 port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
-python3 "$here/serve.py" "$port" >"$work/server.log" 2>&1 &
+# --stand-in: Google's server is a stand-in on this computer, and the page's
+# policy lets it fetch from nowhere else, so the run reaches nothing of Google's
+python3 "$here/serve.py" "$port" --stand-in >"$work/server.log" 2>&1 &
 server=$!
 trap 'kill "$server" ${chrome:-} 2>/dev/null || true' EXIT
 for _ in $(seq 50); do grep -q "^http://" "$work/server.log" && break; sleep 0.1; done

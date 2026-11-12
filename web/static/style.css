@@ -9,6 +9,11 @@ section { border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent
 .bad::before { content: "refused  "; font-weight: bold; }
 .problem { color: #c22; font-weight: 600; }
 .notice { border: 2px solid #c22; border-radius: 0.4rem; padding: 0.6rem 0.8rem; font-weight: 600; }
+.quote blockquote { margin: 0.6rem 0 0.6rem 1rem; padding-left: 0.8rem; border-left: 3px solid color-mix(in srgb, currentColor 40%, transparent); font-style: italic; }
+.quote blockquote p { margin: 0.4rem 0; }
+.quote blockquote p::before { content: "\201C"; }
+.quote blockquote p::after { content: "\201D"; }
+.quote .links { padding-left: 1.2rem; }
 #progress { display: flex; flex-wrap: wrap; gap: 0.3rem 2.4rem; padding-left: 1.2rem; opacity: 0.8; }
 #progress li.now { font-weight: bold; opacity: 1; }
 #progress li.past { text-decoration: line-through; opacity: 0.6; }
