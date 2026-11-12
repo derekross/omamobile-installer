@@ -99,16 +99,17 @@ fn the_whole_flow_reaches_the_dry_run_and_writes_nothing() {
 fn the_factory_zip_is_asked_for_until_it_is_the_right_file() {
     let zip = factory_zip();
     let dir = fixture();
-    // First a file that isn't it, by name; then one that doesn't exist; then the zip
+    // Enter at Google's terms: the owner downloads the file themselves. Then
+    // a file that isn't it, by name; one that doesn't exist; then the zip
     let typed = format!(
-        "yes\n{}\n{}\n{}\n{ANSWERS}",
+        "yes\n\n{}\n{}\n{}\n{ANSWERS}",
         dir.join("MANIFEST").display(),
         dir.join("nothing-here.zip").display(),
         zip.display()
     );
     let (code, out, err) = flow("ready", &[], &typed);
     assert_eq!(code, 0, "{out}\n{err}");
-    assert!(out.contains("Not taken: MANIFEST is not the file for this phone"));
+    assert!(out.contains("! MANIFEST is not the file for this phone"));
     assert!(out.contains("There is no file"));
     // Shown again after each file that wasn't taken
     assert_eq!(

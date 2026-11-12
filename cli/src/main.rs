@@ -5,9 +5,11 @@
 //!   omamobile-install sparse ROOT.img.zst OUTDIR [MAX_BYTES]
 //!                                                no phone: the sparse images a flash would send
 //!   omamobile-install devices                    USB: phones in fastboot mode
-//!   omamobile-install install BUNDLE_DIR --serial SERIAL --dry-run [--reinstall] [--factory-zip FILE]
+//!   omamobile-install install BUNDLE_DIR --serial SERIAL --dry-run [--reinstall]
+//!                             [--factory-zip FILE] [--work-dir DIR]
 //!                                                USB: the install flow up to the dry run, read-only
 //!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--reinstall] [--factory-zip FILE]
+//!                             [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
 //!                                                no phone: the same flow against a pretend phone
 //!                                                (only in a build with the `fake-phone` feature)
 //!
@@ -19,26 +21,45 @@
 //! nothing here can write to a phone. All that reaches one is `getvar` and,
 //! for a locked phone, the one question `flashing get_unlock_ability`.
 //!
+//! Google's factory image: once the owner has accepted Google's terms on the
+//! flow's terms step, this tool downloads the file from the address the core
+//! hands it (`https://dl.google.com/`, from the release's signed build
+//! index), into `DIR/factory/` under `--work-dir` (by default the user's
+//! cache directory). A download that broke off goes on from what is there,
+//! in the same run or a later one. The core decides every answer of the
+//! server, the size and the SHA-256 (core/src/download.rs); this file only
+//! carries the requests out and keeps the bytes. `--factory-zip FILE` hands
+//! in a file the owner already saved from Google's page: nothing is
+//! downloaded then.
+//!
+//! `flow` never reaches Google: its downloads go to the stand-in server
+//! named with `--fake-google`, on this computer, or nowhere.
+//!
 //! Not in the usage text, and for the maintainer only: `install` and `flow`
 //! take `--maintainer-skip-bootloader-slot-check`, which lets a dry run go on
 //! past a phone that reports one bootloader slot's version (docs/DESIGN.md
 //! §6). The core says on every screen that the check was skipped; without
 //! `--dry-run` it is refused here, before any USB device is looked for.
 use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
+use omamobile_installer_core::download::{
+    FactoryDownload, FetchFailure, FetchNext, FetchRequest, FetchResponse,
+};
 use omamobile_installer_core::fastboot::{
     PhoneId, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
-use omamobile_installer_core::flow::{AnswersInput, Flow, FlowOptions, OwnerAnswers, Screen};
+use omamobile_installer_core::flow::{
+    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen,
+};
 use omamobile_installer_core::install::{flash_userdata_from_reader, UserdataStream};
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_core::{build_index, Error};
 use omamobile_installer_usb::UsbTransport;
 use pollster::block_on;
 use std::fs::{self, File};
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -332,6 +353,23 @@ fn show(screen: &Screen) {
         println!();
         wrap(p, "    ", "    ");
     }
+    // Someone else's words: set in, and in quotation marks
+    if let Some(quote) = &screen.quote {
+        println!();
+        wrap(&quote.intro, "    ", "    ");
+        for line in &quote.lines {
+            println!();
+            wrap(&format!("\"{line}\""), "         ", "        ");
+        }
+        for p in &quote.after {
+            println!();
+            wrap(p, "    ", "    ");
+        }
+        println!();
+        for link in &quote.links {
+            println!("    {}: {}", link.label, link.url);
+        }
+    }
     if !screen.steps.is_empty() {
         println!();
     }
@@ -352,7 +390,7 @@ fn show(screen: &Screen) {
     }
     if let Some(problem) = &screen.problem {
         println!();
-        wrap(problem, "    ", "    Not taken: ");
+        wrap(problem, "      ", "    ! ");
     }
     if !screen.footer.is_empty() {
         println!();
@@ -450,18 +488,267 @@ async fn walk_images<T: Transport>(
     Ok(true)
 }
 
+// ---- Google's factory image ----------------------------------------------
+
+/// Where a request for Google's factory image is carried out. The address
+/// is always the core's ([`FetchRequest`]); this says who answers it.
+enum Fetcher {
+    /// Google's server, over HTTPS.
+    Google(ureq::Agent),
+    /// A stand-in for Google's server on this computer, for `flow`.
+    #[cfg(feature = "fake-phone")]
+    StandIn(ureq::Agent, std::net::SocketAddr),
+    /// `flow` without a stand-in: nothing is fetched from anywhere.
+    #[cfg(feature = "fake-phone")]
+    Nowhere,
+}
+
+fn agent(https_only: bool) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        // The core is shown every redirect and every status, and decides
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .http_status_as_error(false)
+        .https_only(https_only)
+        .user_agent(concat!("omamobile-install/", env!("CARGO_PKG_VERSION")))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .build()
+        .new_agent()
+}
+
+impl Fetcher {
+    fn google() -> Self {
+        Fetcher::Google(agent(true))
+    }
+
+    /// One GET, as the core asked for it. Redirects are not followed here.
+    fn get(&self, request: &FetchRequest) -> Result<ureq::http::Response<ureq::Body>, String> {
+        let (agent, url) = match self {
+            Fetcher::Google(agent) => (agent, request.url().to_string()),
+            // The same request, answered by the stand-in in Google's place
+            #[cfg(feature = "fake-phone")]
+            Fetcher::StandIn(agent, at) => (
+                agent,
+                request
+                    .url()
+                    .replacen("https://dl.google.com/", &format!("http://{at}/"), 1),
+            ),
+            #[cfg(feature = "fake-phone")]
+            Fetcher::Nowhere => {
+                return Err(
+                    "a pretend run fetches nothing from Google, and no stand-in was named with --fake-google"
+                        .into(),
+                )
+            }
+        };
+        let mut call = agent.get(&url);
+        if let Some(range) = request.range() {
+            call = call.header("Range", range);
+        }
+        call.call().map_err(|e| e.to_string())
+    }
+}
+
+/// The user's cache directory, for what a download leaves between runs.
+fn default_work_dir() -> Option<PathBuf> {
+    let var = |name: &str| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    var("XDG_CACHE_HOME")
+        .or_else(|| var("LOCALAPPDATA"))
+        .or_else(|| var("HOME").map(|home| home.join(".cache")))
+        .map(|dir| dir.join("omamobile-installer"))
+}
+
+/// Carry out what one try at the download asks: the kept bytes first, then
+/// the requests, the body into `file`. Every decision is `download`'s.
+fn fetch(
+    download: &mut FactoryDownload,
+    fetcher: &Fetcher,
+    path: &Path,
+) -> Result<(), FetchFailure> {
+    let storage = |e: io::Error| FetchFailure::Storage(format!("{}: {e}", path.display()));
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(storage)?;
+    let mut buf = vec![0u8; 1 << 20];
+    // What an earlier try left is read back, from the first byte: the core
+    // hashes it like the bytes that arrive now
+    let mut left = download.resume_from();
+    if left == 0 {
+        file.set_len(0).map_err(storage)?;
+    }
+    while left > 0 {
+        let want = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        let n = file.read(&mut buf[..want]).map_err(storage)?;
+        if n == 0 {
+            return Err(FetchFailure::Storage(format!(
+                "{} got shorter while it was read",
+                path.display()
+            )));
+        }
+        download
+            .kept(&buf[..n])
+            .map_err(|e| FetchFailure::Storage(e.to_string()))?;
+        left -= n as u64;
+    }
+    let Some(mut request) = download.request() else {
+        return Ok(());
+    };
+    loop {
+        let response = fetcher.get(&request).map_err(FetchFailure::Network)?;
+        let next = {
+            let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok());
+            let answer = FetchResponse {
+                status: response.status().as_u16(),
+                location: header("location"),
+                final_url: None,
+                content_length: header("content-length").and_then(|v| v.parse().ok()),
+                content_range: header("content-range"),
+            };
+            download
+                .response(&answer)
+                .map_err(|e| FetchFailure::Network(e.to_string()))?
+        };
+        match next {
+            FetchNext::Fetch(next) => request = next,
+            FetchNext::End => return Ok(()),
+            FetchNext::Body { at } => {
+                file.set_len(at).map_err(storage)?;
+                file.seek(SeekFrom::Start(at)).map_err(storage)?;
+                let mut body = response.into_body().into_reader();
+                let mut shown = None;
+                loop {
+                    let n = body
+                        .read(&mut buf)
+                        .map_err(|e| FetchFailure::Network(e.to_string()))?;
+                    // The core takes no byte past the file's size
+                    if n == 0 || !download.body(&buf[..n]) {
+                        break;
+                    }
+                    file.write_all(&buf[..n]).map_err(storage)?;
+                    let (done, total) = download.progress();
+                    let tenth = done * 10 / total.max(1);
+                    if shown != Some(tenth) {
+                        shown = Some(tenth);
+                        println!("    {done} of {total} bytes");
+                    }
+                }
+                return file.flush().map_err(storage);
+            }
+        }
+    }
+}
+
+/// One try at downloading Google's factory image into the work directory.
+/// What happens to the bytes afterwards is the core's answer.
+fn download_factory_zip(
+    flow: &mut Flow,
+    fetcher: &Fetcher,
+    work_dir: Option<&Path>,
+    name: &str,
+) -> Res<()> {
+    let dir = match work_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => default_work_dir()
+            .ok_or("no place to keep the download: name a directory with --work-dir DIR")?,
+    }
+    .join("factory");
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // The name is the signed index's, checked there: one path component
+    let (whole, part) = (dir.join(name), dir.join(format!("{name}.part")));
+    // A file an earlier run finished is checked again like any kept bytes
+    let path = if whole.is_file() { &whole } else { &part };
+    let have = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut download = flow.factory_download(have)?;
+    println!("    downloading {name} into {}", dir.display());
+    let failure = fetch(&mut download, fetcher, path).err();
+    match flow.factory_download_done(download, failure)? {
+        DownloadEnd::Verified => {
+            if path != &whole {
+                fs::rename(path, &whole)?;
+            }
+        }
+        // Nothing arrived: no empty file is left behind
+        DownloadEnd::Kept => {
+            if fs::metadata(path).is_ok_and(|m| m.len() == 0) {
+                fs::remove_file(path)?;
+            }
+        }
+        DownloadEnd::Discard => {
+            for file in [&whole, &part] {
+                match fs::remove_file(file) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                        return Err(format!("{}: {e}", file.display()).into())
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Hand the flow a file the owner saved, read a piece at a time.
+fn take_factory_zip(flow: &mut Flow, path: &Path) -> Res<()> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let size = match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        _ => {
+            println!("    There is no file {}", path.display());
+            return Ok(());
+        }
+    };
+    if let Some(mut check) = flow.factory_zip(name, size)? {
+        println!("    checking {name}");
+        // Streamed: a megabyte at a time, never the whole file
+        let mut file = File::open(path)?;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            check.update(&buf[..n]);
+        }
+        flow.factory_zip_done(check)?;
+    }
+    Ok(())
+}
+
+/// What the flow's factory-image step works with on this computer.
+struct FactoryImage {
+    /// A file the owner already saved from Google's page (`--factory-zip`).
+    own_file: Option<PathBuf>,
+    /// Where a download is kept (`--work-dir`).
+    work_dir: Option<PathBuf>,
+    fetcher: Fetcher,
+}
+
 /// Drive the core's flow to its end. `connect` finds the phone and opens
 /// it, or says there is none; nothing else here touches a phone.
 fn run_flow<T: Transport>(
     bundle: &Bundle,
     trusted: &TrustedKeys,
-    options: FlowOptions,
-    mut factory_zip: Option<PathBuf>,
+    mut options: FlowOptions,
+    mut factory: FactoryImage,
     mut connect: impl FnMut() -> Res<Option<(T, PhoneId)>>,
 ) -> Res<bool> {
     let mut typed = Typed::new();
+    // A file handed in up front: the installer downloads nothing
+    options.owner_has_factory_zip = factory.own_file.is_some();
     let mut flow = Flow::begin(&bundle.files(), bundle.index.as_deref(), trusted, options);
-    let mut looked = false;
+    let (mut looked, mut downloaded) = (false, false);
     loop {
         let screen = flow.screen();
         show(&screen);
@@ -486,36 +773,44 @@ fn run_flow<T: Transport>(
                     None => flow.no_phone()?,
                 }
             }
+            "accept-terms" => {
+                if typed
+                    .ask("Type yes to accept, or press Enter to download the file yourself: ")?
+                    == "yes"
+                {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                    flow.accept_google_terms(now)?;
+                } else {
+                    flow.decline_google_terms()?;
+                }
+            }
+            "download" => {
+                // The first try needs no question. After one that ended
+                // early the person says whether to go on, or hands in a file
+                if downloaded {
+                    let own = typed.ask(
+                        "Press Enter to try the download again, or type where you saved the file yourself: ",
+                    )?;
+                    if !own.is_empty() {
+                        take_factory_zip(&mut flow, Path::new(&own))?;
+                        continue;
+                    }
+                }
+                downloaded = true;
+                let name = screen.file.as_ref().map(|f| f.name.as_str());
+                download_factory_zip(
+                    &mut flow,
+                    &factory.fetcher,
+                    factory.work_dir.as_deref(),
+                    name.ok_or("the flow names no file to download")?,
+                )?;
+            }
             "take-file" => {
-                let path = match factory_zip.take() {
+                let path = match factory.own_file.take() {
                     Some(path) => path,
                     None => PathBuf::from(typed.ask("Where did you save the file? ")?),
                 };
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                let size = match fs::metadata(&path) {
-                    Ok(meta) if meta.is_file() => meta.len(),
-                    _ => {
-                        println!("    There is no file {}", path.display());
-                        continue;
-                    }
-                };
-                if let Some(mut check) = flow.factory_zip(name, size)? {
-                    println!("    checking {name}");
-                    // Streamed: a megabyte at a time, never the whole file
-                    let mut file = File::open(&path)?;
-                    let mut buf = vec![0u8; 1 << 20];
-                    loop {
-                        let n = file.read(&mut buf)?;
-                        if n == 0 {
-                            break;
-                        }
-                        check.update(&buf[..n]);
-                    }
-                    flow.factory_zip_done(check)?;
-                }
+                take_factory_zip(&mut flow, &path)?;
             }
             "answers" => flow.answers(&ask_answers(&mut typed)?)?,
             "dry-run" => {
@@ -539,20 +834,11 @@ fn run_flow<T: Transport>(
     }
 }
 
-fn cmd_install(
-    dir: &Path,
-    serial: &str,
-    options: FlowOptions,
-    factory_zip: Option<PathBuf>,
-) -> Res<bool> {
+fn cmd_install(dir: &Path, serial: &str, options: FlowOptions, factory: FactoryImage) -> Res<bool> {
     let bundle = Bundle::load(dir, "omamobile.gpg")?;
-    run_flow(
-        &bundle,
-        &TrustedKeys::omamobile(),
-        options,
-        factory_zip,
-        || block_on(open_usb(serial)),
-    )
+    run_flow(&bundle, &TrustedKeys::omamobile(), options, factory, || {
+        block_on(open_usb(serial))
+    })
 }
 
 /// The same flow against the tests' pretend phone, held in memory. A bundle
@@ -563,9 +849,24 @@ fn cmd_fake(
     dir: &Path,
     scenario: &str,
     options: FlowOptions,
-    factory_zip: Option<PathBuf>,
+    mut factory: FactoryImage,
+    fake_google: Option<&str>,
 ) -> Res<bool> {
     use fake::{FakePhone, SERIAL};
+    // A pretend run never reaches Google: a stand-in on this computer
+    // answers in its place, or nothing does
+    factory.fetcher = match fake_google {
+        Some(at) => {
+            let at: std::net::SocketAddr = at
+                .parse()
+                .map_err(|_| "--fake-google takes an address like 127.0.0.1:8080")?;
+            if !at.ip().is_loopback() {
+                return Err("--fake-google takes an address on this computer only".into());
+            }
+            Fetcher::StandIn(agent(false), at)
+        }
+        None => Fetcher::Nowhere,
+    };
     let phone = FakePhone::scenario(scenario).ok_or_else(|| {
         format!(
             "no pretend phone '{scenario}'; there are: {}",
@@ -577,7 +878,7 @@ fn cmd_fake(
     let trusted = TrustedKeys::new(&[fingerprint.trim()])?;
     println!("A pretend phone ({scenario}), held in memory. No USB device is opened.");
     let mut looks = 0;
-    let done = run_flow(&bundle, &trusted, options, factory_zip, || {
+    let done = run_flow(&bundle, &trusted, options, factory, || {
         looks += 1;
         // A locked pretend phone is unlocked by its pretend owner after the
         // unlock steps were shown once
@@ -601,11 +902,11 @@ fn cmd_fake(
 }
 
 #[cfg(not(feature = "fake-phone"))]
-fn cmd_fake(_: &Path, _: &str, _: FlowOptions, _: Option<PathBuf>) -> Res<bool> {
+fn cmd_fake(_: &Path, _: &str, _: FlowOptions, _: FactoryImage, _: Option<&str>) -> Res<bool> {
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE]";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]";
 
 fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
     // Decode a small .zst repeatedly: the same loop as the browser self-test
@@ -641,7 +942,12 @@ fn run() -> Res<bool> {
         ["devices"] => block_on(cmd_devices())?,
         [command @ ("install" | "flow"), dir, rest @ ..] => {
             let (mut serial, mut fake, mut dry_run) = (None, None, false);
-            let (mut options, mut zip) = (FlowOptions::default(), None);
+            let (mut options, mut fake_google) = (FlowOptions::default(), None);
+            let mut factory = FactoryImage {
+                own_file: None,
+                work_dir: None,
+                fetcher: Fetcher::google(),
+            };
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 match *arg {
@@ -650,7 +956,9 @@ fn run() -> Res<bool> {
                     "--dry-run" => dry_run = true,
                     "--reinstall" => options.reinstall = true,
                     SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
-                    "--factory-zip" => zip = it.next().map(PathBuf::from),
+                    "--factory-zip" => factory.own_file = it.next().map(PathBuf::from),
+                    "--work-dir" => factory.work_dir = it.next().map(PathBuf::from),
+                    "--fake-google" => fake_google = it.next().copied(),
                     other => return Err(format!("unknown argument {other}").into()),
                 }
             }
@@ -662,12 +970,18 @@ fn run() -> Res<bool> {
                 return Err(Box::new(Error::OverrideOutsideDryRun));
             }
             return match (*command, serial, fake) {
-                ("flow", None, Some(scenario)) => cmd_fake(dir, scenario, options, zip),
+                ("flow", None, Some(scenario)) => {
+                    cmd_fake(dir, scenario, options, factory, fake_google)
+                }
                 ("flow", ..) => {
                     Err("flow runs against a pretend phone only: --fake-phone STATE".into())
                 }
                 (_, _, Some(_)) => Err(
                     "install is for a real phone; the pretend phone is 'flow DIR --fake-phone STATE'"
+                        .into(),
+                ),
+                _ if fake_google.is_some() => Err(
+                    "a stand-in for Google's server is for the pretend phone only: 'flow DIR --fake-phone STATE'"
                         .into(),
                 ),
                 (_, None, _) => {
@@ -676,7 +990,7 @@ fn run() -> Res<bool> {
                 (_, Some(_), _) if !dry_run => Err(Box::new(Error::Refused(
                     "this version installs only with --dry-run: its flow ends at the dry run, and it has no step that writes to a phone".into(),
                 ))),
-                (_, Some(serial), _) => cmd_install(dir, serial, options, zip),
+                (_, Some(serial), _) => cmd_install(dir, serial, options, factory),
             };
         }
         _ => return Err(USAGE.into()),

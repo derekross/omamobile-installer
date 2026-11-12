@@ -20,8 +20,16 @@ fake-phone = []
 name = "flow_fake_phone"
 required-features = ["fake-phone"]
 
+[[test]]
+name = "factory_download"
+required-features = ["fake-phone"]
+
 [dependencies]
 omamobile-installer-core = { path = "../core" }
 omamobile-installer-usb = { path = "../usb" }
 nusb = "0.2"
 pollster = "1"
+# The one HTTP client: Google's factory image, from the address the core
+# hands over (core/src/download.rs). Blocking, no async runtime; TLS by
+# rustls with the webpki roots. No gzip: the file is fetched as it is.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
