@@ -20,6 +20,9 @@ omamobile-installer-core = { path = "../core", default-features = false }
 omamobile-installer-usb = { path = "../usb" }
 nusb = "0.2"
 serde_json = "1"
+# A salt for the password's hash, from the browser's crypto.getRandomValues
+# (the "js" backend): the core has no source of randomness.
+getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

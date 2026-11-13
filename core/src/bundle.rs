@@ -44,6 +44,9 @@ pub struct DeviceRules {
     /// `INSTALL_KEYS_FASTBOOT`: how this phone's keys reach Fastboot Mode, as
     /// a phrase that ends a sentence.
     pub keys_fastboot: Option<String>,
+    /// `BOOT_UPDATE_AUTO_WRITE` (default yes): the `AUTO_WRITE` the
+    /// installer puts in the root image's `boot-update.conf` placeholder.
+    pub boot_update_auto_write: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +149,7 @@ pub fn verify_release(files: &ReleaseFiles<'_>, trusted: &TrustedKeys) -> Result
             .get("INSTALL_KEYS_FASTBOOT")
             .filter(|k| !k.is_empty())
             .map(str::to_string),
+        boot_update_auto_write: conf.boot_update_auto_write()?,
     };
     if !is_calendar_version(&manifest.version) {
         return Err(Error::Manifest(format!(

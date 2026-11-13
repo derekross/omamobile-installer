@@ -76,7 +76,7 @@ fn to(b: &TestBundle, phone: &FakePhone, o: FlowOptions, until: &str) -> Flow {
             "phone" => look(&mut flow, phone),
             "google-terms" => flow.decline_google_terms().unwrap(),
             "factory-image" => give(&mut flow, &b.factory_zip_name, &b.factory_zip),
-            "answers" => flow.answers(&answers()).unwrap(),
+            "answers" => flow.answers(&answers(), "testsalt0123").unwrap(),
             _ => unreachable!(),
         }
     }
@@ -133,7 +133,7 @@ fn main() {
     assert!(feed(&mut dl, &b.factory_zip));
     f.factory_download_done(dl, None).unwrap();
     dump(dir, "answers", &f);
-    f.answers(&answers()).unwrap();
+    f.answers(&answers(), "testsalt0123").unwrap();
     dump(dir, "dry-run", &f);
     let p = ready();
     let session = block_on(f.dry_run(p.clone())).unwrap().unwrap();
@@ -199,7 +199,7 @@ fn main() {
     assert_eq!(f.screen().state, "google-terms");
     f.decline_google_terms().unwrap();
     give(&mut f, &b.factory_zip_name, &b.factory_zip);
-    f.answers(&answers()).unwrap();
+    f.answers(&answers(), "testsalt0123").unwrap();
     let session = block_on(f.dry_run(phone.clone())).unwrap().unwrap();
     f.dry_run_done(session).unwrap();
     dump(dir, "done-reinstall-one-slot", &f);
@@ -214,7 +214,7 @@ fn main() {
     dump(dir, "google-terms-notice", &f);
     f.decline_google_terms().unwrap();
     give(&mut f, &b.factory_zip_name, &b.factory_zip);
-    f.answers(&answers()).unwrap();
+    f.answers(&answers(), "testsalt0123").unwrap();
     let session = block_on(f.dry_run(phone.clone())).unwrap().unwrap();
     f.dry_run_done(session).unwrap();
     dump(dir, "done-notice", &f);
@@ -397,6 +397,18 @@ fn main() {
         dir,
         "stop-writes-not-for-this-device",
         &Flow::begin(&other.files(), other.index(), &other.trusted(), w()),
+    );
+    // A release made before its system image kept a place for the answers
+    let old = TestBundle::build(
+        |m| {
+            m["root_image"].as_object_mut().unwrap().remove("placeholders");
+        },
+        |c| c,
+    );
+    dump(
+        dir,
+        "stop-no-place-for-answers",
+        &Flow::begin(&old.files(), old.index(), &old.trusted(), w()),
     );
     // The release's images were not walked through the dry run
     let phone = ready();

@@ -105,8 +105,9 @@ fn holds_the_release(bundle: &TestBundle, phone: &FakePhone) {
         assert!(part[..size] == *bundle.image(name), "{name}_b");
         assert!(part[size..].iter().all(|b| *b == SENTINEL), "{name}_b");
     }
+    // The root image with the owner's answers in the blocks it keeps for them
     let userdata = phone.partition("userdata");
-    assert!(userdata[..bundle.root_raw.len()] == bundle.root_raw[..]);
+    assert!(userdata[..bundle.root_raw.len()] == bundle.root_as_installed()[..]);
     assert!(userdata[bundle.root_raw.len()..]
         .iter()
         .all(|b| *b == SENTINEL));
@@ -194,9 +195,11 @@ fn an_install_sends_these_commands_in_this_order_and_nothing_else() {
     );
     assert_eq!(screen.body[0], "Every image was written, and the phone confirmed each one: boot_b, init_boot_b, vendor_boot_b, vendor_kernel_boot_b, dtbo_b, userdata.");
     assert!(screen.body[1].starts_with("Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B."));
-    // The truth about the first start: the answers are not on the phone
-    assert!(screen.body[2].contains("cannot put your answers on the phone"));
-    assert!(screen.body[2].contains("no user account"));
+    // The first start: the account from the answers, then the lock
+    assert!(screen.body[1].contains("sets up your account from your answers"));
+    assert!(screen.body[1].contains("unlock it with your PIN or password"));
+    assert!(screen.body[2].contains("Google's files"));
+    assert!(!screen.body.join(" ").contains("no user account"));
     assert!(screen.footer[0].contains("Android is still on slot A"));
     println!("{screen:#?}");
 }
@@ -927,14 +930,15 @@ fn a_flow_that_writes_says_before_the_unlock_steps_what_its_install_leaves() {
     assert_eq!(screen.state, "unlock");
     assert_eq!(screen.notice.as_deref(), Some(NO_INSTALL_YET));
     // A run that writes does install, so that sentence would be false. It
-    // says what the install leaves: a phone nobody can sign in to
+    // says that unlocking erases the phone, and that this version's writes
+    // have met only the pretend phone
     let phone = FakePhone::scenario("locked").unwrap();
     let flow = run(&bundle, &phone, writing());
     assert!(!flow.ends_at_dry_run());
     let screen = flow.screen();
     assert_eq!(screen.state, "unlock");
     assert_eq!(screen.notice.as_deref(), Some(NO_USABLE_PHONE_YET));
-    assert_eq!(NO_USABLE_PHONE_YET, "This version of the installer can install Omarchy Mobile, but it cannot put your answers on the phone: the phone it installs has no user account, and there is nothing to unlock it with. Unlocking the bootloader erases the phone. Unlock it for this version only if the phone is one you can do without.");
+    assert_eq!(NO_USABLE_PHONE_YET, "Unlocking the bootloader erases the phone. This version of the installer has written only to a pretend phone in its tests, not yet to a real one: unlock the phone for this version only if it is one you can do without.");
     let all = screen.body.join(" ");
     assert!(!all.contains("cannot install") && !all.contains("not for now"));
     assert!(
@@ -1439,8 +1443,10 @@ fn a_root_image_that_is_not_the_one_that_was_checked_never_makes_slot_b_active()
                 .unwrap();
             session.flash_boot(&image).await.unwrap();
         }
-        let mut stream =
-            omamobile_installer_core::install::UserdataStream::new(session.max_download_size());
+        let mut stream = omamobile_installer_core::install::UserdataStream::with_answers(
+            session.max_download_size(),
+            session.answers().unwrap(),
+        );
         stream.feed(&bundle.root_zst).unwrap();
         session
             .begin_userdata(&root, stream.image_len().unwrap())
@@ -1489,7 +1495,7 @@ fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {
     assert_eq!(screen.body, [
         "The Pixel 7 Pro (cheetah) is unlocked and runs from slot a; bootloader fake-1.0, baseband fake-radio-1.0.".to_string(),
         format!("Google's factory image for build TEST.260101.001 is the right file ({}).", bundle.factory_zip_name),
-        "Your answers: user alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set.".into(),
+        "Your answers: user alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set. The phone sets up your account from them at its first start.".into(),
         "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
     ]);
     // Exactly the partitions of the release, each with the image's size and
@@ -1508,7 +1514,7 @@ fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {
         "userdata will be ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again.",
         "Slot B's boot partitions, listed above, are overwritten.",
         "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.",
-        "This version of the installer cannot put your answers on the phone: it has no way yet to write them into the system image. So the phone starts Omarchy Mobile with no user account, no PIN or password and no Wi-Fi set up, and there is nothing to unlock it with. An install made with this version shows that the install itself works; it does not give you a phone you can use.",
+        "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.",
         "To go ahead, type the phone's codename: cheetah",
         "Anything else stops the install here, with nothing written.",
     ]);
@@ -1568,7 +1574,9 @@ fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {
         "Nothing is written before you have seen the list and typed the phone's codename"
     ));
     let flow = flow_at(&bundle, &ready(), "answers");
-    assert!(flow.screen().body[2].contains("starts with no user account"));
+    assert!(flow.screen().body[1]
+        .contains("The phone sets up your account from these at its first start"));
+    assert!(flow.screen().body[1].contains("only as a hash, made on this computer"));
 }
 
 #[test]
@@ -1803,7 +1811,9 @@ fn the_owner_is_asked_what_slot_b_holds_and_each_answer_does_what_it_says() {
     assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
     // Out of order: no other step's answer is taken here
     assert!(flow.decline_google_terms().is_err());
-    assert!(flow.answers(&support::drive::answers()).is_err());
+    assert!(flow
+        .answers(&support::drive::answers(), "testsalt0123")
+        .is_err());
 
     // Omarchy Mobile: a reinstall, judged again with no new question sent
     let sent = phone.log().len();
@@ -1894,5 +1904,149 @@ fn a_locked_phone_on_slot_b_answered_as_a_reinstall_is_shown_the_unlock_steps() 
     // Not asked whether it would take the unlock command from here: the
     // steps cover both answers
     assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
+    nothing_written(&phone);
+}
+
+// ---- This computer's SSH key in slot B's initramfs ------------------------
+
+const KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlaceholderPlaceholderPlaceholderPlacehol installer";
+
+fn with_key(key: &str) -> FlowOptions {
+    FlowOptions {
+        owner_ssh_key: Some(key.into()),
+        ..writing()
+    }
+}
+
+#[test]
+fn the_ssh_key_is_added_to_the_initramfs_image_and_every_other_byte_is_the_releases() {
+    let bundle = TestBundle::new();
+    let phone = ready();
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        with_key(KEY),
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
+    // The confirmation says which image is changed, and how
+    let body = flow.screen().body.join("\n");
+    assert!(
+        body.contains("vendor_kernel_boot_b is written with this computer's SSH public key added to the initramfs it carries"),
+        "{body}"
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "");
+    assert_eq!(flow.screen().state, "installed", "{:?}", flow.step());
+    let mut ours = OURS.map(str::to_string).to_vec();
+    ours.sort();
+    assert_eq!(phone.written(), ours);
+    for (name, size, _) in IMAGES {
+        let part = phone.partition(&format!("{name}_b"));
+        let want = if name == "vendor_kernel_boot" {
+            omamobile_installer_core::ramdisk_key::with_owner_key(bundle.image(name), KEY).unwrap()
+        } else {
+            bundle.image(name).to_vec()
+        };
+        assert_eq!(want.len(), size, "the archive fits the ramdisk's last page");
+        assert!(part[..want.len()] == want[..], "{name}_b");
+        assert!(
+            part[want.len()..].iter().all(|b| *b == SENTINEL),
+            "{name}_b"
+        );
+    }
+    assert_ne!(
+        &phone.partition("vendor_kernel_boot_b")[..IMAGES[3].1],
+        bundle.image("vendor_kernel_boot")
+    );
+    // The running system takes it from the answers: firstboot.conf carries
+    // it, and every other byte of userdata is the release's
+    let want = bundle.root_as_installed_with(Some(KEY));
+    let userdata = phone.partition("userdata");
+    assert!(userdata[..want.len()] == want[..]);
+    assert!(String::from_utf8_lossy(&want).contains(&format!("\nSSH_KEY={KEY}\n")));
+    assert_ne!(want, bundle.root_as_installed());
+    only_our_commands(&phone);
+}
+
+#[test]
+fn without_a_key_the_images_are_the_releases_and_the_confirmation_says_nothing_of_one() {
+    let bundle = TestBundle::new();
+    let phone = ready();
+    let flow = run(&bundle, &phone, writing());
+    assert_eq!(flow.screen().state, "installed");
+    holds_the_release(&bundle, &phone);
+    let at_confirm = flow_at(&bundle, &ready(), "confirm");
+    assert!(!at_confirm.screen().body.join(" ").contains("SSH"));
+}
+
+#[test]
+fn a_key_that_is_not_one_public_key_line_or_an_image_with_a_footer_writes_nothing() {
+    // A private key, two lines, options before the key, nothing, one too
+    // long to go with the answers: refused with the answers, before the
+    // dry run, with nothing written
+    let too_long = format!(
+        "ssh-ed25519 AAAA {}",
+        "x".repeat(omamobile_installer_core::firstboot::SSH_KEY_MAX - 16)
+    );
+    for key in [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "ssh-ed25519 AAAA\nssh-rsa BBBB",
+        "no-pty ssh-ed25519 AAAA",
+        "",
+        too_long.as_str(),
+    ] {
+        let bundle = TestBundle::new();
+        let phone = ready();
+        let mut flow = Flow::begin(
+            &bundle.files(),
+            bundle.index(),
+            &bundle.trusted(),
+            with_key(key),
+        );
+        drive(&mut flow, &bundle, &phone, "cheetah", "answers");
+        assert_eq!(flow.screen().state, "answers", "{key:?}");
+        let refused = flow
+            .answers(&support::drive::answers(), support::drive::SALT)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("SSH"), "{key:?}: {refused}");
+        assert!(
+            key.is_empty() || !refused.contains(key),
+            "the key is not repeated: {refused}"
+        );
+        assert_eq!(flow.screen().state, "answers", "{key:?}");
+        nothing_written(&phone);
+    }
+    // One byte shorter fits, with the longest answers
+    let fits = format!(
+        "ssh-ed25519 AAAA {}",
+        "x".repeat(omamobile_installer_core::firstboot::SSH_KEY_MAX - 17)
+    );
+    assert_eq!(fits.len(), omamobile_installer_core::firstboot::SSH_KEY_MAX);
+    omamobile_installer_core::firstboot::check_ssh_key(&fits).unwrap();
+    // The image that carries the initramfs, signed with an AVB footer
+    let bundle = TestBundle::build(
+        |m| {
+            m["install"]["writes"][3]["partition_size"] = json!(12 << 10);
+        },
+        |c| c.replace("AVB_FOOTERS=\"", "AVB_FOOTERS=\"vendor_kernel_boot:0x3000 "),
+    );
+    bundle
+        .verify()
+        .expect("a release whose initramfs image has a footer");
+    let phone = ready();
+    let flow = run(&bundle, &phone, with_key(KEY));
+    assert_eq!(
+        flow.screen().stop,
+        Some("dry-run-refused"),
+        "{:?}",
+        flow.step()
+    );
+    let said = format!("{:?}", flow.screen());
+    assert!(
+        said.contains("carries an AVB footer, so the SSH key can't be added"),
+        "{said}"
+    );
     nothing_written(&phone);
 }

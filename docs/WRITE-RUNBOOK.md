@@ -17,8 +17,8 @@ No identifier goes into this file or into anything committed: no serial number, 
 
 ## What this version does not do, and what that means for the run
 
-- **No owner answers reach the phone** (DESIGN §12). The phone the write leaves has no user account, root is locked, and there is no PIN to unlock anything with.
-- **No SSH key is in slot B's ramdisk or in the root image.** So there is **no SSH after the write**: `tools/phone-ssh`, `tools/phone-smoke` and `tools/nv-backup` cannot reach the phone the installer leaves. Everything this run learns after the write is read from the installer's own output, from fastboot `getvar`, and from the screen.
+- **The release must keep places for the answers** (DESIGN §12, decided on 2026-11-13): its `manifest.json` names `root_image.placeholders`, which Omarchy Mobile's release images carry from the change that added them. The published releases before it have none, and `install --write` stops for such a release at its start (`no-place-for-answers`), before it asks a phone anything. So this run waits for the first signed release built with them. The phone the write leaves then sets up an account from the answers given in step 5 (made-up ones) at its first start.
+- **No SSH key is in slot B's ramdisk or in the answers.** The terminal's `install --write` asks for none (the desktop app's run gives this computer's, app/docs/STATUS.md §7). So there is **no SSH after the write**: `tools/phone-ssh`, `tools/phone-smoke` and `tools/nv-backup` cannot reach the phone the installer leaves. Everything this run learns after the write is read from the installer's own output, from fastboot `getvar`, and from the screen.
 - **Nothing after the restart:** no radio backup, none of Google's files, no check.
 - **The installer restarts the phone itself,** straight after `set_active:b`. There is no pause between the two, so there is no moment to read `getvar` between them. Step 6 catches the phone in Fastboot Mode on its way up instead.
 
@@ -84,7 +84,8 @@ The installer never writes those partitions (the gate refuses every name but slo
 target/release/omamobile-install verify <RELEASE_DIR>
 ```
 
-- **Pass:** signed by the release key; every file matches; the root image matches the signed manifest; a line that lists Google's builds.
+- **Pass:** signed by the release key; every file matches; the root image matches the signed manifest; a line that lists Google's builds; two lines "the owner's answers go into /etc/omamobile/firstboot.conf" and "... boot-update.conf", each with its offset.
+- **Stop also:** "the root image keeps no place for the owner's answers": a release from before the placeholders (above). The run waits for one that has them.
 - **Stop:** "this release carries no list of Google's builds (factory-builds.json)". The flow stops for such a release before it looks at a phone (the published 2026.11.08 is one). The run then waits for a release that ships the index; nothing here works around that.
 - **Rollback:** none needed.
 - **Risk:** none.
@@ -123,7 +124,7 @@ target/release/omamobile-install install <RELEASE_DIR> --serial "$serial" --dry-
   --reinstall --bootloader-slots-match <BOOTLOADER> --factory-zip <FACTORY_ZIP> 2>&1 | tee dry-run.log
 ```
 
-Type `yes` at the warning and give the answers it asks for (they are checked and kept nowhere).
+Type `yes` at the warning and give the answers it asks for: made-up ones, and the same ones again in step 5, since the phone will take those (the PIN is the one to unlock it with after step 7). In the dry run they are checked, and walked into the root image's placeholders with nothing written.
 
 - **Expect:** the screens "Read this once", "Connect the Pixel 7 Pro", "Google's factory image", "About you and the phone", "The dry run", then **"The dry run passed. Nothing was written"**. From the look at the phone on, every screen carries the notice that the run rests on the statement about the other bootloader copy. The last screen lists `download … bytes, flash:boot_b`, then the same for `init_boot_b`, `vendor_boot_b`, `vendor_kernel_boot_b` and `dtbo_b`, then `flash userdata: the root image, in N pieces (erases userdata)`, `set_active:b`, `reboot`, and nothing else.
 - **Pass:** exit status 0 and that last title; the five `_b` partitions and `userdata` only; the phone still in Fastboot Mode, and step 2's `getvar` values unchanged when read again.
@@ -139,7 +140,7 @@ The maintainer reads step 3's list against this, and says go:
 
 - the six partitions, in that order, each image no larger than its partition;
 - `userdata` will be erased, and the working install on the phone with it;
-- after the write there is no account, no SSH and no way to use the phone until step 8;
+- after the write the phone sets up an account from the made-up answers at its first start, and has no SSH (no key anywhere) until step 8;
 - the way back is step 8, and behind it slot A's stock Android (`fastboot --set-active=a`, which needs a factory reset now and writes the radio partitions when it starts: a fresh `nv-backup` after any stock start).
 
 - **Stop:** any doubt about `<BOOTLOADER>`, the backup, or the release.
@@ -157,7 +158,7 @@ awk '$1 > max { max = $1 } END { print "longest wait between two outputs:", max,
 
 `script` keeps the terminal the tool asks its questions on (a pipe through a line-by-line timestamper would hold the "Codename:" question back until after its answer) and records when each piece of output came. `write.log` then holds what was typed too: the answers and the codename, no serial (`grep -c "$serial" write.log` must print 0 before it is kept). Neither file is committed.
 
-It runs step 3 again first, then shows **"This is what the installer will write"**: each partition with the image's size and the partition's size on this phone, `set_active:b`, `reboot`, what is erased, the notice about the bootloader statement, and that the answers do not reach the phone. Read it. Then type `cheetah`.
+It runs step 3 again first, then shows **"This is what the installer will write"**: each partition with the image's size and the partition's size on this phone, `set_active:b`, `reboot`, what is erased, the notice about the bootloader statement, and that the phone sets up the account from the answers at its first start. Read it. Then type `cheetah`.
 
 - **Expect, after the codename:** "Writing to the phone"; a `download:`/`flash:` pair printed for each of `boot_b`, `init_boot_b`, `vendor_boot_b`, `vendor_kernel_boot_b`, `dtbo_b`; then a line for each piece of `userdata`, `flash:userdata (piece 1: B blocks, K KiB written on the phone, S bytes sent, answered in T s)`, up to the N of step 3 (the dry run cut the same pieces); then two lines that begin `userdata, the piece that covered the most blocks:` and `userdata, the flash the phone took longest over:`; then `set_active:b`; then `reboot`; then **"Omarchy Mobile is written, and the phone is restarting"**.
 - **Pass:** exit status 0 and that title; no line names another partition; no piece covers more than 65536 blocks; no flash answered anywhere near 300 s. **Record the two `userdata,` lines whole**: they answer the timing question (the most blocks one flash covered, and how long the phone took; the longest any flash took). From them, the phone's write speed: KiB written divided by seconds, to set beside the 874 KiB/s the bound assumes at least. `write.timing` is the cross-check, and covers what those lines do not (the boot images, `set_active:b`): its longest wait also includes the time the root image takes to decompress and the time spent reading the confirmation.
@@ -187,7 +188,7 @@ done
 
 Watch the screen for five minutes. Nothing can be sent to the phone and nothing is.
 
-- **Expect (inferred from the root image's build and the first-start unit, never seen):** the boot logo; the root file system grows; `omamobile-firstboot` does not run (it runs only while `firstboot.conf` exists); the display manager comes up with no account to sign in to, or the screen stays on the logo. The phone may show up as a USB network device on the computer; SSH is refused (no key anywhere, root locked).
+- **Expect (inferred from the root image's build and the first-start unit, never seen):** the boot logo; the root file system grows; `omamobile-firstboot` runs with the answers from step 5 (a few minutes); then the phone logs in to that account and locks, and the PIN from step 5 unlocks it. The phone may show up as a USB network device on the computer; SSH is refused (no key anywhere, root locked). If the screen stays on the logo or comes up with no account, record it: that is the placeholders' first test on a phone failing, and step 8 still applies.
 - **Pass, for this run's purpose:** the phone gets past the bootloader and the kernel's logo into the system written in step 5, and does not fall back to slot A. That is the evidence that the pieces of `userdata` hold a file system.
 - **Stop:** "omamobile: no USB host, crashing in 20 s" on the screen, or the phone restarting by itself about a minute after each start: the safety net above found no USB host. Check the cable and the computer before the next start; do not let it run through slot B's tries. Stock Android's recovery or its "Try again / Factory data reset" screen: slot B did not start and the bootloader fell back. **Choose neither.** Hold Volume Down + Power about 20 s for Fastboot Mode (omarchy-mobile AGENTS.md §4) and go to step 8. A stock start writes the radio partitions: take a fresh read-only `nv-backup` after step 8 and say so in the results.
 - **Record:** what was on the screen at 30 s, 2 min and 5 min, in words. A photo only if it shows no network name.

@@ -6,9 +6,33 @@ The desktop window of the [Omarchy Mobile installer](../README.md): it guides a 
 
 **It has never been run against a real phone.** Started as it is, it goes through the steps of an install up to the dry run, which lists what an install would write, and ends there: such a window cannot write to a phone. Started with `--write` it goes on: it lists what it will write and what is erased, waits for the phone's codename to be typed, and writes. That path has run against a pretend phone only, and on a Pixel 7 Pro, the one phone it is for, the window reaches it as a reinstall only (the phone runs from slot B; the window asks what slot B holds) and stops a first install before it: [docs/STATUS.md](docs/STATUS.md) says what works, what has never run, what is left out on purpose, and how the app's first attended run goes. [docs/screens/](docs/screens/) has a picture of each screen of a pretend install.
 
+Started with `--write`, after the write it goes on as `tools/install-guided` does: the USB connection to the phone (a NetworkManager connection, shown and added on your click), the phone's first start, the backup of its radio partitions into a folder it names, Google's firmware from the factory image (the release's `tools/phone-provision`), a restart and a check. It runs the release's own tools, after checking each against the release's signed list, and remembers how far it got, so a window closed halfway offers to go on when it is opened again ([docs/DESIGN.md](../docs/DESIGN.md) §13). This computer's SSH public key goes to the phone with your answers, and the phone's first start sets it up for root and your account, so those steps can reach it. The whole run has met stand-ins only, and needs a release built with places for the answers, which none published yet is ([docs/STATUS.md](docs/STATUS.md)).
+
 It is a front end and nothing more. The installer's core (Rust, `../core`) decides the order of the steps, every refusal and every sentence about the phone; the window draws what the core says and hands in what the person did. The two talk through the command-line tool, `omamobile-install`, which the app starts and exchanges JSON lines with. That protocol and the rest of the design are in [docs/APP.md](../docs/APP.md).
 
 The tool's side of that protocol is `omamobile-install json` (`../cli/src/json.rs`). The app's tests drive it with the tool's pretend phone, and a stand-in in `tests/` that replays screens recorded from the core. **The app has not been run with a phone connected to it.**
+
+## Install it (Arch Linux, Omarchy)
+
+The package holds the window and the tool it drives, `omamobile-install`, both built from this checkout, with the launcher entry and the icon:
+
+```sh
+git clone https://github.com/derekross/omamobile-installer
+cd omamobile-installer/app/pkgbuild
+makepkg -si          # builds both (Rust and Qt), runs the tool's own tests, installs; asks for your password
+```
+
+`app/bin/install` does the same. `makepkg -s` installs what it needs to build that is missing (the Rust toolchain, `cargo`, among it); the package then needs, besides Qt, what the steps after the write run: OpenSSH, Python, `unzip`, `android-tools`, `erofs-utils`, `e2fsprogs`, `binutils`, `lz4`, `zstd` and `cpio`. NetworkManager is optional: without it you give this computer the address 172.16.42.2/24 on the phone's USB link yourself.
+
+Then "Omarchy Mobile Installer" is in the launcher, or from a terminal:
+
+```sh
+omainstall open DIR                    # a dry run, with a release's directory
+omainstall open --write DIR            # an install: ERASES the phone once you type its codename
+omainstall check                       # is the tool there, and does it speak this app's protocol
+```
+
+To remove it: `sudo pacman -R omainstall`. What it leaves in your home: the radio backup (`~/omamobile-backup/`, keep it), the setup's record (`~/.local/state/omamobile-installer/`), a key it made if you had none (`~/.local/share/omamobile-installer/ssh/`), the factory image's download (`~/.cache/omamobile-installer/`), and the NetworkManager connection `omamobile-phone` (`nmcli connection delete omamobile-phone`).
 
 ## Shortcuts
 
@@ -48,7 +72,7 @@ Needs `qt6-base`, `qt6-declarative`, `make` and a C++ compiler (all part of Omar
 ```sh
 bin/build       # build/omainstall
 bin/test        # the Qt Test binary, offscreen: no window opens, no phone, no USB
-bin/install     # makepkg -fsi: the app in the launcher (asks for your password)
+bin/install     # makepkg -fsi: the app and the tool, in the launcher (asks for your password)
 
 bin/screens     # a pretend install walked in the window, one picture for each screen, into docs/screens/
 
@@ -72,7 +96,7 @@ OMAINSTALL_TOOL=$PWD/tests/stand-in-tool build/omainstall      # try the window 
 | `src/cli.{h,cpp}` | `omainstall check` |
 | `tests/` | The Qt tests (against the stand-in and against the real tool), the stand-in for the tool, the recorded screens and the program that records them |
 | `docs/` | `STATUS.md`: what works, what has never run, the first attended run. `screens/`: the pictures `bin/screens` writes |
-| `pkgbuild/` | The Arch package, the `.desktop` file and the icon |
+| `pkgbuild/` | The Arch package (the app and `omamobile-install`), the `.desktop` file and the icon |
 
 ## Licence
 

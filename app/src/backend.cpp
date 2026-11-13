@@ -531,13 +531,27 @@ bool Backend::readPhone(const QString &phone) {
 }
 
 bool Backend::answerSlotB(const QString &answer) {
-    // Only an answer the core offered on the screen on show.
+    return action() == "slot-b" && answerChoice(answer);
+}
+
+bool Backend::answerChoice(const QString &answer) {
+    // Only an answer the screen on show offered.
     bool offered = false;
     for (const QVariant &choice : m_screen.value("choices").toList())
         offered = offered || (!answer.isEmpty() && choice.toMap().value("answer").toString() == answer);
-    if (!offered)
+    if (!offered || m_busy)
         return false;
-    return sendFor({"slot-b"}, {{"type", "slot-b"}, {"answer", answer}});
+    const QString current = action();
+    if (current != "slot-b" && current != "after")
+        return false;
+    // Putting the firmware on the phone is not cut off by the window, as
+    // a write is not: the tool finishes it, and the window waits.
+    const bool holds = current == "after" && answer == "firmware";
+    m_writeInHand = holds;
+    if (sendFor({"slot-b", "after"}, {{"type", current}, {"answer", answer}}))
+        return true;
+    m_writeInHand = false;
+    return false;
 }
 
 bool Backend::cancelDownload() {

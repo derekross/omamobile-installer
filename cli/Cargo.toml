@@ -28,6 +28,10 @@ required-features = ["fake-phone"]
 name = "json_mode"
 required-features = ["fake-phone"]
 
+[[test]]
+name = "after_write"
+required-features = ["fake-phone"]
+
 [dependencies]
 omamobile-installer-core = { path = "../core" }
 omamobile-installer-usb = { path = "../usb" }
@@ -40,6 +44,9 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # The JSON mode's messages (docs/APP.md): the core's Screen as serde
 # serialises it, and the app's lines parsed.
 serde_json = "1"
+# A salt for the password's hash (Flow::answers): the core has no source of
+# randomness, so the front end draws one from the operating system.
+getrandom = "0.2"
 
 # The JSON mode keeps standard output for the protocol alone: file descriptor
 # 1 is pointed at standard error, so nothing else in the process can print

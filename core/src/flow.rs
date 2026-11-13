@@ -71,6 +71,7 @@ use crate::fastboot::{
     probe, unlock_ability, PhoneId, PhoneOptions, PhoneReport, Session, Transport, UnlockAbility,
     WriteReach,
 };
+use crate::firstboot::{root_answers, RootAnswers};
 use crate::hash::StreamHasher;
 use crate::signature::TrustedKeys;
 use crate::{Error, Result};
@@ -110,13 +111,21 @@ pub const NO_INSTALL_YET: &str = "This version of the installer cannot install O
 pub const WRITE_DEVICES: [&str; 1] = ["cheetah"];
 /// What a front end says where it offers the switch that makes a flow write
 /// (the command line's `--write`): exactly what is written and erased.
-pub const WRITE_HELP: &str = "Writes to the phone: slot B's boot partitions (the release's boot images, each to its partition with the _b suffix) and userdata, then makes slot B the active slot and restarts the phone. userdata is ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again. Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. The run first does everything a dry run does, then lists each partition with its size and waits for you to type the phone's codename; nothing is written before that. This version cannot put your answers (user name, PIN or password, Wi-Fi) on the phone, so the phone it installs starts with no user account.";
-/// Why an install made by this version leaves a phone nobody can sign in to.
-const NO_ANSWERS: &str = "This version of the installer cannot put your answers on the phone: it has no way yet to write them into the system image. So the phone starts Omarchy Mobile with no user account, no PIN or password and no Wi-Fi set up, and there is nothing to unlock it with. An install made with this version shows that the install itself works; it does not give you a phone you can use.";
+pub const WRITE_HELP: &str = "Writes to the phone: slot B's boot partitions (the release's boot images, each to its partition with the _b suffix) and userdata, then makes slot B the active slot and restarts the phone. userdata is ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again. Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. The run first does everything a dry run does, then lists each partition with its size and waits for you to type the phone's codename; nothing is written before that. Your answers (user name, PIN or password, phone name, time zone, Wi-Fi) go into the place the release's system image keeps for them, so the phone sets up your account at its first start; a release whose system image keeps no such place is not installed.";
+/// What the phone does with the answers, said where the owner confirms the
+/// writes. Only for a release whose system image keeps a place for them;
+/// a flow that writes stops for any other ([`StopKind::NoPlaceForAnswers`]).
+/// What a run that hands the flow this computer's SSH key adds to
+/// [`ANSWERS_AT_FIRST_START`].
+pub const SSH_KEY_WITH_THE_ANSWERS: &str = "This computer's SSH public key goes with your answers: at its first start the phone sets it up for root and for your account, so that this computer can reach the phone over the USB cable for the steps after the write. Only the public half goes; the private key stays on this computer.";
+pub const ANSWERS_AT_FIRST_START: &str = "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.";
+/// Why this installer does not install a release made before the system
+/// image kept a place for the answers.
+pub const NO_PLACE_FOR_ANSWERS: &str = "This release's system image keeps no place for your answers, so a phone installed from it by this installer would start with no account and nothing to unlock it with. This installer does not install such a release.";
 /// Said on the unlock screen, before its steps, by a flow that may write
-/// ([`FlowOptions::write`]): the steps there erase the phone, and what this
-/// version installs afterwards is not a phone anyone can sign in to.
-pub const NO_USABLE_PHONE_YET: &str = "This version of the installer can install Omarchy Mobile, but it cannot put your answers on the phone: the phone it installs has no user account, and there is nothing to unlock it with. Unlocking the bootloader erases the phone. Unlock it for this version only if the phone is one you can do without.";
+/// ([`FlowOptions::write`]): the steps there erase the phone, and this
+/// version's writes have run against the tests' pretend phone only.
+pub const NO_USABLE_PHONE_YET: &str = "Unlocking the bootloader erases the phone. This version of the installer has written only to a pretend phone in its tests, not yet to a real one: unlock the phone for this version only if it is one you can do without.";
 /// Shown on every screen once the maintainer's override has skipped the
 /// bootloader-slot check, so both front ends say it in the same words.
 pub const SLOT_CHECK_SKIPPED: &str = "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.";
@@ -294,6 +303,19 @@ pub struct FlowOptions {
     /// can't be combined with the maintainer's override, and it is refused
     /// for a phone the write path was not written for ([`WRITE_DEVICES`]).
     pub write: bool,
+    /// This computer's SSH public key, one OpenSSH line, for slot B's
+    /// initramfs: the image that carries it is written with the key
+    /// appended, as `tools/install-phone` appends it
+    /// ([`crate::ramdisk_key`]), so that the initramfs's rescue SSH lets
+    /// this computer in. The confirmation says so. Set by the front end
+    /// that writes (the tool's `json --write`); the key is checked when a
+    /// session opens.
+    pub owner_ssh_key: Option<String>,
+    /// The front end goes on after the write with the steps the release's
+    /// own tools carry out (the tool's `json --write`, for a release that
+    /// ships them): the last screen says that they come next rather than
+    /// that nothing does. The flow itself still ends at the write.
+    pub after_write_steps: bool,
 }
 
 /// The owner accepted Google's terms on the terms step: for which build,
@@ -493,6 +515,9 @@ pub enum StopKind {
     OverrideInInstall,
     /// A flow that writes, for a phone this write path was not written for.
     WritesNotForDevice { codename: String },
+    /// A flow that writes, for a release whose system image keeps no place
+    /// for the owner's answers (one made before the placeholders).
+    NoPlaceForAnswers,
     /// A flow that writes needs every image of the release on this
     /// computer, checked, before it asks for the confirmation.
     ImagesNotChecked,
@@ -620,6 +645,7 @@ impl Stop {
             StopKind::DryRunRefused(_) => "dry-run-refused",
             StopKind::OverrideInInstall => "override-in-an-install",
             StopKind::WritesNotForDevice { .. } => "writes-not-for-this-device",
+            StopKind::NoPlaceForAnswers => "no-place-for-answers",
             StopKind::ImagesNotChecked => "images-not-checked",
             StopKind::NotConfirmed => "not-confirmed",
             StopKind::LockedAtWrite => "locked-at-write",
@@ -729,6 +755,9 @@ pub struct VerifiedFactoryZip {
     pub build: String,
     pub name: String,
     pub size: u64,
+    /// The SHA-256 the signed build index records for it, which its bytes
+    /// had: a front end that uses the file later checks it again.
+    pub sha256: String,
 }
 
 /// What the owner typed, before any rule.
@@ -797,6 +826,11 @@ pub struct AnswersSummary {
     pub timezone: String,
     pub wifi: bool,
 }
+
+/// The longest time zone name taken, in bytes. The longest in the zone
+/// database is about 32; the bound keeps the answers within the one block
+/// the system image keeps for them ([`crate::firstboot::SSH_KEY_MAX`]).
+pub const TIMEZONE_MAX: usize = 64;
 
 /// Names the system uses (install-phone's `RESERVED`).
 const RESERVED: [&str; 34] = [
@@ -898,6 +932,7 @@ impl OwnerAnswers {
             );
         }
         let tz_ok = !input.timezone.is_empty()
+            && input.timezone.len() <= TIMEZONE_MAX
             && input.timezone.split('/').all(|part| {
                 !part.is_empty()
                     && part
@@ -919,10 +954,12 @@ impl OwnerAnswers {
             }
             None
         } else {
-            if input.wifi_ssid.chars().count() > 32 || has_control(input.wifi_ssid) {
+            // 32 bytes, as Wi-Fi and the phone's first start count them: a
+            // letter with an accent is two, many emoji four
+            if input.wifi_ssid.len() > 32 || has_control(input.wifi_ssid) {
                 bad(
                     AnswerField::WifiSsid,
-                    "A Wi-Fi network name is at most 32 characters.",
+                    "A Wi-Fi network name is at most 32 characters (fewer with accented letters or emoji).",
                 );
             }
             let p = input.wifi_psk;
@@ -1126,6 +1163,10 @@ pub struct Flow {
     terms: Option<TermsAccepted>,
     zip: Option<VerifiedFactoryZip>,
     answers: Option<AnswersSummary>,
+    /// The answers as the blocks of this release's root image they go into,
+    /// with the password hashed: handed to each session the flow opens.
+    /// `None` for a release whose image keeps no place for them.
+    root_answers: Option<RootAnswers>,
     dry_run_open: bool,
     /// The maintainer's override let a phone past the bootloader-slot stop.
     slot_check_skipped: bool,
@@ -1184,6 +1225,7 @@ impl Flow {
             terms: None,
             zip: None,
             answers: None,
+            root_answers: None,
             dry_run_open: false,
             slot_check_skipped: false,
             slots_on_owners_word: false,
@@ -1239,6 +1281,22 @@ impl Flow {
                     format!("This release is for the {name} ({codename}). This version of the installer writes only to: {}.", WRITE_DEVICES.join(", ")),
                     "An install ends by making slot B the phone's active slot. What that costs, and what the phone falls back to when a start fails, differ from model to model, and for this model they have not been worked into this installer.".into(),
                     format!("A dry run works for this phone. To install, use the installer that comes with the release ({DOWNLOAD}), or ask at {ISSUES}"),
+                ],
+            );
+            flow.release = Some(release);
+            return flow;
+        }
+        // A phone written from an image with no place for the answers
+        // starts with no account: a flow that writes stops here, before
+        // the owner erases a phone for it
+        if flow.options.write && release.manifest().root_image.placeholders.is_empty() {
+            flow.stop(
+                StopKind::NoPlaceForAnswers,
+                Retry::StopsAgain,
+                "This release can't be installed with this installer",
+                vec![
+                    NO_PLACE_FOR_ANSWERS.into(),
+                    format!("The installer that comes with the release (\"install\", run in a terminal) puts the answers on the phone itself; or use a newer release, from {DOWNLOAD}."),
                 ],
             );
             flow.release = Some(release);
@@ -1303,6 +1361,11 @@ impl Flow {
     pub fn factory_zip_verified(&self) -> Option<&VerifiedFactoryZip> {
         self.zip.as_ref()
     }
+    /// The phone this install is pinned to, from the first look at it: the
+    /// digest a later step compares the phone that answers with.
+    pub fn pinned_phone(&self) -> Option<&PhoneId> {
+        self.pinned.as_ref()
+    }
 
     /// Whether this flow ends at the dry run, with no step that writes to a
     /// phone: every flow that was not begun with [`FlowOptions::write`]. A
@@ -1313,6 +1376,14 @@ impl Flow {
     /// ([`NO_USABLE_PHONE_YET`]).
     pub fn ends_at_dry_run(&self) -> bool {
         !self.options.write
+    }
+
+    /// Whether the release's system image keeps a place for the owner's
+    /// answers ([`crate::manifest::RootImage::placeholders`]).
+    fn has_place_for_answers(&self) -> bool {
+        self.release
+            .as_ref()
+            .is_some_and(|r| !r.manifest().root_image.placeholders.is_empty())
     }
 
     fn phone_fact(&self) -> PhoneFact {
@@ -1953,6 +2024,7 @@ impl Flow {
                         build: build.build.clone(),
                         name,
                         size: len,
+                        sha256: digest,
                     });
                     self.step = Step::Answers;
                     return Ok(DownloadEnd::Verified);
@@ -2099,17 +2171,37 @@ impl Flow {
             build: build.build.clone(),
             name: check.name,
             size: len,
+            sha256: digest,
         });
         self.step = Step::Answers;
         Ok(())
     }
 
     /// The owner's answers, already within the rules ([`OwnerAnswers::check`]).
-    /// The flow keeps the summary; the secrets stay with the front end.
-    pub fn answers(&mut self, answers: &OwnerAnswers) -> Result<()> {
+    /// `salt`: for the password's hash, from [`crate::firstboot::salt_from`]
+    /// with 12 random bytes the front end draws for this install (the core
+    /// has no source of randomness). The flow keeps the summary and, for a
+    /// release whose system image keeps a place for them, the answers as
+    /// the image's blocks ([`RootAnswers`]: the password only as its hash).
+    /// The password itself stays with the front end.
+    pub fn answers(&mut self, answers: &OwnerAnswers, salt: &str) -> Result<()> {
         if self.step != Step::Answers {
             return self.out_of_order("the owner's answers");
         }
+        let release = self
+            .release
+            .as_ref()
+            .expect("a flow past the warning has a release");
+        self.root_answers = if release.manifest().root_image.placeholders.is_empty() {
+            None
+        } else {
+            Some(root_answers(
+                release,
+                answers,
+                self.options.owner_ssh_key.as_deref(),
+                salt,
+            )?)
+        };
         self.answers = Some(answers.summary());
         self.step = Step::DryRun;
         Ok(())
@@ -2172,8 +2264,20 @@ impl Flow {
             // Taken only by a session that holds every write back, which
             // is the only kind `connect_pinned` opens
             maintainer_skip_bootloader_slot_check: self.slot_check_skipped,
+            // So that the dry run checks the image with the key against
+            // its partition, as the write will send it
+            owner_ssh_key: self.options.owner_ssh_key.clone(),
         };
-        match Session::connect_pinned(transport, &release, &report.id, options).await {
+        let opened = match Session::connect_pinned(transport, &release, &report.id, options).await {
+            // The answers walk through the dry run too: it checks the image
+            // holds their places where the signed manifest says
+            Ok(mut session) => match self.root_answers.clone().map(|a| session.set_answers(a)) {
+                Some(Err(e)) => Err(e),
+                _ => Ok(session),
+            },
+            Err(e) => Err(e),
+        };
+        match opened {
             Ok(session) => {
                 self.dry_run_open = true;
                 Ok(Some(session))
@@ -2444,15 +2548,27 @@ impl Flow {
             // session that writes, before its first write
             bootloader_slots_confirmed: self.options.bootloader_slots_match.clone(),
             maintainer_skip_bootloader_slot_check: false,
+            owner_ssh_key: self.options.owner_ssh_key.clone(),
         };
         // Every condition above held: the one token there is, for the one
         // session that writes. Nothing else in any crate can make one.
         let token = WriteToken(());
         let opened =
             match Session::connect_writing(transport, &release, &pinned, options, token).await {
-                Ok(mut session) => match session.preflight_userdata(image_len).await {
-                    Ok(()) => Ok(session),
-                    Err(e) => Err(e),
+                // The answers the owner gave in this run, as the image's
+                // blocks: the session takes the root image only with them,
+                // and checks that before the first write
+                Ok(mut session) => match self.root_answers.clone() {
+                    Some(answers) => match session.set_answers(answers) {
+                        Ok(()) => session
+                            .preflight_userdata(image_len)
+                            .await
+                            .map(|()| session),
+                        Err(e) => Err(e),
+                    },
+                    None => Err(Error::Refused(
+                        "this run has no answers for the system image: nothing is written".into(),
+                    )),
                 },
                 Err(e) => Err(e),
             };
@@ -2796,11 +2912,12 @@ impl Flow {
                 s.title = "About you and the phone".into();
                 s.body = vec![
                     "A user name, a PIN or password to unlock the phone (digits only gives a PIN pad), the phone's name, the time zone and, if you like, a Wi-Fi network.".into(),
-                    "This version of the installer checks your answers and keeps them nowhere: it has no way yet to put them on the phone.".into(),
                 ];
-                if self.options.write {
-                    s.body.push("So the phone this run installs starts with no user account. The list of what will be written says so again, before anything is written.".into());
-                }
+                s.body.push(match (self.has_place_for_answers(), self.options.write) {
+                    (true, true) => "The phone sets up your account from these at its first start: the installer puts them into the system image as it writes it. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you type it, since the phone needs it to connect. The installer keeps them nowhere else and sends them nowhere but to the phone.".into(),
+                    (true, false) => "An install puts these into the system image, for the phone's first start. This dry run checks them, and checks where in the system image they would go; it writes nothing.".into(),
+                    (false, _) => format!("{NO_PLACE_FOR_ANSWERS} This dry run checks your answers all the same, and keeps them nowhere."),
+                });
             }
             Step::DryRun => {
                 s.state = "dry-run";
@@ -2855,6 +2972,13 @@ impl Flow {
                         a.timezone,
                         if a.wifi { "set" } else { "not set" }
                     ),
+                    if !self.has_place_for_answers() {
+                        NO_PLACE_FOR_ANSWERS.into()
+                    } else if plan.images_walked {
+                        "An install would put these answers into the place the system image keeps for them, so the phone sets up your account at its first start. The dry run found that place where the release's signed manifest says.".into()
+                    } else {
+                        "An install would put these answers into the place the system image keeps for them, so the phone sets up your account at its first start.".into()
+                    },
                     if plan.images_walked {
                         "Every image of the release was checked against its signed checksum and walked through the dry run. An install would send these writes, and only these:".into()
                     } else {
@@ -2893,15 +3017,34 @@ impl Flow {
                 }
                 s.body.extend([
                     format!(
-                        "Your answers: user {} ({}), phone name {}, time zone {}, Wi-Fi {}.",
+                        "Your answers: user {} ({}), phone name {}, time zone {}, Wi-Fi {}{}. The phone sets up your account from them at its first start.",
                         a.username,
                         if a.pin { "PIN" } else { "password" },
                         a.hostname,
                         a.timezone,
-                        if a.wifi { "set" } else { "not set" }
+                        if a.wifi { "set" } else { "not set" },
+                        if self.root_answers.as_ref().is_some_and(RootAnswers::has_ssh_key) {
+                            ", and this computer's SSH public key"
+                        } else {
+                            ""
+                        }
                     ),
                     "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
                 ]);
+                if let Some(at) = self
+                    .options
+                    .owner_ssh_key
+                    .as_ref()
+                    .and(self.release.as_ref())
+                    .and_then(|r| crate::fastboot::ramdisk_write(r.manifest()))
+                {
+                    let name = self
+                        .release
+                        .as_ref()
+                        .map(|r| r.manifest().boot_writes[at].partition.name().to_string())
+                        .unwrap_or_default();
+                    s.body.push(format!("{name} is written with this computer's SSH public key added to the initramfs it carries, after the release's own files, as Omarchy Mobile's install-phone adds it, so that the phone's rescue SSH lets this computer in. Every other byte written is the release's."));
+                }
                 s.plan = plan.writes.iter().map(PlannedWrite::line).collect();
                 s.plan
                     .push("then: make slot B the active slot (set_active:b)".into());
@@ -2914,10 +3057,19 @@ impl Flow {
                         "Slot B's boot partitions, listed above, are overwritten.".into()
                     },
                     "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.".into(),
-                    NO_ANSWERS.into(),
+                    ANSWERS_AT_FIRST_START.into(),
+                ];
+                if self
+                    .root_answers
+                    .as_ref()
+                    .is_some_and(RootAnswers::has_ssh_key)
+                {
+                    s.footer.push(SSH_KEY_WITH_THE_ANSWERS.into());
+                }
+                s.footer.extend([
                     format!("To go ahead, type the phone's codename: {codename}"),
                     "Anything else stops the install here, with nothing written.".into(),
-                ];
+                ]);
             }
             Step::Write(plan) => {
                 s.state = "write";
@@ -2944,9 +3096,12 @@ impl Flow {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
-                    "Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B. At its first start the system grows to fill the phone's storage, which can take a few minutes.".into(),
-                    NO_ANSWERS.into(),
-                    "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone either: this version of the installer does nothing after the restart.".into(),
+                    "Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B. At its first start the system grows to fill the phone's storage and sets up your account from your answers, which can take a few minutes. Then it starts into your account, locked: unlock it with your PIN or password.".into(),
+                    if self.options.after_write_steps {
+                        "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone yet. They come next, with the release's own tools: the USB connection to the phone, its first start, the radio backup, the firmware from Google's factory image, a restart and a check. Wi-Fi connects to the network you gave once the firmware is on the phone.".into()
+                    } else {
+                        "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone: this version of the installer does nothing after the restart. So Wi-Fi does not connect yet; the network you gave is kept for when it does.".into()
+                    },
                 ];
                 s.footer = vec![
                     "Android is still on slot A, unused. Its data was erased with userdata, so it needs a factory reset if it is ever started again.".into(),
@@ -2973,7 +3128,10 @@ impl Screen {
     /// were read; this is for everything else a screen is built from (the
     /// name of a file the owner picked, what an HTTP client said of a
     /// server's answer, the release's own names), and for the phone's again.
-    fn fit_to_print(&mut self) {
+    /// Public for the screens the command-line tool makes itself after a
+    /// write (the steps a release's tools carry out), which pass through
+    /// the same filter.
+    pub fn fit_to_print(&mut self) {
         use crate::text::plain;
         let each = |list: &mut Vec<String>| list.iter_mut().for_each(|s| *s = plain(s));
         self.title = plain(&self.title);

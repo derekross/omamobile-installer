@@ -42,6 +42,81 @@ pub struct TestBundle {
     /// the size and SHA-256 the index records. Nothing ever opens it.
     pub factory_zip: Vec<u8>,
     pub factory_zip_name: String,
+    /// Files beyond the published layout's, under the signed checksums
+    /// like every other: the tools a bundle ships (`tools/...`).
+    pub extra: Vec<(String, Vec<u8>)>,
+}
+
+/// The image that carries slot B's initramfs, as `bin/omamobile images`
+/// lays it out and the owner's SSH key is added to it
+/// (`core/src/ramdisk_key.rs`): a v4 vendor boot image of 4 KiB pages with
+/// one vendor ramdisk, a legacy LZ4 stream of a small cpio archive (an
+/// `init`), a device tree section of noise that makes it `size` bytes, and
+/// the ramdisk table.
+pub fn vendor_kernel_boot(size: usize) -> Vec<u8> {
+    const PAGE: usize = 4096;
+    let put = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let mut archive = Vec::new();
+    for (ino, mode, name, data) in [
+        (
+            1u32,
+            0o100755u32,
+            "init",
+            &b"#!/bin/sh\nexec /sbin/init\n"[..],
+        ),
+        (0, 0, "TRAILER!!!", &b""[..]),
+    ] {
+        let fields = [
+            ino,
+            mode,
+            0,
+            0,
+            1,
+            0,
+            data.len() as u32,
+            0,
+            0,
+            0,
+            0,
+            name.len() as u32 + 1,
+            0,
+        ];
+        archive.extend_from_slice(b"070701");
+        for f in fields {
+            archive.extend_from_slice(format!("{f:08X}").as_bytes());
+        }
+        archive.extend_from_slice(name.as_bytes());
+        archive.push(0);
+        archive.resize(archive.len().div_ceil(4) * 4, 0);
+        archive.extend_from_slice(data);
+        archive.resize(archive.len().div_ceil(4) * 4, 0);
+    }
+    // Literals only, in one block (the format's own rule for a short run)
+    let mut block = vec![0xF0, (archive.len() - 15) as u8];
+    assert!(archive.len() - 15 < 255);
+    block.extend_from_slice(&archive);
+    let mut ramdisk = 0x184C_2102u32.to_le_bytes().to_vec();
+    ramdisk.extend_from_slice(&(block.len() as u32).to_le_bytes());
+    ramdisk.extend_from_slice(&block);
+    let mut img = vec![0u8; PAGE];
+    img[..8].copy_from_slice(b"VNDRBOOT");
+    put(&mut img, 8, 4);
+    put(&mut img, 12, PAGE as u32);
+    put(&mut img, 24, ramdisk.len() as u32);
+    put(&mut img, 2096, 2128);
+    put(&mut img, 2112, 108);
+    put(&mut img, 2116, 1);
+    put(&mut img, 2120, 108);
+    img.extend_from_slice(&ramdisk);
+    img.resize(2 * PAGE, 0);
+    let table_at = size - PAGE;
+    put(&mut img, 2100, (table_at - 2 * PAGE) as u32);
+    img.extend_from_slice(&noise(7, table_at - 2 * PAGE));
+    let mut table = vec![0u8; PAGE];
+    put(&mut table, 0, ramdisk.len() as u32);
+    put(&mut table, 8, 1);
+    img.extend_from_slice(&table);
+    img
 }
 
 /// Deterministic noise.
@@ -57,8 +132,25 @@ pub fn noise(seed: u32, len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// A 2 MiB "root image": zero runs, a repeated word, noise, and blocks that
-/// only look uniform.
+/// Where the stand-in root image keeps its placeholders for the owner's
+/// answers (rootfs/placeholders): one block each, inside its run of zeros.
+pub const PLACEHOLDERS: [(&str, usize); 2] = [
+    ("/etc/omamobile/boot-update.conf", 300),
+    ("/etc/omamobile/firstboot.conf", 302),
+];
+
+/// A placeholder's bytes as the release builds them: comments, padded to
+/// one block.
+pub fn placeholder(path: &str) -> Vec<u8> {
+    omamobile_installer_core::firstboot::pad_placeholder(
+        format!("# Omarchy Mobile: the place for {path}, kept by the release image.\n").as_bytes(),
+        4096,
+    )
+    .unwrap()
+}
+
+/// A 2 MiB "root image": zero runs, a repeated word, noise, blocks that
+/// only look uniform, and the two placeholders.
 pub fn root_image() -> Vec<u8> {
     let b = 4096;
     let mut img = vec![0u8; 512 * b];
@@ -73,7 +165,18 @@ pub fn root_image() -> Vec<u8> {
     }
     img[420 * b..511 * b].copy_from_slice(&noise(3, 91 * b));
     img[511 * b..].fill(0x11);
+    for (path, block) in PLACEHOLDERS {
+        img[block * b..(block + 1) * b].copy_from_slice(&placeholder(path));
+    }
     img
+}
+
+/// `root_image.placeholders`, as tools/bundle-manifest writes it.
+pub fn placeholders_json() -> Value {
+    json!(PLACEHOLDERS
+        .iter()
+        .map(|(path, block)| json!({"path": path, "offset": block * 4096, "length": 4096, "sha256": sha256_hex(&placeholder(path))}))
+        .collect::<Vec<_>>())
 }
 
 /// A valid zstd frame of raw and RLE blocks, with the content size in its
@@ -211,18 +314,55 @@ impl TestBundle {
         Self::build_for(codename, |_| {}, |c| c, |_| {})
     }
 
+    /// A bundle around another root image: `raw`, the unpacked image (a
+    /// multiple of 4096 bytes), and its `root_image.placeholders`.
+    pub fn with_root_image(raw: Vec<u8>, placeholders: Value) -> Self {
+        Self::build_with(
+            "cheetah",
+            Some((raw, placeholders)),
+            |_| {},
+            |c| c,
+            |_| {},
+            Vec::new(),
+        )
+    }
+
+    /// A bundle that also ships these files (paths inside the bundle, such
+    /// as `tools/nv-backup`), signed with the rest.
+    pub fn with_files(extra: Vec<(String, Vec<u8>)>) -> Self {
+        Self::build_with("cheetah", None, |_| {}, |c| c, |_| {}, extra)
+    }
+
     fn build_for(
         codename: &str,
         edit: impl FnOnce(&mut Value),
         conf: impl FnOnce(String) -> String,
         index: impl FnOnce(&mut Value),
     ) -> Self {
+        Self::build_with(codename, None, edit, conf, index, Vec::new())
+    }
+
+    fn build_with(
+        codename: &str,
+        root: Option<(Vec<u8>, Value)>,
+        edit: impl FnOnce(&mut Value),
+        conf: impl FnOnce(String) -> String,
+        index: impl FnOnce(&mut Value),
+        extra: Vec<(String, Vec<u8>)>,
+    ) -> Self {
         let images: Vec<(String, Vec<u8>)> = IMAGES
             .iter()
             .enumerate()
-            .map(|(i, (name, size, _))| (name.to_string(), noise(100 + i as u32, *size)))
+            .map(|(i, (name, size, _))| {
+                let image = if *name == "vendor_kernel_boot" {
+                    vendor_kernel_boot(*size)
+                } else {
+                    noise(100 + i as u32, *size)
+                };
+                (name.to_string(), image)
+            })
             .collect();
-        let root_raw = root_image();
+        let (root_raw, placeholders) = root.unwrap_or_else(|| (root_image(), placeholders_json()));
         let root_zst = zstd_store(&root_raw, true);
         let device_conf =
             conf(default_conf().replace("CODENAME=cheetah", &format!("CODENAME={codename}")))
@@ -253,6 +393,7 @@ impl TestBundle {
                 .map(|(n, d)| (format!("images/{n}.img"), d.clone())),
         );
         files.push(("omamobile.gpg".into(), keyring.clone()));
+        files.extend(extra.iter().cloned());
         let factory_zip = factory_zip();
         let mut index_value = default_index();
         index(&mut index_value);
@@ -278,7 +419,7 @@ impl TestBundle {
             "device": {"codename": codename, "name": "Pixel 7 Pro"},
             "kernel": {"commit": "000000000000", "release": "7.3.0-test"},
             "files": files.iter().map(|(p, d)| json!({"path": p, "sha256": sha256_hex(d), "size": d.len()})).collect::<Vec<_>>(),
-            "root_image": {"compression": "zstd", "name": ROOT_NAME, "sha256": sha256_hex(&root_zst), "size": root_zst.len()},
+            "root_image": {"compression": "zstd", "name": ROOT_NAME, "sha256": sha256_hex(&root_zst), "size": root_zst.len(), "placeholders": placeholders},
             "install": {
                 "tool": "fastboot", "product": codename,
                 "require_unlocked_bootloader": true, "require_matching_bootloader_slots": true,
@@ -322,6 +463,7 @@ impl TestBundle {
             index_json,
             factory_zip,
             factory_zip_name,
+            extra,
         }
     }
 
@@ -351,5 +493,31 @@ impl TestBundle {
 
     pub fn image(&self, name: &str) -> &[u8] {
         &self.images.iter().find(|(n, _)| n == name).unwrap().1
+    }
+
+    /// The root image as an install with the tests' answers
+    /// ([`super::drive::answers`], [`super::drive::SALT`]) writes it: the
+    /// placeholders' blocks hold the answers.
+    pub fn root_as_installed(&self) -> Vec<u8> {
+        self.root_as_installed_with(None)
+    }
+
+    /// The same, from a run that hands the flow this computer's SSH key:
+    /// `firstboot.conf` carries it too.
+    pub fn root_as_installed_with(&self, ssh_key: Option<&str>) -> Vec<u8> {
+        let release = self.verify().unwrap();
+        let answers = omamobile_installer_core::firstboot::root_answers(
+            &release,
+            &super::drive::answers(),
+            ssh_key,
+            super::drive::SALT,
+        )
+        .unwrap();
+        let mut raw = self.root_raw.clone();
+        for (_, offset, bytes) in answers.blocks() {
+            let at = offset as usize;
+            raw[at..at + bytes.len()].copy_from_slice(bytes);
+        }
+        raw
     }
 }

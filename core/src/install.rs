@@ -3,21 +3,86 @@
 //! out, each no larger than the limit, with bounded memory.
 //!
 //! ```text
-//! .img.zst bytes -> feed() -> ZstdPush -> SparseSplitter -> next_segment() -> Session::flash_userdata_segment
+//! .img.zst bytes -> feed() -> ZstdPush -> Patcher -> SparseSplitter -> next_segment() -> Session::flash_userdata_segment
 //! ```
+//!
+//! The patcher puts the owner's answers into the blocks the release's root
+//! image keeps for them ([`RootAnswers`], docs/DESIGN.md §12): each block,
+//! as the release built it, must have the SHA-256 the signed manifest
+//! records, or the stream stops there, before that block or anything after
+//! it is cut into a piece. Every other byte passes unchanged.
 //!
 //! The image's size comes from the zstd frame header (the published images
 //! record it); a stream without one is refused, because every sparse image
 //! states the whole image's block count up front.
 use crate::bundle::VerifiedRootImage;
 use crate::fastboot::{PieceReport, Session, Transport};
+use crate::firstboot::{Region, RootAnswers};
+use crate::hash::sha256_hex;
 use crate::sparse::SparseSplitter;
 use crate::zstd_push::{frame_info, ZstdPush};
 use crate::{Error, Result};
 use std::io::Read;
 
+/// Swaps the answers' blocks into the raw image as it passes, in order.
+struct Patcher {
+    regions: Vec<Region>,
+    /// The next region to reach.
+    next: usize,
+    /// Raw bytes passed so far.
+    pos: u64,
+    /// The bytes of the region being passed, as the release built them.
+    held: Vec<u8>,
+}
+
+impl Patcher {
+    fn push(&mut self, mut data: &[u8], out: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        while !data.is_empty() {
+            let Some(r) = self.regions.get(self.next) else {
+                self.pos += data.len() as u64;
+                return out(data);
+            };
+            if self.pos < r.offset {
+                let n = (r.offset - self.pos).min(data.len() as u64) as usize;
+                out(&data[..n])?;
+                self.pos += n as u64;
+                data = &data[n..];
+                continue;
+            }
+            let end = r.offset + r.bytes.len() as u64;
+            let n = (end - self.pos).min(data.len() as u64) as usize;
+            self.held.extend_from_slice(&data[..n]);
+            self.pos += n as u64;
+            data = &data[n..];
+            if self.pos == end {
+                if sha256_hex(&self.held) != r.original_sha256 {
+                    return Err(Error::Refused(format!(
+                        "the system image does not hold the place for {} where its signed manifest says: the owner's answers are not put there, and the install stops",
+                        r.path
+                    )));
+                }
+                self.held.clear();
+                out(&r.bytes)?;
+                self.next += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<()> {
+        match self.regions.get(self.next) {
+            None => Ok(()),
+            Some(r) => Err(Error::Refused(format!(
+                "the system image ended before the place for {}",
+                r.path
+            ))),
+        }
+    }
+}
+
 pub struct UserdataStream {
     zstd: ZstdPush,
+    patcher: Option<Patcher>,
     sparse: Option<SparseSplitter>,
     max_segment: u64,
     head: Vec<u8>,
@@ -31,6 +96,7 @@ impl UserdataStream {
     pub fn new(max_segment: u64) -> Self {
         Self {
             zstd: ZstdPush::new(),
+            patcher: None,
             sparse: None,
             max_segment,
             head: Vec::new(),
@@ -38,6 +104,19 @@ impl UserdataStream {
             ready: Vec::new(),
             ended: false,
         }
+    }
+
+    /// As [`Self::new`], with the owner's answers put into the blocks the
+    /// root image keeps for them as it passes.
+    pub fn with_answers(max_segment: u64, answers: &RootAnswers) -> Self {
+        let mut s = Self::new(max_segment);
+        s.patcher = Some(Patcher {
+            regions: answers.regions.clone(),
+            next: 0,
+            pos: 0,
+            held: Vec::new(),
+        });
+        s
     }
 
     /// The raw image's size, once the header has arrived.
@@ -82,7 +161,13 @@ impl UserdataStream {
                 return Ok(None);
             };
             let ready = &mut self.ready;
-            if !self.zstd.step(&mut |raw| sparse.push(raw, ready))? {
+            let stepped = match self.patcher.as_mut() {
+                Some(patcher) => self
+                    .zstd
+                    .step(&mut |raw| patcher.push(raw, &mut |d| sparse.push(d, ready)))?,
+                None => self.zstd.step(&mut |raw| sparse.push(raw, ready))?,
+            };
+            if !stepped {
                 return Ok(None);
             }
         }
@@ -100,6 +185,9 @@ impl UserdataStream {
             ))
         })? {}
         let len = self.zstd.finish()?;
+        if let Some(patcher) = &self.patcher {
+            patcher.finish()?;
+        }
         let sparse = self
             .sparse
             .take()
@@ -143,7 +231,12 @@ pub async fn flash_userdata_with_progress<T: Transport>(
     let limit = segment_cap.map_or(session.max_download_size(), |c| {
         c.min(session.max_download_size())
     });
-    let mut stream = UserdataStream::new(limit);
+    // The answers the flow gave the session, if any: the session checks
+    // that every piece it sends carries them where they go
+    let mut stream = match session.answers() {
+        Some(answers) => UserdataStream::with_answers(limit, answers),
+        None => UserdataStream::new(limit),
+    };
     let mut buf = vec![0u8; 256 << 10];
     let (mut begun, mut pieces) = (false, 0u32);
     loop {
