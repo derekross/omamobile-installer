@@ -1862,3 +1862,74 @@ fn a_run_that_writes_says_so_in_its_hello_and_a_locked_phone_is_told_what_it_get
     let ended = tool.quit();
     assert!(writes_of(&ended.commands()).is_empty());
 }
+
+#[test]
+fn a_write_is_finished_when_nobody_reads_the_tool_any_more() {
+    // The app dies in the middle of a write: the tool's messages have
+    // nowhere to go. It must not end between two commands for that, with
+    // the phone half written. Here the reader goes just before the writes
+    // are asked for, so every message of the write fails to be sent
+    let dir = fixture();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omamobile-install"))
+        .args(["json", "--release", dir.to_str().unwrap()])
+        .args(["--fake-phone", "ready", "--write"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |message: Value| {
+        stdin.write_all(format!("{message}\n").as_bytes()).unwrap();
+        stdin.flush().unwrap();
+    };
+    let state = |stdout: &mut BufReader<std::process::ChildStdout>| loop {
+        let mut line = String::new();
+        assert!(stdout.read_line(&mut line).unwrap() > 0);
+        let message: Value = serde_json::from_str(&line).unwrap();
+        if message["type"] == "screen" {
+            return message["screen"]["state"].as_str().unwrap().to_string();
+        }
+    };
+    send(json!({"type": "hello", "protocol": 2}));
+    for (message, then) in [
+        (json!({"type": "start", "reinstall": false}), "warning"),
+        (json!({"type": "acknowledge"}), "phone"),
+        (json!({"type": "read-phone"}), "google-terms"),
+        (json!({"type": "decline-terms"}), "factory-image"),
+        (json!({"type": "take-file", "path": zip_file()}), "answers"),
+        (answers("alex"), "dry-run"),
+        (json!({"type": "dry-run"}), "confirm"),
+        (json!({"type": "confirm", "typed": "cheetah"}), "write"),
+    ] {
+        send(message);
+        assert_eq!(state(&mut stdout), then);
+    }
+    // The reader goes; then the writes are asked for
+    drop(stdout);
+    send(json!({"type": "write"}));
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let code = child.wait().unwrap().code().unwrap();
+    // It left with a failure, after the write: the pretend phone's record
+    // holds the whole install, to the restart
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("nobody reads the protocol any more"),
+        "{stderr}"
+    );
+    let received: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.split_once(" <- "))
+        .map(|(_, command)| command)
+        .collect();
+    assert_eq!(received.last(), Some(&"reboot"), "{stderr}");
+    assert!(received.contains(&"set_active:b") && received.contains(&"flash:userdata"));
+    assert!(stderr.contains("partitions written: 6"), "{stderr}");
+}

@@ -46,6 +46,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -78,9 +79,18 @@ fn claim() -> io::Result<()> {
     Ok(())
 }
 
+/// Nobody reads the protocol any more: a message could not be written.
+static DEAF: AtomicBool = AtomicBool::new(false);
+
 /// Send one message: one line. If the reader is gone there is nobody left to
-/// tell, and the tool ends.
+/// tell. The tool does not end here for that: a message is also sent in the
+/// middle of a write to a phone, and a write that was begun is finished
+/// whoever still listens. It ends where the lines are taken in turn
+/// ([`Driver::run`]), between two actions.
 fn say(message: Value) {
+    if DEAF.load(Ordering::SeqCst) {
+        return;
+    }
     // serde_json escapes every control character: no line feed in a message
     let mut line = message.to_string();
     line.push('\n');
@@ -91,8 +101,8 @@ fn say(message: Value) {
         .and_then(|()| wire.flush())
         .is_err()
     {
-        eprintln!("omamobile-install: nobody reads the protocol any more; leaving");
-        std::process::exit(1);
+        DEAF.store(true, Ordering::SeqCst);
+        eprintln!("omamobile-install: nobody reads the protocol any more; leaving once the step in hand is over");
     }
 }
 
@@ -394,6 +404,10 @@ impl Watch for Wire<'_> {
         if what != "download" && what != "check" {
             return true;
         }
+        // Nobody is left to download or check a file for
+        if DEAF.load(Ordering::SeqCst) {
+            return false;
+        }
         loop {
             match self.lines.front() {
                 Front::Other => return true,
@@ -665,6 +679,11 @@ impl<P: Phones> Driver<P> {
     /// Take the app's lines in turn until `quit` or the end of the input.
     fn run(&mut self) -> Result<(), Fatal> {
         loop {
+            // Between two actions, and nowhere else, is where a tool that
+            // nobody reads any more leaves
+            if DEAF.load(Ordering::SeqCst) {
+                return Err(Fatal("nobody reads the protocol any more".into()));
+            }
             let message = match self.lines.next() {
                 Input::Closed => break,
                 Input::TooLong => {
