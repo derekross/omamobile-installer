@@ -10,6 +10,7 @@ echo "phone-provision $*" >> "$P/log"
 [[ -f ${3:?}/SHA256SUMS ]] || { echo "error: no backup in $3" >&2; exit 2; }
 [[ -f ${4:?} ]] || { echo "error: no $4" >&2; exit 2; }
 if [[ -f $P/fail_provision ]]; then cat "$P/fail_provision" >&2; exit 1; fi
+sleep 1
 echo "==> Extracting the firmware from $(basename "$4")"
 echo "==> Pushing it to the phone"
 echo "==> Done"

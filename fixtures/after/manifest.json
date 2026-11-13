@@ -41,7 +41,7 @@
     },
     {
       "path": "omamobile.gpg",
-      "sha256": "9df5369a225a5ab284f5212ce18d1f9efebed1e186650a7d2d62b7aa1d766ce2",
+      "sha256": "e4055c7f87704789051d1d2dd68b0a2ba835744cb0996e2fd9ae58ef056e685b",
       "size": 215
     },
     {
@@ -51,8 +51,8 @@
     },
     {
       "path": "tools/phone-provision",
-      "sha256": "f096fc60a60fd3d3bd36832fcbab915c401972e18a4f1551d19c86d95a89562f",
-      "size": 739
+      "sha256": "fb443a7dd1b2ab92807045e7ff48a73ff2af9e1651ef66599dce7f0937bd4d7e",
+      "size": 747
     },
     {
       "path": "tools/phone-smoke",
