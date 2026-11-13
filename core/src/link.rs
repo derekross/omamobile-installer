@@ -1292,6 +1292,7 @@ impl LinkFlow {
             plan: Vec::new(),
             footer: Vec::new(),
             choices: Vec::new(),
+            extras: false,
             action: "wait",
         };
         let phone = &self.start.device_name;
@@ -1372,6 +1373,7 @@ impl LinkFlow {
                 match &self.wait {
                     Wait::Answers(problems) => {
                         s.action = "answers";
+                        s.extras = true;
                         s.title = "Your answers for the phone, once more".into();
                         s.body = vec![
                             "The phone has not made your account yet, and the installer no longer has your answers: it keeps them in memory only, and it was started again since you gave them. Give them once more.".into(),

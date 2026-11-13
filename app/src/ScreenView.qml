@@ -417,10 +417,12 @@ Flickable {
             objectName: "sent"
             readonly property int newest: 8
             readonly property var lines: backend.writing ? backend.sentLines.slice(-newest) : backend.sentLines
-            // The fastboot commands belong to the write; the install link's
-            // screens after it are the phone's own steps
+            // The fastboot commands belong to the write; the screens after it
+            // (the release's tools over USB SSH, or the install link) are the
+            // phone's own steps
             visible: backend.sentLines.length > 0
-                     && ["first-start", "pair", "setup", "radio-backup", "factory-send", "provision",
+                     && ["after-resume", "network", "backup", "firmware",
+                         "first-start", "pair", "setup", "radio-backup", "factory-send", "provision",
                          "restart", "check", "ready"].indexOf(backend.state) < 0
             Layout.fillWidth: true
             implicitHeight: sentColumn.implicitHeight + 28

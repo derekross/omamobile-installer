@@ -626,7 +626,8 @@ bool Backend::submitAnswers(const QVariantMap &answers) {
     QJsonObject message{{"type", "answers"}};
     for (const char *field : {"username", "password", "password_again", "hostname", "timezone", "wifi_ssid", "wifi_psk"})
         message.insert(QLatin1String(field), answers.value(QLatin1String(field)).toString());
-    // What the install link carries besides (protocol 4): left out when empty
+    // What the install link carries besides (protocol 5, a screen with
+    // "extras"): left out when empty
     for (const char *field : {"ssh_key", "full_name", "email"})
         if (!answers.value(QLatin1String(field)).toString().isEmpty())
             message.insert(QLatin1String(field), answers.value(QLatin1String(field)).toString());

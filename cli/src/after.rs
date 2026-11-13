@@ -571,6 +571,7 @@ fn blank(state: &'static str, title: &str) -> Screen {
         plan: Vec::new(),
         footer: Vec::new(),
         choices: Vec::new(),
+        extras: false,
         action: "after",
     }
 }

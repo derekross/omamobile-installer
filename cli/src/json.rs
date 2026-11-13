@@ -1427,6 +1427,13 @@ impl<P: Phones> Driver<P> {
                         &extra.get(),
                         &crate::new_salt(),
                     )?;
+                } else if !(extra.ssh_key.is_empty()
+                    && extra.full_name.is_empty()
+                    && extra.email.is_empty())
+                {
+                    // Only the install link carries them: taken here, they
+                    // would be dropped without a word
+                    return Err("ssh_key, full_name and email go over the install link, which this run does not reach: this screen does not ask for them (its \"extras\" is not set).".into());
                 }
                 self.flow().answers(&answers, &crate::fresh_salt()?)?;
                 if link {

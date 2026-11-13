@@ -39,7 +39,9 @@ struct Tool {
 
 impl Tool {
     fn start(work: &Path, env: &[(&str, &str)]) -> Tool {
-        let fixture = fixture();
+        Tool::start_release(&fixture(), work, env)
+    }
+    fn start_release(fixture: &Path, work: &Path, env: &[(&str, &str)]) -> Tool {
         let mut child = Command::new(env!("CARGO_BIN_EXE_omamobile-install"))
             .args([
                 "json",
@@ -272,5 +274,38 @@ fn a_closed_app_goes_on_from_the_record_in_a_new_run() {
     };
     let end = tool.drive(screen, &backup, "ready");
     assert_eq!(end["state"], "ready");
+    tool.quit();
+}
+
+/// The three answers only the install link carries are asked for where the
+/// release offers it, and refused where it doesn't: a release that takes
+/// its answers in the image's placeholders has no place for them, and
+/// taking them there would drop them without a word.
+#[test]
+fn the_links_extra_answers_are_asked_for_only_where_the_link_carries_them() {
+    let dir = scratch("extras");
+    let backup = dir.join("backup");
+    let mut tool = Tool::start(&dir.join("work-link"), &[]);
+    let first = begin(&mut tool);
+    let screen = tool.drive(first, &backup, "answers");
+    assert_eq!(screen["extras"], true, "{screen}");
+    tool.quit();
+
+    let plain = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/selftest");
+    let mut tool = Tool::start_release(&plain, &dir.join("work-plain"), &[]);
+    let first = begin(&mut tool);
+    let screen = tool.drive(first, &backup, "answers");
+    assert!(screen.get("extras").is_none(), "{screen}");
+    tool.say(json!({"type": "answers", "username": "alex", "password": PIN, "password_again": PIN,
+        "hostname": "", "timezone": "Europe/Paris", "wifi_ssid": "", "wifi_psk": "",
+        "ssh_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleExample a@b"}));
+    let m = tool.hear();
+    assert_eq!(m["type"], "error", "{m}");
+    assert!(
+        m["message"].as_str().unwrap().contains("install link"),
+        "{m}"
+    );
+    let m = tool.hear();
+    assert_eq!(m["screen"]["state"], "answers", "{m}");
     tool.quit();
 }

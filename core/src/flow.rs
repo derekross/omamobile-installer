@@ -1103,6 +1103,14 @@ pub struct Screen {
     /// The answers the person picks one of, in order (`slot-b`). Empty on
     /// every other screen.
     pub choices: Vec<ScreenChoice>,
+    /// On `answers` in a run that writes a release whose root image offers
+    /// the install link: the link carries three answers more (an SSH public
+    /// key, a full name and an email address for git, each optional), so the
+    /// front end asks for them. Left out of the JSON when false: a release
+    /// that takes its answers in the image's placeholders has no place for
+    /// them, and a front end asks for none.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub extras: bool,
     /// What the front end does next: `acknowledge`, `read-phone`,
     /// `slot-b` (hand in one of `choices`), `accept-terms`, `download`
     /// (which also takes a file the owner hands in), `take-file`,
@@ -2796,6 +2804,7 @@ impl Flow {
             plan: Vec::new(),
             footer: Vec::new(),
             choices: Vec::new(),
+            extras: false,
             action: "none",
         };
         let developer_options = String::from("In Settings > About phone, tap \"Build number\" seven times. Then in Settings > System > Developer options, switch on \"OEM unlocking\". If it is greyed out, connect the phone to the internet once (it stays grey until then after a reset); if it is still grey, the phone is most likely locked to its carrier and can't run Omarchy Mobile.");
@@ -3023,6 +3032,7 @@ impl Flow {
                 s.body = vec![
                     "A user name, a PIN or password to unlock the phone (digits only gives a PIN pad), the phone's name, the time zone and, if you like, a Wi-Fi network.".into(),
                 ];
+                s.extras = self.options.write && self.has_install_link();
                 s.body.push(if self.options.write && self.has_install_link() {
                     "They are kept in this computer's memory only, and given to the phone over the install link at its first start, after the write.".into()
                 } else if self.has_install_link() {
