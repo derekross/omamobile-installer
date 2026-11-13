@@ -31,7 +31,7 @@
     },
     {
       "path": "images/vendor_kernel_boot.img",
-      "sha256": "989008d015571680dd228a3e2b11a19a2995bb98dd8a160edb90d9ee293a321b",
+      "sha256": "e4aca6430cdb6bdcc2d2b8c9c78456c480c3ffa29fc9d2839623ee63903eb161",
       "size": 12288
     },
     {
@@ -41,7 +41,7 @@
     },
     {
       "path": "omamobile.gpg",
-      "sha256": "6bcbf0c662f4d55b7315a0a35a141c636db4bde05bb50c5b50209d1ce36e929a",
+      "sha256": "411ba75c6e91ce2c3626516bf265a8ad4416b04ed24fec9bf7f5e2d06a6ee95a",
       "size": 215
     },
     {
