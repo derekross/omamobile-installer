@@ -18,6 +18,7 @@ use pollster::block_on;
 use serde_json::Value;
 use std::path::Path;
 use support::bundle::TestBundle;
+use support::drive::drive;
 use support::fake::{FakePhone, SERIAL};
 
 const NOW: u64 = 1_794_492_239;
@@ -288,4 +289,133 @@ fn main() {
     });
     assert!(block_on(f.dry_run(phone.clone())).unwrap().is_none());
     dump(dir, "stop-dry-run-refused", &f);
+    // ---- A flow that writes (FlowOptions::write) ---------------------------
+    let w = || FlowOptions {
+        write: true,
+        ..Default::default()
+    };
+    // The confirmation, the writes and the end
+    let phone = ready();
+    let mut f = begin(&b, w());
+    drive(&mut f, &b, &phone, "cheetah", "confirm");
+    dump(dir, "confirm", &f);
+    f.confirm_install("cheetah").unwrap();
+    dump(dir, "write", &f);
+    drive(&mut f, &b, &phone, "cheetah", "installed");
+    dump(dir, "installed", &f);
+    // A reinstall: the phone runs from slot B
+    let phone = scen("slot-b");
+    let mut f = begin(
+        &b,
+        FlowOptions {
+            reinstall: true,
+            ..w()
+        },
+    );
+    drive(&mut f, &b, &phone, "cheetah", "confirm");
+    dump(dir, "confirm-reinstall", &f);
+    // A locked phone, in a flow that installs: the notice is another
+    let phone = scen("locked");
+    let mut f = begin(&b, w());
+    drive(&mut f, &b, &phone, "cheetah", "unlock");
+    dump(dir, "unlock-install", &f);
+    // The owner's statement about the other bootloader slot (the command
+    // line's; the app cannot begin such a run, and draws its notice)
+    let stating = |version: &str| FlowOptions {
+        bootloader_slots_match: Some(version.into()),
+        ..w()
+    };
+    let phone = scen("one-slot");
+    let mut f = begin(&b, stating("fake-1.0"));
+    drive(&mut f, &b, &phone, "cheetah", "confirm");
+    dump(dir, "confirm-on-owners-word", &f);
+    let phone = scen("one-slot");
+    let mut f = begin(&b, stating("fake-0.9"));
+    drive(&mut f, &b, &phone, "cheetah", "confirm");
+    dump(dir, "stop-bootloader-slots-stated-other", &f);
+
+    // The stops of a flow that writes
+    dump(
+        dir,
+        "stop-override-in-an-install",
+        &begin(
+            &b,
+            FlowOptions {
+                maintainer_skip_bootloader_slot_check: true,
+                ..w()
+            },
+        ),
+    );
+    let other = TestBundle::for_device("panther");
+    dump(
+        dir,
+        "stop-writes-not-for-this-device",
+        &Flow::begin(&other.files(), other.index(), &other.trusted(), w()),
+    );
+    // The release's images were not walked through the dry run
+    let phone = ready();
+    let mut f = begin(&b, w());
+    drive(&mut f, &b, &phone, "cheetah", "dry-run");
+    let session = block_on(f.dry_run(phone.clone())).unwrap().unwrap();
+    f.dry_run_done(session).unwrap();
+    dump(dir, "stop-images-not-checked", &f);
+    // Something else than the codename
+    let phone = ready();
+    let mut f = begin(&b, w());
+    drive(&mut f, &b, &phone, "yes", "stopped");
+    dump(dir, "stop-not-confirmed", &f);
+    // Locked again when the write is begun
+    let phone = ready();
+    let mut f = begin(&b, w());
+    drive(&mut f, &b, &phone, "cheetah", "write");
+    phone.edit(|s| {
+        s.vars.insert("unlocked".into(), "no".into());
+    });
+    assert!(block_on(f.begin_write(phone.clone())).unwrap().is_none());
+    dump(dir, "stop-locked-at-write", &f);
+    // A check the writing session starts with does not pass
+    let phone = ready();
+    let mut f = begin(&b, w());
+    drive(&mut f, &b, &phone, "cheetah", "write");
+    phone.edit(|s| {
+        s.partitions
+            .insert("vendor_kernel_boot_b".into(), vec![0; 8 << 10]);
+    });
+    assert!(block_on(f.begin_write(phone.clone())).unwrap().is_none());
+    dump(dir, "stop-write-refused", &f);
+    // The cable pulled, at each place the closing lines tell apart
+    for (name, command, nth) in [
+        ("stop-write-interrupted-before-first-write", "download:", 1),
+        ("stop-write-interrupted-boot-images", "flash:vendor_boot_b", 1),
+        ("stop-write-interrupted-userdata", "flash:userdata", 2),
+        ("stop-write-interrupted-slot-not-set", "set_active:b", 1),
+        ("stop-write-interrupted-not-restarted", "reboot", 1),
+    ] {
+        let phone = ready();
+        let mut f = begin(&b, w());
+        drive(&mut f, &b, &phone, "cheetah", "write");
+        phone.edit(|s| s.unplug_on = Some((command.into(), nth)));
+        drive(&mut f, &b, &phone, "cheetah", "stopped");
+        dump(dir, name, &f);
+    }
+    // The phone answers FAIL to a write
+    let phone = ready();
+    let mut f = begin(&b, w());
+    drive(&mut f, &b, &phone, "cheetah", "write");
+    phone.edit(|s| s.fail_on.push("flash:dtbo_b".into()));
+    drive(&mut f, &b, &phone, "cheetah", "stopped");
+    dump(dir, "stop-write-interrupted-phone-refused", &f);
+    // A reinstall interrupted: the phone runs from slot B
+    let phone = scen("slot-b");
+    let mut f = begin(
+        &b,
+        FlowOptions {
+            reinstall: true,
+            ..w()
+        },
+    );
+    drive(&mut f, &b, &phone, "cheetah", "write");
+    phone.edit(|s| s.unplug_on = Some(("flash:init_boot_b".into(), 1)));
+    drive(&mut f, &b, &phone, "cheetah", "stopped");
+    dump(dir, "stop-write-interrupted-reinstall", &f);
 }

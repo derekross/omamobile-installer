@@ -27,7 +27,7 @@
   ],
   "footer": [
     "The dry run only asked the phone questions. It has written nothing to it.",
-    "This version of the installer ends here: it has no step that writes to a phone."
+    "This run was a dry run, and it ends here: a dry run has no step that writes to a phone."
   ],
   "action": "none"
 }

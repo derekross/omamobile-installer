@@ -3,12 +3,12 @@
   "stop": null,
   "retry": null,
   "title": "Unlock the bootloader",
-  "notice": null,
+  "notice": "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.",
   "body": [
     "The Pixel 7 Pro is in Fastboot Mode, and its bootloader is still locked.",
     "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, its two bootloader copies match, and this release was tested with its Android build.",
     "Unlocking is the moment the phone is erased, as the warning said: copy off photos, messages and two-factor codes before you do it.",
-    "The installer does not send the unlock command. You do, when you are ready:"
+    "The installer does not send the unlock command, and these steps are not for now. They are what a version that can install will ask of you, shown so that you know them. This version gives you no reason to take them."
   ],
   "quote": null,
   "steps": [
