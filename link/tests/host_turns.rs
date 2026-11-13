@@ -619,7 +619,7 @@ fn busy_is_asked_again_and_locked_is_waited_out() {
         let mut f = build("hello sent");
         let h = f.hello_msg(pair, wait_s);
         f.answer(h);
-        assert_eq!(f.events[1..], [event.clone()], "{pair:?}");
+        assert_eq!(f.events[1..], *std::slice::from_ref(&event), "{pair:?}");
         assert!(!f.host.stopped() && !f.host.ready());
         for round in 1..=3u64 {
             assert_eq!(f.host.deadline(), Some(f.now + REHELLO_MS), "{pair:?}");

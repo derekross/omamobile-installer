@@ -1125,12 +1125,10 @@ struct FactoryImage {
     backup_dir: Option<PathBuf>,
 }
 
-/// A salt for the password's hash: 16 characters from the operating
-/// system's randomness.
+/// [`fresh_salt`], for the install link's callers, which have no way to
+/// say that the operating system gave no random bytes.
 fn new_salt() -> String {
-    let mut random = [0u8; 12];
-    getrandom::getrandom(&mut random).expect("the operating system's random source");
-    omamobile_installer_core::firstboot::salt_from(&random)
+    fresh_salt().expect("the operating system's random source")
 }
 
 /// How the flow ended on this computer.

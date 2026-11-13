@@ -177,8 +177,7 @@ fn leave_stale_answers(lb: &mut Loopback) {
             nonce: [0xee; 32],
         }),
     };
-    let mut seq = 0;
-    for f in [
+    for (seq, f) in [
         hello,
         HostFrame {
             id: 2,
@@ -192,10 +191,12 @@ fn leave_stale_answers(lb: &mut Loopback) {
             id: 4,
             msg: HostMsg::Ping,
         },
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let json = f.to_json().unwrap();
-        let bytes = frame::encode(Kind::Message, seq, 0, json.as_bytes(), MAX_DATA).unwrap();
-        seq += 1;
+        let bytes = frame::encode(Kind::Message, seq as u32, 0, json.as_bytes(), MAX_DATA).unwrap();
         lb.to_phone(&bytes);
     }
     assert_eq!(lb.unread.len(), 4, "hello, status, pong, pong");
@@ -390,10 +391,7 @@ fn pair_again_after_first_boot_with_the_token_lost() {
             assert_eq!(lb.host.events.last(), Some(&Event::NeedCode), "{stage}");
             // The code is on the agent's line and nowhere else: not on the
             // first-start screen, not in a note
-            assert!(
-                !lb.phone.screens.iter().any(|s| *s == Screen::Code(code)),
-                "{stage}"
-            );
+            assert!(!lb.phone.screens.contains(&Screen::Code(code)), "{stage}");
         }
         let code = lb.phone.phone.code().expect("a code");
         lb.command(Command::Pair(code));

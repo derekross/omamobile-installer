@@ -101,6 +101,54 @@ impl Rig {
     }
 }
 
+/// A release whose root image offers the install link takes the answers
+/// there, after the write, whether or not its image also keeps the answers'
+/// placeholders: its image is written exactly as signed, the confirmation
+/// says where the answers go, and the session refuses answers for its image
+/// (docs/DESIGN.md §12, decision 19).
+#[test]
+fn a_release_with_the_link_is_written_as_signed_and_takes_its_answers_over_the_link() {
+    let without_placeholders = TestBundle::build(
+        |m| {
+            m["install_link"] = serde_json::json!({"protocol": 1});
+            m["root_image"]
+                .as_object_mut()
+                .unwrap()
+                .remove("placeholders");
+        },
+        |c| c,
+    );
+    for (bundle, has_places) in [(link_bundle(), true), (without_placeholders, false)] {
+        let phone = FakePhone::scenario("ready").unwrap();
+        let options = FlowOptions {
+            write: true,
+            ..Default::default()
+        };
+        let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), options);
+        drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
+        let confirm = flow.screen();
+        assert_eq!(confirm.state, "confirm", "{has_places}: {:?}", flow.step());
+        let words = confirm.footer.join("\n");
+        assert!(
+            words.contains("Your answers are not written into the images"),
+            "{words}"
+        );
+        assert!(!words.contains("puts them into the place"), "{words}");
+        drive(&mut flow, &bundle, &phone, "cheetah", "installed");
+        assert_eq!(flow.screen().action, "link", "{has_places}");
+        // userdata is the release's image, byte for byte: no answers in it
+        let raw = support::bundle::root_image();
+        assert_eq!(
+            &phone.partition("userdata")[..raw.len()],
+            &raw[..],
+            "{has_places}"
+        );
+        assert!(flow
+            .link(&answers(), &Extras::default(), SALT, "0.0.1", false)
+            .is_ok());
+    }
+}
+
 #[test]
 fn a_release_without_the_link_ends_at_installed() {
     let bundle = TestBundle::new();
