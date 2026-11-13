@@ -8,18 +8,29 @@
 //!   omamobile-install install BUNDLE_DIR --serial SERIAL --dry-run [--reinstall]
 //!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the install flow up to the dry run, read-only
-//!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--reinstall] [--factory-zip FILE]
-//!                             [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
+//!   omamobile-install install BUNDLE_DIR --serial SERIAL --write [--reinstall]
+//!                             [--bootloader-slots-match VERSION]
+//!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
+//!                                                USB: the install flow, and the writes
+//!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--write] [--reinstall]
+//!                             [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
 //!                                                no phone: the same flow against a pretend phone
 //!                                                (only in a build with the `fake-phone` feature)
+//!   omamobile-install help                       what each command does, and what --write erases
 //!
 //! `install` and `flow` drive the core's one install flow (core/src/flow.rs):
 //! this file prints the screens the flow gives it and hands in what was
 //! typed. It decides nothing and words nothing of its own about the phone.
 //!
-//! The flow ends at the dry run, and `install` runs only with `--dry-run`:
-//! nothing here can write to a phone. All that reaches one is `getvar` and,
-//! for a locked phone, the one question `flashing get_unlock_ability`.
+//! `install` takes `--dry-run` or `--write`, one of them, and has no default.
+//! With `--dry-run` all that reaches a phone is `getvar` and, for a locked
+//! phone, the one question `flashing get_unlock_ability`. With `--write` the
+//! flow does the same dry run first, then lists what it will write and what
+//! is erased, and waits for the phone's codename to be typed; only then does
+//! this file send the release's images through the one session the flow
+//! opens for it (`Flow::begin_write`). It opens no session of its own, and
+//! which partitions are written is the core's: slot B's boot images and
+//! `userdata`, then `set_active:b` and `reboot`.
 //!
 //! Google's factory image: once the owner has accepted Google's terms on the
 //! flow's terms step, this tool downloads the file from the address the core
@@ -43,18 +54,19 @@
 //! take `--maintainer-skip-bootloader-slot-check`, which lets a dry run go on
 //! past a phone that reports one bootloader slot's version (docs/DESIGN.md
 //! §6). The core says on every screen that the check was skipped; without
-//! `--dry-run` it is refused here, before any USB device is looked for.
+//! `--dry-run` it is refused here, before any USB device is looked for, and
+//! the core refuses it again in a flow that writes.
 use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
 use omamobile_installer_core::download::{
     FactoryDownload, FetchFailure, FetchNext, FetchRequest, FetchResponse,
 };
 use omamobile_installer_core::fastboot::{
-    PhoneId, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
+    PhoneId, PieceReport, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
 use omamobile_installer_core::flow::{
-    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen,
+    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen, WRITE_HELP,
 };
-use omamobile_installer_core::install::{flash_userdata_from_reader, UserdataStream};
+use omamobile_installer_core::install::{flash_userdata_with_progress, UserdataStream};
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_core::text::plain;
 use omamobile_installer_core::{build_index, Error};
@@ -157,12 +169,15 @@ fn find_root(dir: &Path, name: &str) -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
+/// Hash the root image from an open file, from where it stands (its
+/// start). The caller keeps the handle and streams from it afterwards, so
+/// that what is hashed and what is sent are one file, not two openings of
+/// a name.
 fn hash_root(
     release: &VerifiedRelease,
-    path: &Path,
+    file: &mut File,
 ) -> Res<omamobile_installer_core::bundle::VerifiedRootImage> {
     let mut check = release.root_image_check();
-    let mut file = File::open(path)?;
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = file.read(&mut buf)?;
@@ -183,7 +198,7 @@ fn cmd_verify(dir: &Path) -> Res<()> {
     );
     match find_root(dir, &m.root_image.name) {
         Some(path) => {
-            hash_root(&release, &path)?;
+            hash_root(&release, &mut File::open(&path)?)?;
             println!("root image matches the signed manifest");
         }
         None => println!(
@@ -246,7 +261,7 @@ fn is_fastboot(info: &nusb::DeviceInfo) -> bool {
 
 async fn cmd_devices() -> Res<()> {
     let mut n = 0;
-    for info in nusb::list_devices().await?.filter(is_fastboot) {
+    for info in nusb::MaybeFuture::wait(nusb::list_devices())?.filter(is_fastboot) {
         n += 1;
         // Both strings are the device's own: nothing of them that a
         // terminal acts on is printed
@@ -265,8 +280,9 @@ async fn cmd_devices() -> Res<()> {
 /// The one phone in fastboot mode with this serial number, opened; `None`
 /// when there is none.
 async fn open_usb(serial: &str) -> Res<Option<(UsbTransport, PhoneId)>> {
-    let mut found = nusb::list_devices()
-        .await?
+    // nusb's blocking calls are waited for in place: the tool has no async
+    // runtime, and awaiting them would need one (usb/src/lib.rs).
+    let mut found = nusb::MaybeFuture::wait(nusb::list_devices())?
         .filter(|d| is_fastboot(d) && d.serial_number() == Some(serial));
     let Some(info) = found.next() else {
         return Ok(None);
@@ -275,7 +291,7 @@ async fn open_usb(serial: &str) -> Res<Option<(UsbTransport, PhoneId)>> {
         return Err("more than one phone in fastboot mode has that serial number".into());
     }
     let id = PhoneId::of_serial(serial).ok_or("--serial is empty")?;
-    let device = info.open().await?;
+    let device = nusb::MaybeFuture::wait(info.open())?;
     Ok(Some((UsbTransport::open(&device).await?, id)))
 }
 
@@ -466,14 +482,76 @@ fn ask_answers(typed: &mut Typed) -> Res<OwnerAnswers> {
     }
 }
 
-/// Walk the release's images through the dry run's session, when they are
-/// on disk: each is checked against the signed manifest first, and the
-/// session holds every write back. `Ok(false)`: the files aren't here.
+/// Print what the session sent since `seen` that is not a question: the
+/// commands themselves, as the phone received them.
+fn show_sent<T: Transport>(session: &Session<T>, seen: &mut usize) {
+    for command in &session.log()[*seen..] {
+        if !command.starts_with("getvar:") {
+            println!("    {command}");
+        }
+    }
+    *seen = session.log().len();
+}
+
+/// One piece of userdata in words: what its flash covered on the phone, and
+/// how long the phone took to answer it.
+fn piece_line(number: u32, piece: &PieceReport) -> String {
+    let took = match piece.flash {
+        Some(took) => format!("answered in {:.3} s", took.as_secs_f64()),
+        None => "not answered".into(),
+    };
+    format!(
+        "piece {number}: {} blocks, {} KiB written on the phone, {} bytes sent, {took}",
+        piece.blocks,
+        piece.blocks as u64 * 4,
+        piece.bytes
+    )
+}
+
+/// What the run's log keeps of the userdata pieces: the one that covered
+/// the most blocks (the most work one flash asked of the phone), the flash
+/// the phone took longest over, and a piece that was sent and not answered.
+fn userdata_account(pieces: &[PieceReport]) -> Vec<String> {
+    let numbered = || pieces.iter().enumerate().map(|(i, p)| (i as u32 + 1, p));
+    let mut out = Vec::new();
+    // The first of equals, so the line names one piece
+    if let Some((n, piece)) = numbered().rev().max_by_key(|(_, p)| p.blocks) {
+        out.push(format!(
+            "userdata, the piece that covered the most blocks: {}",
+            piece_line(n, piece)
+        ));
+    }
+    if let Some((n, piece)) = numbered()
+        .rev()
+        .filter(|(_, p)| p.flash.is_some())
+        .max_by_key(|(_, p)| p.flash)
+    {
+        out.push(format!(
+            "userdata, the flash the phone took longest over: {}",
+            piece_line(n, piece)
+        ));
+    }
+    if let Some((n, piece)) = numbered().next_back().filter(|(_, p)| p.flash.is_none()) {
+        out.push(format!(
+            "userdata, sent and not confirmed: {}",
+            piece_line(n, piece)
+        ));
+    }
+    out
+}
+
+/// Send the release's images through a session the flow opened, when they
+/// are on disk: each is checked against the signed manifest first. In the
+/// dry run's session every write is held back; in the one `Flow::begin_write`
+/// opened they are written, and each command is printed as it is sent.
+/// `Ok(false)`: the files aren't here, and nothing was sent.
 async fn walk_images<T: Transport>(
     session: &mut Session<T>,
     release: &VerifiedRelease,
     dir: &Path,
 ) -> Result<bool, Error> {
+    let writing = !session.is_dry_run();
+    let mut seen = session.log().len();
     let m = release.manifest();
     let Some(root_path) = find_root(dir, &m.root_image.name) else {
         return Ok(false);
@@ -482,16 +560,59 @@ async fn walk_images<T: Transport>(
         return Ok(false);
     }
     let io = |e: io::Error| Error::Transport(format!("reading the release's files: {e}"));
+    // Every file is checked before the first write, the root image among
+    // them: a file that is not the release's is found while the phone is
+    // still as it was, not after slot B's boot partitions are written.
     for w in &m.boot_writes {
         let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
-        session
-            .flash_boot(&release.verify_boot_image(w, &bytes)?)
-            .await?;
+        release.verify_boot_image(w, &bytes)?;
     }
-    let root = hash_root(release, &root_path).map_err(|e| Error::Checksum(e.to_string()))?;
-    let reader = File::open(&root_path).map_err(io)?;
-    flash_userdata_from_reader(session, &root, reader, Some(64 << 20)).await?;
-    session.activate_and_reboot().await?;
+    // The root image is opened once. It is hashed from this handle, and
+    // the same handle is rewound and streamed, so the file that is sent is
+    // the file that was checked even if the name is given to another file
+    // meanwhile. A file whose bytes change in place between the two is
+    // caught by the session, which hashes what it is sent again and
+    // refuses to make slot B active for anything else.
+    let mut root_file = File::open(&root_path).map_err(io)?;
+    let root = hash_root(release, &mut root_file).map_err(|e| Error::Checksum(e.to_string()))?;
+    root_file.seek(SeekFrom::Start(0)).map_err(io)?;
+    // Each boot image is read and checked again as it is written: the
+    // bytes that are sent are the bytes that were just checked
+    for w in &m.boot_writes {
+        let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
+        let result = session
+            .flash_boot(&release.verify_boot_image(w, &bytes)?)
+            .await;
+        if writing {
+            show_sent(session, &mut seen);
+        }
+        result?;
+    }
+    let reader = &mut root_file;
+    if writing {
+        // The core has no clock: this one times each flash of userdata
+        let begun = std::time::Instant::now();
+        session.time_flashes_with(Box::new(move || begun.elapsed()));
+    }
+    let mut progress = |pieces: u32, piece: &PieceReport| {
+        if writing {
+            println!("    flash:userdata ({})", piece_line(pieces, piece));
+        }
+    };
+    let result =
+        flash_userdata_with_progress(session, &root, reader, Some(64 << 20), &mut progress).await;
+    if writing {
+        for line in userdata_account(session.pieces()) {
+            println!("    {line}");
+        }
+    }
+    result?;
+    seen = session.log().len();
+    let result = session.activate_and_reboot().await;
+    if writing {
+        show_sent(session, &mut seen);
+    }
+    result?;
     Ok(true)
 }
 
@@ -944,7 +1065,39 @@ fn run_flow<T: Transport>(
                     }
                 }
             }
-            _ => return Ok(screen.state == "done"),
+            // What will be written was listed: the owner types the phone's
+            // codename, and the core takes that or stops
+            "confirm" => {
+                let answer = typed.ask("Codename: ")?;
+                flow.confirm_install(&answer)?;
+            }
+            "write" => {
+                let Some((transport, _)) = connect()? else {
+                    println!("    No phone in Fastboot Mode answered.");
+                    typed.ask("Press Enter to look again: ")?;
+                    continue;
+                };
+                let release = flow.release().ok_or("the flow has no release")?.clone();
+                // The one session that can write is the flow's
+                if let Some(mut session) = block_on(flow.begin_write(transport))? {
+                    match block_on(walk_images(&mut session, &release, &bundle.dir)) {
+                        Ok(true) => {
+                            flow.write_done(session)?;
+                        }
+                        Ok(false) => {
+                            let gone = Error::Transport(
+                                "the release's files are no longer where the dry run read them"
+                                    .into(),
+                            );
+                            flow.write_failed(session, &gone)?;
+                        }
+                        Err(e) => {
+                            flow.write_failed(session, &e)?;
+                        }
+                    }
+                }
+            }
+            _ => return Ok(matches!(screen.state, "done" | "installed")),
         }
     }
 }
@@ -994,6 +1147,7 @@ fn cmd_fake(
     let trusted = TrustedKeys::new(&[fingerprint.trim()])?;
     println!("A pretend phone ({scenario}), held in memory. No USB device is opened.");
     let mut looks = 0;
+    // The record is printed however the run ended
     let done = run_flow(&bundle, &trusted, options, factory, || {
         looks += 1;
         // A locked pretend phone is unlocked by its pretend owner after the
@@ -1005,7 +1159,7 @@ fn cmd_fake(
             });
         }
         Ok(Some((phone.clone(), PhoneId::of_serial(SERIAL).unwrap())))
-    })?;
+    });
     let log = phone.log();
     let (asked, other) = (phone.unlock_questions(), phone.not_reads().len());
     println!(
@@ -1014,7 +1168,16 @@ fn cmd_fake(
         log.len() - asked - other,
         phone.written().len()
     );
-    Ok(done)
+    if other > 0 {
+        println!(
+            "Those others, in the order it received them (partitions written: {}):",
+            phone.written().join(", ")
+        );
+        for command in phone.not_reads() {
+            println!("    {command}");
+        }
+    }
+    done
 }
 
 #[cfg(not(feature = "fake-phone"))]
@@ -1029,7 +1192,37 @@ fn cmd_fake(
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT]";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | help";
+
+/// What `help` says about [`SLOTS_MATCH`].
+const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written.";
+
+/// `omamobile-install help`: the commands, and what `--write` does to a
+/// phone, in the core's words.
+fn cmd_help() {
+    println!("{USAGE}\n");
+    println!("  verify DIR           check a downloaded release: signature, rules, every file. No phone.");
+    println!("  sparse IMG OUTDIR    cut a root image into the sparse images a flash would send. No phone.");
+    println!("  devices              list phones in Fastboot Mode (USB; reads only).");
+    println!("  install DIR --serial S --dry-run");
+    println!(
+        "                       the install flow up to its dry run. It asks the phone questions"
+    );
+    println!("                       and writes nothing.");
+    println!("  install DIR --serial S --write");
+    wrap(
+        WRITE_HELP,
+        "                       ",
+        "                       ",
+    );
+    println!("\n  install needs --dry-run or --write, one of them: there is no default.");
+    println!("\n  install ... {SLOTS_MATCH} VERSION");
+    wrap(
+        SLOTS_MATCH_HELP,
+        "                       ",
+        "                       ",
+    );
+}
 
 fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
     // Decode a small .zst repeatedly: the same loop as the browser self-test
@@ -1052,6 +1245,10 @@ fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
 /// The maintainer's override for the bootloader-slot stop, in a dry run
 /// only. Deliberately not in [`USAGE`].
 const SLOT_OVERRIDE: &str = "--maintainer-skip-bootloader-slot-check";
+/// The owner's statement for a phone that reports one bootloader slot's
+/// version: the other slot's was read from the phone and is VERSION. The
+/// core compares it with the phone ([`FlowOptions::bootloader_slots_match`]).
+const SLOTS_MATCH: &str = "--bootloader-slots-match";
 
 /// `Ok(false)`: the install flow stopped, and has said why.
 fn run() -> Res<bool> {
@@ -1063,8 +1260,9 @@ fn run() -> Res<bool> {
         ["sparse", image, out, max] => cmd_sparse(Path::new(image), Path::new(out), max.parse()?)?,
         ["bench-zstd", file, rounds] => bench_zstd(file, rounds)?,
         ["devices"] => block_on(cmd_devices())?,
+        ["help" | "--help" | "-h"] => cmd_help(),
         [command @ ("install" | "flow"), dir, rest @ ..] => {
-            let (mut serial, mut fake, mut dry_run) = (None, None, false);
+            let (mut serial, mut fake, mut dry_run, mut write) = (None, None, false, false);
             let (mut options, mut fake_google) = (FlowOptions::default(), None);
             let (mut own_file, mut work_dir, mut proxy) = (None, None, None);
             let mut it = rest.iter();
@@ -1073,8 +1271,22 @@ fn run() -> Res<bool> {
                     "--serial" => serial = it.next().copied(),
                     "--fake-phone" => fake = it.next().copied(),
                     "--dry-run" => dry_run = true,
+                    "--write" => write = true,
                     "--reinstall" => options.reinstall = true,
                     SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
+                    // The owner's statement about the other bootloader
+                    // slot, as tools/install-phone takes it: said once,
+                    // with the version that was read from the phone
+                    SLOTS_MATCH => {
+                        let version = it.next().copied().filter(|v| !v.is_empty());
+                        let Some(version) = version else {
+                            return Err(format!("{SLOTS_MATCH} takes the bootloader version that was read from the phone's other slot").into());
+                        };
+                        if options.bootloader_slots_match.is_some() {
+                            return Err(format!("{SLOTS_MATCH} is given once").into());
+                        }
+                        options.bootloader_slots_match = Some(version.to_string());
+                    }
                     "--factory-zip" => own_file = it.next().map(PathBuf::from),
                     "--work-dir" => work_dir = it.next().map(PathBuf::from),
                     // The one way a proxy is used: named here, by the owner
@@ -1096,6 +1308,13 @@ fn run() -> Res<bool> {
             if options.maintainer_skip_bootloader_slot_check && *command == "install" && !dry_run {
                 return Err(Box::new(Error::OverrideOutsideDryRun));
             }
+            if dry_run && write {
+                return Err(
+                    "--dry-run and --write are two different runs: give one of them".into(),
+                );
+            }
+            // The one switch that lets the flow write. It is never implied.
+            options.write = write;
             return match (*command, serial, fake) {
                 ("flow", None, Some(scenario)) => {
                     cmd_fake(dir, scenario, options, factory, fake_google, proxy)
@@ -1114,8 +1333,8 @@ fn run() -> Res<bool> {
                 (_, None, _) => {
                     Err("--serial SERIAL is required: the install is pinned to one phone".into())
                 }
-                (_, Some(_), _) if !dry_run => Err(Box::new(Error::Refused(
-                    "this version installs only with --dry-run: its flow ends at the dry run, and it has no step that writes to a phone".into(),
+                (_, Some(_), _) if !dry_run && !write => Err(Box::new(Error::Refused(
+                    "install needs --dry-run or --write, and has no default. --dry-run asks the phone questions and writes nothing. --write erases the phone's userdata and writes slot B: 'omamobile-install help' says exactly what".into(),
                 ))),
                 (_, Some(serial), _) => cmd_install(dir, serial, options, factory),
             };

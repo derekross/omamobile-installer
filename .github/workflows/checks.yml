@@ -34,7 +34,7 @@ jobs:
         run: rustup show
       - name: Format
         run: cargo fmt --all --check
-      - name: The sources of what ships hold no way to write and no pretend phone
+      - name: The sources of what ships hold one way to write (install --write) and no pretend phone
         run: tools/check-shipping
       - name: Lints (errors fail; warnings are listed)
         run: cargo clippy --locked
@@ -76,16 +76,19 @@ jobs:
       # What ships, as built: the command-line tool without features and the
       # page without the self-test. The tool is read as bytes, with the
       # tool the tests built with the pretend phone as the control; the
-      # page's module is loaded in node and asked whether it can write.
-      - name: What ships holds no way to write and no pretend phone
+      # page's module is loaded in node and its exports are listed (the
+      # flow, no direct session, no pretend phone), and what the page loads
+      # is read for the flow's write steps.
+      - name: What ships holds no pretend phone, and the page no way to write
         run: |
           cargo build --release --locked -p omamobile-installer-cli
           web/build.sh
           tools/check-shipping --built --control target/debug/omamobile-install
       # The shipping tool itself, on two commands it refuses from their
       # arguments alone, before any USB device is listed or opened: the
-      # pretend phone, and an install that is not a dry run.
-      - name: The shipping tool refuses the pretend phone and an install that is not a dry run
+      # pretend phone, an install that says neither --dry-run nor --write,
+      # one that says both, and the maintainer's override with --write.
+      - name: The shipping tool refuses the pretend phone and an install that does not say plainly what it is
         run: |
           tool=target/release/omamobile-install
           refused() {   # refused WHAT SAYS ARGS...: status 1, SAYS on stderr, nothing on stdout
@@ -100,9 +103,15 @@ jobs:
           refused "the shipping tool has no pretend phone" \
             "this build has no pretend phone" \
             flow fixtures/selftest --fake-phone ready
-          refused "the shipping tool installs only as a dry run" \
-            "this version installs only with --dry-run" \
+          refused "install has no default: it needs --dry-run or --write" \
+            "install needs --dry-run or --write, and has no default" \
             install fixtures/selftest --serial '<SERIAL>'
+          refused "--dry-run and --write together are refused" \
+            "--dry-run and --write are two different runs" \
+            install fixtures/selftest --serial '<SERIAL>' --dry-run --write
+          refused "the maintainer's override is refused with --write" \
+            "in a dry run only" \
+            install fixtures/selftest --serial '<SERIAL>' --write --maintainer-skip-bootloader-slot-check
           rm -f out.txt err.txt
       - name: The web page builds as it would ship, without the pretend phone
         run: |
@@ -116,3 +125,4 @@ jobs:
           if grep -qiE 'slot_override|maintainer' web/dist/pkg/omamobile_installer_web.js web/dist/*.html; then
             echo "the shipping build offers the bootloader-slot override"; exit 1
           fi
+          grep -q 'cannot write to a phone' web/dist/index.html

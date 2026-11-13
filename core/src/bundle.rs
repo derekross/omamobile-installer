@@ -64,8 +64,11 @@ pub struct VerifiedImage<'a> {
 }
 
 /// Proof that the root image's bytes were hashed and match the signed
-/// manifest. The caller must stream those same bytes afterwards (from the
-/// cached download it just hashed); the token can't bind a later stream.
+/// manifest. The caller streams those same bytes afterwards (from the
+/// cached download it just hashed). The proof can't bind that later
+/// stream, so the session hashes the stream again as it is sent
+/// (`Session::userdata_streamed`) and refuses to finish `userdata` with
+/// any other bytes.
 #[derive(Debug, Clone)]
 pub struct VerifiedRootImage {
     pub(crate) release: String,
