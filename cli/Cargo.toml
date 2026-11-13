@@ -29,6 +29,10 @@ name = "json_mode"
 required-features = ["fake-phone"]
 
 [[test]]
+name = "json_link"
+required-features = ["fake-phone"]
+
+[[test]]
 name = "link_fake_phone"
 required-features = ["fake-phone"]
 

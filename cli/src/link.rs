@@ -50,6 +50,8 @@ pub struct FileShell<U: LinkUi> {
     backup_dir: Option<PathBuf>,
     factory: PathBuf,
     open: Option<File>,
+    /// The record as last kept, to keep again with a new backup directory.
+    last: Option<LinkRecord>,
 }
 
 /// Where the record is kept.
@@ -99,7 +101,29 @@ fn private_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No one to tell: a shell kept between two runs of the link.
+impl LinkUi for () {
+    fn screen(&mut self, _: &Screen) {}
+    fn progress(&mut self, _: &'static str, _: u64, _: u64) {}
+    fn go_on(&mut self) -> bool {
+        true
+    }
+}
+
 impl<U: LinkUi> FileShell<U> {
+    /// The same shell, telling another front end.
+    pub fn with_ui<V: LinkUi>(self, ui: V) -> FileShell<V> {
+        FileShell {
+            ui,
+            clock: self.clock,
+            work_dir: self.work_dir,
+            backup_dir: self.backup_dir,
+            factory: self.factory,
+            open: self.open,
+            last: self.last,
+        }
+    }
+
     pub fn new(ui: U, clock: Clock, work_dir: Option<PathBuf>, factory: PathBuf) -> Self {
         FileShell {
             ui,
@@ -108,6 +132,7 @@ impl<U: LinkUi> FileShell<U> {
             backup_dir: None,
             factory,
             open: None,
+            last: None,
         }
     }
 
@@ -128,6 +153,10 @@ impl<U: LinkUi> FileShell<U> {
         }
         private_dir(dir)?;
         self.backup_dir = Some(dir.to_path_buf());
+        // A second run must find the folder too
+        if let Some(record) = self.last.clone() {
+            self.keep(&record)?;
+        }
         Ok(())
     }
 
@@ -206,7 +235,9 @@ impl<U: LinkUi> LinkShell for FileShell<U> {
             backup_dir: self.backup_dir.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&kept).map_err(|e| Error::Refused(e.to_string()))?;
-        write_private(&record_path(work), &bytes)
+        write_private(&record_path(work), &bytes)?;
+        self.last = Some(record.clone());
+        Ok(())
     }
     async fn backup_open(&mut self, name: &str, _size: u64) -> Result<u64> {
         let path = self.part(name)?;
