@@ -1114,6 +1114,7 @@ dependencies = [
  "nusb",
  "omamobile-installer-core",
  "omamobile-installer-usb",
+ "omamobile-link",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

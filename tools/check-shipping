@@ -243,12 +243,43 @@ done
 none "no feature that brings the pretend phone or the test key is a default" \
   '^default *=.*(fake-phone|selftest)' cli/Cargo.toml web/Cargo.toml
 
+# The install link (after a write): the command-line tool and the app have
+# it, as they have the write. The page as it ships has neither: the link's
+# steps that write to the phone (the answers, the factory image, the
+# backup's commit, provisioning, the restart, the end) are reached through
+# the core's LinkFlow, which only the page's preview build names, in two
+# files behind the link-preview feature. The pretend phone that speaks the
+# link is the core's pretend-link feature, which only the test builds turn on.
+none "no default feature brings the install link's preview or its pretend phone" \
+  '^default *=.*(link-preview|pretend-link)' cli/Cargo.toml web/Cargo.toml core/Cargo.toml
+for m in link link_webusb; do
+  gated=$(grep -B1 -n "^mod $m;" web/src/lib.rs | grep -c '#\[cfg(feature = "link-preview")\]' || true)
+  mods=$(grep -c "^mod $m;" web/src/lib.rs || true)
+  if [[ $mods == 1 && $gated == 1 ]]; then ok "the page's module builds $m only with the link-preview feature"
+  else bad "web/src/lib.rs builds $m without the link-preview feature ($mods mod $m, $gated behind it)"; fi
+done
+link_names=$(grep -nE 'LinkFlow|LinkTransport|LinkShell|link_answers|LinkPreview|omamobile_link' web/src/*.rs |
+  grep -vE '^web/src/(link|link_webusb)\.rs:' || true)
+if [[ -z $link_names ]]; then ok "nothing of the page's module but its two link-preview files names the install link"
+else bad "the page's module names the install link outside its link-preview files" "$link_names"; fi
+none "the page's link-preview feature brings no pretend phone of its own" \
+  '^link-preview *=.*(selftest|pretend-link|fake)' web/Cargo.toml
+pretend_gate=$(grep -B1 -n '^pub mod pretend;' core/src/link.rs | grep -c '#\[cfg(feature = "pretend-link")\]' || true)
+[[ $pretend_gate == 1 ]] && ok "the core's pretend link phone is built only with the pretend-link feature" ||
+  bad "core/src/link.rs builds its pretend phone without the pretend-link feature"
+for pair in "cli/Cargo.toml|fake-phone" "web/Cargo.toml|selftest"; do
+  file=${pair%%|*} feature_name=${pair#*|}
+  if grep -qE "^(\S+ *= *\[.*pretend-link.*\])" "$file" && ! grep -qE "^$feature_name *= *\[.*pretend-link" "$file"; then
+    bad "$file turns on the core's pretend-link outside its $feature_name feature"
+  else ok "$file turns on the core's pretend-link only with its $feature_name feature"; fi
+done
+
 # ---- What was built -------------------------------------------------------
 
 if (( built )); then
   # What only a build with the pretend phone holds: its serial numbers, its
   # bootloader version, the test key's file, and the line it starts with
-  marks=("FAKESERIAL0001" "ANOTHERPHONE0002" "fake-1.0" "test-key.gpg" "A pretend phone (")
+  marks=("FAKESERIAL0001" "ANOTHERPHONE0002" "fake-1.0" "test-key.gpg" "A pretend phone (" "0.0.1-pretend" "the pretend phone's cable is out")
   holds() { grep -qaF -- "$2" "$1"; }
 
   tool=target/release/omamobile-install
@@ -298,6 +329,8 @@ if (( built )); then
       'fake_phone|selftest|slot_override|maintainer|slots_match' "$glue"
     none "what the shipping page loads has none of the flow's write steps" \
       'confirm_install|begin_write|write_done|write_failed' "$glue" web/dist/*.js web/dist/*.html
+    none "the shipping page's glue has nothing of the install link" \
+      'LinkPreview|linkpreview|pretend_shows|pretend_report' "$glue"
     if grep -qF 'cannot write to a phone' web/dist/index.html; then ok "the shipping page says it cannot write to a phone"
     else bad "the shipping page does not say that it cannot write to a phone"; fi
     if ! command -v node >/dev/null; then
@@ -316,11 +349,13 @@ const names = Object.keys(glue).sort();
 const extra = names.filter((n) => /fake|selftest|pretend/i.test(n));
 const statics = Object.getOwnPropertyNames(glue.InstallFlow).filter((n) => /selftest|fake/i.test(n));
 const direct = names.filter((n) => /^(connect|Install|RootProof|writes_enabled)$/.test(n));
-console.log(JSON.stringify({ direct, extra, statics, names }));
+// The install link's preview: no class of it in the page as it ships
+const link = names.filter((n) => /link/i.test(n));
+console.log(JSON.stringify({ direct, extra, statics, link, names }));
 JS
       answer=$(node "$scratch/ask.mjs" "$PWD/$wasm" 2>&1) || true
-      if [[ $answer == '{"direct":[],"extra":[],"statics":[],"names":['*'"InstallFlow"'* ]]; then
-        ok "the shipping page's module, loaded, exports the flow, no direct session, no pretend phone and no self-test"
+      if [[ $answer == '{"direct":[],"extra":[],"statics":[],"link":[],"names":['*'"InstallFlow"'* ]]; then
+        ok "the shipping page's module, loaded, exports the flow, no direct session, no pretend phone, no self-test and nothing of the install link"
       else
         bad "the shipping page's module, loaded, exports a direct session or a pretend phone, or did not load" "$answer"
       fi

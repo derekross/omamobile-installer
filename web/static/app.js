@@ -38,6 +38,9 @@ const query = new URLSearchParams(location.search);
 
 let pretend = false; // a pretend phone and the built-in test bundle
 let flow = null; // core.InstallFlow
+// After a write, the install link (core.LinkPreview): its screens take the
+// flow's place. Only a preview build has it; the page as it ships has none.
+let linkFlow = null;
 let phone = null; // core.Phone: the one the person picked, or the pretend one
 let busy = Promise.resolve(); // the action in progress, for the self-test to wait on
 // Self-test builds only: a stand-in on this computer that answers in Google's
@@ -265,6 +268,19 @@ function answersForm() {
 function controls(s) {
   const row = el("div", { className: "actions" });
   switch (s.action) {
+    // The install link's (preview builds only)
+    case "pair": {
+      const input = el("input", { id: "pair-code", inputMode: "numeric", autocomplete: "off", placeholder: "Six-digit code" });
+      row.append(input, button("pair", "Pair with the phone", () => linkAct(() => linkFlow.pair(input.value))));
+      if (linkFlow?.pretend_shows) row.append(el("span", { id: "pretend-shows", textContent: `the pretend phone shows ${linkFlow.pretend_shows() ?? "no code"}` }));
+      break;
+    }
+    case "retry":
+      row.append(button("retry", "Try again", () => linkAct(() => linkFlow.retry())));
+      break;
+    case "wait":
+      row.append(el("p", { id: "wait", textContent: "The phone works by itself. Keep the cable in." }));
+      break;
     case "acknowledge":
       row.append(
         button("accept", "I have read this. Go on", () => flow.acknowledge_warning()),
@@ -323,8 +339,17 @@ function controls(s) {
   return row;
 }
 
+// One turn of the install link: the action, then the link driven until the
+// owner is needed again, each screen drawn as it comes.
+function linkAct(action) {
+  return act(async () => {
+    await action();
+    await linkFlow.run();
+  });
+}
+
 function render() {
-  const s = JSON.parse(flow.screen());
+  const s = JSON.parse((linkFlow ?? flow).screen());
   const box = $("screen");
   box.hidden = false;
   box.className = s.state;
@@ -723,6 +748,41 @@ async function selftest() {
     JSON.stringify(install),
   );
   result.zstd_mib_per_s = Math.round(install.zstd_mib_per_s);
+
+  // 8. After a write, the install link (a preview build's module only): a
+  // pretend phone that speaks the link, from its first start to ready, the
+  // screens drawn by this page as the core sends them
+  if (core.LinkPreview) {
+    const seen = [];
+    const zipFile = new Blob([core.selftest_factory_zip()]);
+    linkFlow = core.LinkPreview.pretend(
+      zipFile,
+      (json) => {
+        seen.push(JSON.parse(json).state);
+        render();
+      },
+      () => {},
+    );
+    render();
+    await linkAct(() => {});
+    check("the link waits for the first start, then asks for the code the phone shows", seen[0] === "first-start" && state() === "pair" && !!$("pair-code"), seen.join(" "));
+    const right = linkFlow.pretend_shows();
+    $("pair-code").value = right === "000000" ? "111111" : "000000";
+    await click("pair");
+    check("a wrong code is said, and the code is asked again", state() === "pair" && problem().includes("not the code"), problem());
+    $("pair-code").value = right;
+    await click("pair");
+    const report = JSON.parse(linkFlow.pretend_report());
+    check(
+      "the link goes through every state to ready",
+      state() === "ready" && ["setup", "radio-backup", "factory-send", "provision", "restart", "check"].every((s) => seen.includes(s)) &&
+        report.done === "finished" && report.restarts === 1 && report.provision_starts === 1 && report.finished_files && report.backup.length === 6,
+      seen.join(" ") + " " + JSON.stringify(report),
+    );
+    linkFlow = null;
+  } else {
+    result.install_link = "not in this build";
+  }
 
   result.failed = failures;
   result.pass = failures.length === 0;
