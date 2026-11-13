@@ -294,6 +294,14 @@ pub struct FlowOptions {
     /// can't be combined with the maintainer's override, and it is refused
     /// for a phone the write path was not written for ([`WRITE_DEVICES`]).
     pub write: bool,
+    /// This computer's SSH public key, one OpenSSH line, for slot B's
+    /// initramfs: the image that carries it is written with the key
+    /// appended, as `tools/install-phone` appends it
+    /// ([`crate::ramdisk_key`]), so that the initramfs's rescue SSH lets
+    /// this computer in. The confirmation says so. Set by the front end
+    /// that writes (the tool's `json --write`); the key is checked when a
+    /// session opens.
+    pub owner_ssh_key: Option<String>,
 }
 
 /// The owner accepted Google's terms on the terms step: for which build,
@@ -729,6 +737,9 @@ pub struct VerifiedFactoryZip {
     pub build: String,
     pub name: String,
     pub size: u64,
+    /// The SHA-256 the signed build index records for it, which its bytes
+    /// had: a front end that uses the file later checks it again.
+    pub sha256: String,
 }
 
 /// What the owner typed, before any rule.
@@ -1302,6 +1313,11 @@ impl Flow {
     /// The factory image, once it has been checked.
     pub fn factory_zip_verified(&self) -> Option<&VerifiedFactoryZip> {
         self.zip.as_ref()
+    }
+    /// The phone this install is pinned to, from the first look at it: the
+    /// digest a later step compares the phone that answers with.
+    pub fn pinned_phone(&self) -> Option<&PhoneId> {
+        self.pinned.as_ref()
     }
 
     /// Whether this flow ends at the dry run, with no step that writes to a
@@ -1953,6 +1969,7 @@ impl Flow {
                         build: build.build.clone(),
                         name,
                         size: len,
+                        sha256: digest,
                     });
                     self.step = Step::Answers;
                     return Ok(DownloadEnd::Verified);
@@ -2099,6 +2116,7 @@ impl Flow {
             build: build.build.clone(),
             name: check.name,
             size: len,
+            sha256: digest,
         });
         self.step = Step::Answers;
         Ok(())
@@ -2172,6 +2190,9 @@ impl Flow {
             // Taken only by a session that holds every write back, which
             // is the only kind `connect_pinned` opens
             maintainer_skip_bootloader_slot_check: self.slot_check_skipped,
+            // So that the dry run checks the image with the key against
+            // its partition, as the write will send it
+            owner_ssh_key: self.options.owner_ssh_key.clone(),
         };
         match Session::connect_pinned(transport, &release, &report.id, options).await {
             Ok(session) => {
@@ -2444,6 +2465,7 @@ impl Flow {
             // session that writes, before its first write
             bootloader_slots_confirmed: self.options.bootloader_slots_match.clone(),
             maintainer_skip_bootloader_slot_check: false,
+            owner_ssh_key: self.options.owner_ssh_key.clone(),
         };
         // Every condition above held: the one token there is, for the one
         // session that writes. Nothing else in any crate can make one.
@@ -2902,6 +2924,20 @@ impl Flow {
                     ),
                     "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
                 ]);
+                if let Some(at) = self
+                    .options
+                    .owner_ssh_key
+                    .as_ref()
+                    .and(self.release.as_ref())
+                    .and_then(|r| crate::fastboot::ramdisk_write(r.manifest()))
+                {
+                    let name = self
+                        .release
+                        .as_ref()
+                        .map(|r| r.manifest().boot_writes[at].partition.name().to_string())
+                        .unwrap_or_default();
+                    s.body.push(format!("{name} is written with this computer's SSH public key added to the initramfs it carries, after the release's own files, as Omarchy Mobile's install-phone adds it, so that the phone's rescue SSH lets this computer in. Every other byte written is the release's."));
+                }
                 s.plan = plan.writes.iter().map(PlannedWrite::line).collect();
                 s.plan
                     .push("then: make slot B the active slot (set_active:b)".into());

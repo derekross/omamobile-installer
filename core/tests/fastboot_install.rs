@@ -746,34 +746,67 @@ fn the_session_reports_each_piece_its_blocks_and_how_long_its_flash_took() {
     );
 }
 
-/// Writes a signed test bundle to fixtures/selftest/, for the browser
-/// self-test (web/, feature `selftest`), which can't make keys. Run by hand:
+/// Writes the signed test bundles the other front ends' tests read: to
+/// fixtures/selftest/, for the browser self-test (web/, feature
+/// `selftest`), which can't make keys, the tool's tests and the app's; and
+/// to fixtures/after/, the same with the stand-ins for the tools a release
+/// ships (fixtures/after-stand-ins/tools), for the steps after the write.
+/// Run by hand:
 /// `cargo test -p omamobile-installer-core --test fastboot_install -- --ignored`
 #[test]
-#[ignore = "regenerates fixtures/selftest"]
+#[ignore = "regenerates fixtures/selftest and fixtures/after"]
 fn write_the_selftest_fixture() {
-    let b = TestBundle::new();
-    b.verify().unwrap();
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/selftest");
-    std::fs::create_dir_all(dir.join("images")).unwrap();
-    let put = |name: &str, data: &[u8]| std::fs::write(dir.join(name), data).unwrap();
-    put("SHA256SUMS", &b.sums);
-    put("SHA256SUMS.sig", &b.sig);
-    put("test-key.gpg", &b.keyring);
-    put("test-key.fingerprint", b.fingerprint.as_bytes());
-    put("manifest.json", &b.manifest_json);
-    put("MANIFEST", &b.manifest_txt);
-    put("device.conf", &b.device_conf);
-    put("root.img.zst", &b.root_zst);
-    for (name, data) in &b.images {
-        put(&format!("images/{name}.img"), data);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+    let stand_ins = root.join("after-stand-ins/tools");
+    let mut tools: Vec<(String, Vec<u8>)> = std::fs::read_dir(&stand_ins)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .map(|p| {
+            let name = p.file_name().unwrap().to_str().unwrap().to_string();
+            (format!("tools/{name}"), std::fs::read(&p).unwrap())
+        })
+        .collect();
+    tools.sort();
+    for (name, bundle) in [
+        ("selftest", TestBundle::new()),
+        ("after", TestBundle::with_files(tools)),
+    ] {
+        bundle.verify().unwrap();
+        let dir = root.join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        let put = |name: &str, data: &[u8]| std::fs::write(dir.join(name), data).unwrap();
+        put("SHA256SUMS", &bundle.sums);
+        put("SHA256SUMS.sig", &bundle.sig);
+        put("test-key.gpg", &bundle.keyring);
+        put("test-key.fingerprint", bundle.fingerprint.as_bytes());
+        put("manifest.json", &bundle.manifest_json);
+        put("MANIFEST", &bundle.manifest_txt);
+        put("device.conf", &bundle.device_conf);
+        put("root.img.zst", &bundle.root_zst);
+        for (name, data) in &bundle.images {
+            put(&format!("images/{name}.img"), data);
+        }
+        put("factory-builds.json", &bundle.index_json);
+        // The stand-in for Google's factory zip, under the name the index
+        // gives it (the name carries its digest, so it changes only with
+        // the bytes)
+        std::fs::create_dir_all(dir.join("factory")).unwrap();
+        put(
+            &format!("factory/{}", bundle.factory_zip_name),
+            &bundle.factory_zip,
+        );
+        for (path, data) in &bundle.extra {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, data).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
     }
-    put("factory-builds.json", &b.index_json);
-    // The stand-in for Google's factory zip, under the name the index gives
-    // it (the name carries its digest, so it changes only with the bytes)
-    let _ = std::fs::remove_dir_all(dir.join("factory"));
-    std::fs::create_dir_all(dir.join("factory")).unwrap();
-    put(&format!("factory/{}", b.factory_zip_name), &b.factory_zip);
 }
 
 #[test]

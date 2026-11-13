@@ -22,6 +22,8 @@
 //!   before it is kept, compared or put on a screen.
 //! - [`flow`]: the install as one state machine for every front end, with
 //!   the write path behind a typed confirmation;
+//! - [`ramdisk_key`]: the owner's SSH key appended to slot B's initramfs, as
+//!   `tools/install-phone` appends it.
 //! - [`firstboot`]: the owner's answers as the files a first start reads.
 //!   Nothing puts them on a phone yet.
 //!
@@ -45,6 +47,7 @@ pub mod flow;
 pub mod hash;
 pub mod install;
 pub mod manifest;
+pub mod ramdisk_key;
 pub mod signature;
 pub mod sparse;
 pub mod text;
