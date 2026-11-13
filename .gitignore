@@ -1,2 +1,6 @@
 target/
 web/dist/
+web/dist-preview/
+web/dist-preview-test/
+# Scratch for measurements and one-off runs: never committed
+scratch/
