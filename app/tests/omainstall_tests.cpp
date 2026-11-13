@@ -400,7 +400,7 @@ private slots:
                               "wrong-model", "phone-changed", "runs-from-slot-b", "bootloader-slots-unknown",
                               "bootloader-slots-differ", "bootloader-slots-stated-other", "baseband-unknown",
                               "build-not-listed", "build-not-tested", "factory-download-mismatch", "locked-at-dry-run",
-                              "build-changed", "dry-run-refused", "override-in-an-install", "writes-not-for-this-device",
+                              "build-changed", "dry-run-refused", "override-in-an-install", "writes-not-for-this-device", "no-place-for-answers",
                               "images-not-checked", "not-confirmed", "locked-at-write", "write-refused", "write-interrupted"};
         for (const QString &stop : ids)
             QVERIFY2(stops.contains(stop), qPrintable(stop));

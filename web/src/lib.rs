@@ -463,7 +463,12 @@ impl InstallFlow {
         };
         match OwnerAnswers::check(&input) {
             Ok(answers) => {
-                self.flow.answers(&answers).map_err(js)?;
+                // The password's hash takes a salt from the browser's random
+                // source (crypto.getRandomValues): the core has none
+                let mut bytes = [0u8; 12];
+                getrandom::getrandom(&mut bytes).map_err(js)?;
+                let salt = omamobile_installer_core::firstboot::salt_from(&bytes);
+                self.flow.answers(&answers, &salt).map_err(js)?;
                 Ok("[]".into())
             }
             Err(problems) => Ok(serde_json::to_string(&problems).unwrap_or_default()),
@@ -496,7 +501,8 @@ fn describe(release: &VerifiedRelease) -> String {
         "version": m.version, "label": m.label, "codename": m.codename, "device": m.device_name,
         "kernel": m.kernel_release, "signed_by": release.signer().primary, "signing_key": release.signer().signing_key,
         "boot_images": m.boot_writes.iter().map(|w| json!({"partition": w.partition.name(), "source": w.source, "size": w.size})).collect::<Vec<_>>(),
-        "root_image": {"partition": m.root_image.partition.name(), "name": m.root_image.name, "size": m.root_image.size},
+        "root_image": {"partition": m.root_image.partition.name(), "name": m.root_image.name, "size": m.root_image.size,
+            "answers_placeholders": m.root_image.placeholders.iter().map(|p| p.path.as_str()).collect::<Vec<_>>()},
         "build_index": release.has_build_index(),
     })
     .to_string()

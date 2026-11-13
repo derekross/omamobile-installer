@@ -8,7 +8,7 @@
     "The Pixel 7 Pro (cheetah) is unlocked and runs from slot b; bootloader fake-1.0, baseband fake-radio-1.0.",
     "Google's factory image for build TEST.260101.001 is the right file (cheetah-test.260101.001-factory-31c2322a.zip).",
     "Bootloader fake-1.0: slot B's bootloader, which the phone already runs; the install switches no slot. The phone tells the version of that copy only; slot A's was not read, and an install that stays on slot B does not need it.",
-    "Your answers: user alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set.",
+    "Your answers: user alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set. The phone sets up your account from them at its first start.",
     "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:"
   ],
   "quote": null,
@@ -30,7 +30,7 @@
     "userdata will be ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again.",
     "Slot B's boot partitions, listed above, are overwritten: this is a reinstall, and the Omarchy Mobile that is on slot B now is replaced. If slot B holds Android instead, that Android is overwritten.",
     "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.",
-    "This version of the installer cannot put your answers on the phone: it has no way yet to write them into the system image. So the phone starts Omarchy Mobile with no user account, no PIN or password and no Wi-Fi set up, and there is nothing to unlock it with. An install made with this version shows that the install itself works; it does not give you a phone you can use.",
+    "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone, which this version of the installer does not put there). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.",
     "To go ahead, type the phone's codename: cheetah",
     "Anything else stops the install here, with nothing written."
   ],

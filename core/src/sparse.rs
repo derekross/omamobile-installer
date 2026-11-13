@@ -119,6 +119,43 @@ pub fn cover(image: &[u8]) -> Result<Cover> {
     })
 }
 
+/// What one sparse image says goes into one block of the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockIn<'a> {
+    /// The image does not cover the block (a DONT_CARE chunk).
+    Skipped,
+    Raw(&'a [u8]),
+    Fill([u8; 4]),
+}
+
+/// What `image`, a sparse image [`cover`] took, writes to block `block`.
+pub fn block_in(image: &[u8], block: u64) -> Result<BlockIn<'_>> {
+    cover(image)?;
+    let chunks = le32(&image[20..]);
+    let (mut at, mut start) = (FILE_HDR, 0u64);
+    for _ in 0..chunks {
+        let header = &image[at..at + CHUNK_HDR];
+        let blocks = le32(&header[4..]) as u64;
+        let size = le32(&header[8..]) as usize;
+        if (start..start + blocks).contains(&block) {
+            let data = &image[at + CHUNK_HDR..at + size];
+            return Ok(match le16(header) {
+                RAW => {
+                    let from = ((block - start) as usize) * BLOCK;
+                    BlockIn::Raw(&data[from..from + BLOCK])
+                }
+                FILL => BlockIn::Fill(data[..4].try_into().unwrap()),
+                _ => BlockIn::Skipped,
+            });
+        }
+        start += blocks;
+        at += size;
+    }
+    Err(Error::Sparse(format!(
+        "block {block} is past the image's end"
+    )))
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Open {
     None,

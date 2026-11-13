@@ -955,7 +955,8 @@ impl<P: Phones> Driver<P> {
                         }]
                     }
                     Ok(answers) => {
-                        self.flow().answers(&answers)?;
+                        let salt = crate::fresh_salt()?;
+                        self.flow().answers(&answers, &salt)?;
                         return Ok(());
                     }
                     Err(problems) => problems,

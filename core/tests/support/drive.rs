@@ -17,6 +17,9 @@ pub fn id() -> PhoneId {
     PhoneId::of_serial(SERIAL).unwrap()
 }
 
+/// The salt the tests' flows hash the password with (`Flow::answers`).
+pub const SALT: &str = "testsalt0123";
+
 pub fn answers() -> OwnerAnswers {
     OwnerAnswers::check(&AnswersInput {
         username: "alex",
@@ -82,7 +85,7 @@ pub fn drive_with(
                 check.update(&bundle.factory_zip);
                 flow.factory_zip_done(check).unwrap();
             }
-            (_, "answers") => flow.answers(&answers()).unwrap(),
+            (_, "answers") => flow.answers(&answers(), SALT).unwrap(),
             (_, "dry-run") => {
                 let release = flow.release().unwrap().clone();
                 block_on(async {

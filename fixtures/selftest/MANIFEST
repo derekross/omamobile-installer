@@ -1,4 +1,4 @@
 version: 2026.01.02
 device: cheetah
 kernel release: 7.3.0-test
-root image: omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst (20a4e3f73bf7dd0fb5f0235c22367c03e48a68e3d3d2b48c7be7c7946b79f82a)
+root image: omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst (00d676de0e13e6b785ca6f4ba8f1a53fd3cc469da334390ed14a1ea6a5f1c14a)

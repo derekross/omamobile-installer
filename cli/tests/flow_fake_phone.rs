@@ -372,7 +372,7 @@ fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
         "then: restart the phone (reboot)",
         "userdata will be ERASED: everything Android stored on the phone is lost",
         "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.",
-        "cannot put your answers on the phone",
+        "At its first start the phone sets up your account from your answers",
         "To go ahead, type the phone's codename: cheetah",
     ] {
         assert!(before.contains(line), "not said before the confirmation: {line}\n{out}");
@@ -431,7 +431,8 @@ fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
     // After the last write: what the owner is told
     let after = flat(&out[out.find("==> Omarchy Mobile is written").unwrap()..]);
     assert!(after.contains("It now starts Omarchy Mobile from slot B."));
-    assert!(after.contains("no user account"));
+    assert!(after.contains("sets up your account from your answers"));
+    assert!(!after.contains("no user account"));
     assert!(!out.contains("4812") && !out.contains("FAKESERIAL"));
 }
 
@@ -732,7 +733,7 @@ fn help_says_what_write_erases_and_install_has_no_default() {
         "userdata is ERASED: everything Android stored on the phone is lost",
         "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written.",
         "waits for you to type the phone's codename; nothing is written before that",
-        "starts with no user account",
+        "so the phone sets up your account at its first start",
         "install needs --dry-run or --write, one of them: there is no default.",
     ] {
         assert!(help.contains(said), "help does not say: {said}\n{out}");

@@ -96,11 +96,20 @@ fn an_install_writes_slot_b_and_userdata_and_nothing_else() {
         assert!(part[..size] == *bundle.image(name), "{name}_b");
         assert!(part[size..].iter().all(|b| *b == SENTINEL));
     }
+    // The root image as the release built it, but for the blocks it keeps
+    // for the owner's answers, which hold them
     let userdata = phone.partition("userdata");
+    let installed = bundle.root_as_installed();
     assert!(
-        userdata[..bundle.root_raw.len()] == bundle.root_raw[..],
-        "userdata is not the root image"
+        userdata[..bundle.root_raw.len()] == installed[..],
+        "userdata is not the root image with the answers"
     );
+    let differ: Vec<usize> = (0..bundle.root_raw.len() / 4096)
+        .filter(|b| {
+            installed[b * 4096..(b + 1) * 4096] != bundle.root_raw[b * 4096..(b + 1) * 4096]
+        })
+        .collect();
+    assert_eq!(differ, [300, 302], "only the placeholders' blocks change");
     assert!(userdata[bundle.root_raw.len()..]
         .iter()
         .all(|b| *b == SENTINEL));

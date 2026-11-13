@@ -29,6 +29,8 @@ Each line was run on 2026-11-13 by `app/bin/test` (offscreen, Qt 6.12) or by `ca
 
 The pictures in [screens/](screens/) are that walk: `app/bin/screens` writes them again.
 
+- **The owner's answers into the system image** (DESIGN §12, decided on 2026-11-13). The answers form is the same; at the confirmation and after the install the core's screens now say that the phone sets up the account from them at its first start, and the unlock notice of a run that writes says that this version's writes have met only the pretend phone. The core puts the answers into the two placeholder blocks the release's root image keeps for them as it streams the image: the pretend phone's `userdata` holds the image with exactly those two blocks changed, and a test installs a real 8 MiB ext4 image that way and finds it clean with `e2fsck -fn` and the answers in the files with `debugfs` (`core/tests/answers.rs`). A release without placeholders stops a run that writes before it asks a phone anything (`stop-no-place-for-answers`, recorded and drawn). Never run against a real phone or a full root image.
+
 ## 2. What has never run against a real phone, or a real desktop
 
 - **The `json` mode's USB path**: listing the phones in Fastboot Mode, labelling them (the product name a Pixel gives over USB, and the bus and port), opening one, pinning it by its serial number. It follows what `install` does and has never run. Nobody knows what the `phones` label reads for a Pixel, or how two connected phones show.
@@ -56,7 +58,6 @@ The pictures in [screens/](screens/) are that walk: `app/bin/screens` writes the
 | A proxy, a work directory, a factory image named up front | The tool's `json` mode takes `--proxy` and `--work-dir` for scripts; the app passes neither, and the owner hands a saved file in at the step |
 | A control that says "reinstall" up front | Not needed: a phone on slot B is asked about with the core's question and the core's answers (`slot-b`). `omainstall open --reinstall` still says it up front, and the question is then not asked |
 | Finding or fetching a release | The tool takes a directory. `omainstall open DIR` passes it on |
-| The owner's answers reaching the phone | Not built in the core (DESIGN §12, decided: the install link). The form is drawn, the core checks it, and the core's screens say three times that the phone starts with no account |
 | Anything after the restart | Not built: no radio backup, no firmware, no check (DESIGN §9) |
 | The core's sentences in another language | They are composed in the core, in English (APP §8). The app's own strings have German as the working example |
 | Cancelling the check of a file handed in, or a dry run | The protocol cancels a download and nothing else; `quit` ends a file check |
@@ -68,7 +69,7 @@ In the order they bind:
 1. **The write path's first attended run** (WRITE-RUNBOOK, with the command-line tool). Until it has run, treat `omainstall open --write` like `install --write`: untested code that erases a phone.
 2. **A first install through the app.** Decided on 2026-11-13: first installs stay on the command line for now, and the app does reinstalls (a Pixel 7 Pro that runs from slot B, DESIGN §6). A first install on a Pixel 7 Pro needs the owner's statement, which the app does not take; the goal is that the installer measures the other slot itself (DESIGN §6, "Measuring the other slot: the later goal", a design with its attended test and no code yet).
 3. **A release that carries the build index.** The published 2026.11.08 has none, and the flow stops for it before it looks at a phone.
-4. **A phone one can use afterwards**: the owner's answers (DESIGN §12) and every step after the restart.
+4. **A phone one can use afterwards**: every step after the restart (the radio backup, Google's files). The owner's answers now reach the phone in the release image's placeholders (DESIGN §12, decided on 2026-11-13; below), but only from a release built with them: none is published yet, and a release without them stops a run that writes (`no-place-for-answers`).
 5. **The tool beside the app**: a package for `omamobile-install`, or the app's package carrying it.
 
 ## 5. Tools this work did not have

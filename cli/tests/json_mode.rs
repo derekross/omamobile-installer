@@ -1847,13 +1847,10 @@ fn a_run_that_writes_says_so_in_its_hello_and_a_locked_phone_is_told_what_it_get
     assert_eq!(tool.act(json!({"type": "acknowledge"})).state(), "phone");
     let unlock = tool.act(json!({"type": "read-phone"}));
     assert_eq!(unlock.state(), "unlock");
-    // The flow's own notice for a version that installs a phone without an
-    // account; the dry run's notice is not shown in a run that writes
+    // The flow's own notice for a version whose writes have met only the
+    // pretend phone; the dry run's notice is not shown in a run that writes
     let notice = unlock.screen["notice"].as_str().unwrap();
-    assert!(
-        notice.contains("cannot put your answers on the phone"),
-        "{notice}"
-    );
+    assert!(notice.contains("not yet to a real one"), "{notice}");
     let ended = tool.quit();
     assert!(writes_of(&ended.commands()).is_empty());
 }
