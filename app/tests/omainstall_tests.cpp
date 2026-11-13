@@ -18,6 +18,7 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QRandomGenerator>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -160,6 +161,10 @@ struct AfterWorld {
         QFile file(root.filePath("phone/" + name));
         if (file.open(QIODevice::WriteOnly))
             file.write(text);
+    }
+    QByteArray read(const QString &name) const {
+        QFile file(root.filePath(name));
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
     }
     QStringList log() const {
         QFile file(root.filePath("phone/log"));
@@ -2336,6 +2341,11 @@ private slots:
         QVERIFY(at(backend, "backup"));
         QVERIFY(whats.contains("first-start"));
         QCOMPARE(world.log().filter("nmcli connection add").size(), 1);
+        // The phone took the key only once its first start had given root
+        // the one that went with the answers: the installer's own
+        QVERIFY(!world.log().filter("ssh refused the key").isEmpty());
+        QCOMPARE(world.log().filter("first start: account alex, 1 SSH key(s) for root").size(), 1);
+        QCOMPARE(world.read("phone/authorized_keys"), world.read("data/omamobile-installer/ssh/id_ed25519.pub"));
         w.settle();
         QVERIFY(w.shown("notice") && backend.screen().value("notice").toString().contains("IMEI"));
         QVERIFY(w.click("choiceButton"));
@@ -2905,6 +2915,7 @@ private slots:
             Window w(&backend);
             backend.start();
             QVERIFY(goTo(backend, "confirm", world.zip()));
+            QVERIFY(shoot(w, "39-confirm-with-this-computers-key"));
             QVERIFY(backend.confirmInstall("cheetah"));
             QVERIFY(at(backend, "installed"));
             QVERIFY(shoot(w, "40-installed-set-up-next"));
@@ -2960,6 +2971,32 @@ private slots:
             QVERIFY(backend.answerChoice("go-on"));
             QVERIFY(at(backend, "first-start"));
             QVERIFY(shoot(w, "49-first-start"));
+            backend.shutdown();
+        }
+        {
+            // This computer's key file changed after the write: the phone
+            // takes only the key that went with the answers
+            AfterWorld world;
+            RealTool tool("ready", {}, world.extra(), world.environment());
+            QVERIFY(tool.ok);
+            Backend backend;
+            backend.setReleaseDirectory(AfterRelease);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(goTo(backend, "confirm", world.zip()));
+            QVERIFY(backend.confirmInstall("cheetah"));
+            QVERIFY(at(backend, "installed"));
+            QFile pub(world.root.filePath("data/omamobile-installer/ssh/id_ed25519.pub"));
+            QVERIFY(pub.open(QIODevice::WriteOnly));
+            pub.write("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + QByteArray::number(QRandomGenerator::global()->generate64(), 16) + " another-key\n");
+            pub.close();
+            QVERIFY(backend.answerChoice("begin"));
+            QVERIFY(at(backend, "network"));
+            QVERIFY(backend.answerChoice("add"));
+            QVERIFY(at(backend, "first-start"));
+            QVERIFY(backend.screen().value("problem").toString().contains("still does not take this computer's SSH key"));
+            QVERIFY(shoot(w, "50-first-start-key-refused"));
             backend.shutdown();
         }
         QVERIFY2(saved.size() >= 37, qPrintable(saved.join(" ")));
