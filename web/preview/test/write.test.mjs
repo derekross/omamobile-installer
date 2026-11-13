@@ -376,7 +376,7 @@ test("no command outside the gate can be sent: the module has no way to name one
     Object.keys(core)
       .filter((n) => !["default", "initSync"].includes(n))
       .sort(),
-    ["InstallFlow", "Phone", "Release", "RootCheck", "fake_phone", "fake_phone_scenarios", "request_phone", "selftest", "selftest_factory_zip", "verify_release", "web_write_preview"],
+    ["InstallFlow", "Phone", "Release", "RootCheck", "fake_phone", "fake_phone_scenarios", "request_phone", "selftest", "selftest_factory_zip", "selftest_verify_release", "verify_release", "web_write_preview"],
   );
   const steps = Object.getOwnPropertyNames(core.InstallFlow.prototype).filter((n) => !["constructor", "free", "__destroy_into_raw"].includes(n));
   assert.deepEqual(steps.sort(), [

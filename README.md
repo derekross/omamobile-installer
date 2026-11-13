@@ -38,7 +38,7 @@ Does not work, or is not built:
 | `core/tests/` | 94 tests, 19 of them the write path's (`write_path.rs`), and 16 in the core's sources: 9 beside the command layer in `core/src/fastboot.rs`, 4 for `core/src/text.rs`, 3 in `firstboot.rs`. `support/fake.rs` is the pretend phone, which records every command and can have its cable pulled; `support/bundle.rs` signs small test bundles with a key made on the spot |
 | `usb/` | The fastboot transport over USB (nusb): one file for Linux, Windows, macOS and WebUSB |
 | `cli/` | `omamobile-install`. `verify`, `sparse` and `help` need no phone; `flow --fake-phone` runs the install flow against the pretend phone (with `--write`, its write path too); `devices`, `install --dry-run` and `install --write` use USB, and the last one writes. It downloads Google's factory image with `ureq`, into `--work-dir`, through no proxy unless `--proxy` names one |
-| `web/` | The same core as WebAssembly, a static page with a screen for each state of the flow, a local server that sends the strict headers (and, for the self-test, runs a stand-in for Google's server), and a self-test that clicks through the page in a headless browser |
+| `web/` | The same core as WebAssembly, a static page with a screen for each state of the flow, the page's download of the latest release into the browser's own storage, with resume (`web/static/release-fetch.js`), a local server that sends the strict headers (and, for the self-test, runs a stand-in for Google's server), stand-ins for the release server and the browser's file system (`web/test/`), and a self-test that clicks through the page in a headless browser |
 | `fixtures/published/` | The small signed files of the published cheetah 2026.11.08 release, and the first 32 bytes of its root image. `omamobile.gpg` is the project's public key as published; its user ID holds the maintainer's address |
 | `fixtures/index/` | `device/cheetah/factory-builds.json` as Omarchy Mobile carries it: public metadata about two of Google's builds |
 | `fixtures/selftest/`, `fixtures/zstd/` | A signed test bundle (test key, build index, a stand-in factory zip of noise) for the front ends' pretend phone, and a file made by the `zstd` tool |
@@ -64,6 +64,7 @@ web/selftest.sh                 # builds, serves, and runs ?selftest in a headle
 tools/check-shipping            # one way to write (install --write), none in the page, no pretend phone (--built: also the built tool and page)
 web/build.sh web-write-preview  # web/dist-preview: the page's write preview, for an attended test (docs/WEB-WRITE.md). Never web/dist
 web/preview-test.sh             # the write preview against a pretend phone behind a pretend WebUSB device: in node, then in a headless Chromium
+web/fetch-test.sh               # the page's download of a release against a stand-in release server, in node (docs/WEB-WRITE.md §6)
 tools/check-shipping --preview  # the preview build holds the write path and says so; with --built, the page that ships holds none of it
 ```
 

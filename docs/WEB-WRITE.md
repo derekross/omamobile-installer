@@ -1,6 +1,6 @@
 # The web page's write path: a preview that does not ship
 
-Status (2026-11-12): **built, and tested against a pretend phone only. It has never been run against a real phone, and never in a real browser with a real USB device.** Every test here runs in node or in a headless Chromium that is started with WebUSB switched off. The page that ships is unchanged in what it can do: it cannot write to a phone, and `tools/check-shipping` fails if anything described here is in it.
+Status (2026-11-13): the page now downloads and checks the release itself (§6, "The download"), in the page that ships and in this preview. Status of the write path (2026-11-12): **built, and tested against a pretend phone only. It has never been run against a real phone, and never in a real browser with a real USB device.** Every test here runs in node or in a headless Chromium that is started with WebUSB switched off. The page that ships is unchanged in what it can do: it cannot write to a phone, and `tools/check-shipping` fails if anything described here is in it.
 
 This document is the design of the page's write preview, how it is kept out of the page that ships, what tests it, the problem of getting a system image of several gigabytes through a browser tab, and the steps of a first attended run in a browser. [DESIGN.md](DESIGN.md) is the design of the flow it drives, and its §11 the write path itself; [WRITE-RUNBOOK.md](WRITE-RUNBOOK.md) is the command-line tool's first run, which comes before anything here is tried on a phone.
 
@@ -18,8 +18,9 @@ A second build of the web page, made with the cargo feature `web-write-preview`,
 ## 2. The shape
 
 ```
-web/preview/index.html, preview.js   the preview's page: the file picker, the field for the codename
-web/preview/write-walk.js            reads the picked files, hands their bytes to the module
+web/static/release-fetch.js          the page's download of the release, kept in the browser (§6); in every build
+web/preview/index.html, preview.js   the preview's page: the field for the codename, the file picker until there is a release
+web/preview/write-walk.js            reads the release's files (downloaded or picked), hands their bytes to the module
         |
 web/src/write_preview.rs             the flow's write steps for the page (begin_write among them)
 web/src/webusb.rs                    the page's own transport: core's Transport over WebUSB
@@ -130,9 +131,77 @@ From the published release's own files (`fixtures/published`, release 2026.11.08
 | Way | What it takes | State |
 | --- | --- | --- |
 | **The owner's files, through the File API.** The owner downloads the release (its `images/` and the `.img.zst`) with the browser or anything else, and picks the files in the page | A `File` is a handle; the browser reads it from disk when asked. Nothing is uploaded. A file that changed on disk after it was picked fails to read (`NotReadableError`), which ends the session through the flow | **Implemented.** Enough for an attended test; not what an owner should have to do |
-| **A download by the page** from `pkgs.omamobile.org`, which sends the CORS header for it | The image is read **four times** in a run that writes (below), so it must be stored, not streamed: the Origin Private File System is the place, and it is subject to the origin's storage quota and to eviction unless the page asks for persistence. It needs resume (a 3.4 GB download that restarts on every hiccup is not an install path), and the SHA-256 over the whole file before any use, which the core already does for the factory image | **Not built.** DESIGN §9 lists it. The check and the resume rules exist in the core for Google's file and would be reused |
+| **A download by the page** from `pkgs.omamobile.org`, which sends the CORS header for it | The image is read **four times** in a run that writes (below), so it must be stored, not streamed: the Origin Private File System is the place, and it is subject to the origin's storage quota and to eviction unless the page asks for persistence. It needs resume (a 3.4 GB download that restarts on every hiccup is not an install path), and the SHA-256 over the whole file before any use | **Built (2026-11-13),** in the page that ships and in the preview: "The download" below. Tested against stand-ins in node and in headless Chromium; never against the real server for the large files |
+| **A release saved on this computer,** picked in the page's release panel: its files, its folder, or its one-file `.tar` | The same check as a download; the files are read in place (a `.tar`'s members are slices of it) | **Built (2026-11-13)** |
 
 Google's factory image is neither: a page cannot read it from Google's server at all (DESIGN §7), and this version does nothing with it after checking it.
+
+### The download (`web/static/release-fetch.js`)
+
+One script, in every build (the page that ships loads it from `app.js`; it holds nothing of the write preview, and `tools/check-shipping` reads that it reaches no phone and names one server). Everything it reaches outside itself is handed in, so the tests run it in node.
+
+**Trust is the module's, as in the command-line tool.** The script finds the release and fetches bytes; the wasm module decides what they are worth, with the same code the tool runs (`core/src/bundle.rs`, rPGP, which builds for `wasm32-unknown-unknown` and was already in the module):
+
+1. **The pointer.** `releases/<codename>/latest.json` (written by omarchy-mobile's `tools/release-upload --latest`) for the phone chosen at the top of the page. It is followed only when its `format` is 1, its codename is the one asked for, its version is a calendar version, and its `base_url` is exactly the directory beside it on the same server; a pointer anywhere else is refused before anything is fetched from there. It is only a pointer: it can name a version, and the signature decides the rest.
+2. **The small files** (`SHA256SUMS`, `SHA256SUMS.sig`, `omamobile.gpg`, `manifest.json`, `MANIFEST`, `device.conf`, and `factory-builds.json` when there is one), at most 4 MiB each. `manifest.json`'s SHA-256 is compared with the pointer's, only to say early that the two disagree.
+3. **The module's check** (`verify_release`, and the flow's own `InstallFlow.begin`): the release key's detached signature on `SHA256SUMS`, against the primary key's fingerprint built into the module (`OMAMOBILE_KEYS`, the release key `2056…4673` and the original package key), then the whole chain of DESIGN's bundle rules. The certificate itself comes from the release (`omamobile.gpg`); one with another fingerprint is ignored, so the pin is the fingerprint, as in the tool. A release that fails is the flow's `release-not-verified` stop, and no download is offered.
+4. **The large files,** on the owner's click: each boot image, then the root image, from the version directory, each checked against the signed manifest by the module (`Release.check_file` for a boot image, whole; `Release.root_check` for the root image, a piece at a time as the bytes arrive). A file that fails is deleted.
+
+**Storage.** The Origin Private File System, `omamobile-releases/<codename>/<version>/`. A large file is kept as numbered parts of at most 32 MiB (`<name>.NNNN.part`) and a record (`<name>.json`: the signed SHA-256 and size, the server's ETag, whether it is complete). Why parts: a writable in Chromium writes to a file of its own and replaces the file only when it is closed, so one file of 3.4 GB written in one go would be lost whole with the tab, and opened again with its data kept it is copied whole. A part is closed when it is full and whenever a transfer ends, broken or not; a tab that is closed or crashes loses at most the part it was writing. The parts are put back together as one `File` (`new File(parts, name)`), which the browser reads from disk when it is read: that `File` is what the write walk reads, a mebibyte at a time, so the image is never whole in memory. Other versions of the same phone are deleted when a new one is opened; the panel's "Delete the downloaded release" deletes every one.
+
+**Before the first byte:** `navigator.storage.persist()` is asked for (a browser may evict an origin's files under pressure otherwise; a no is said on the page and does not stop the download, since everything is checked again before use), then `navigator.storage.estimate()`: what is still to download plus 256 MiB must fit in the quota left, or the page says how much the browser allows and how much is needed, and offers the saved release instead.
+
+**Resume.** What is kept goes through the root image's check first, from its first byte (as the core does for Google's file), then the rest is asked for with `Range: bytes=N-` and `If-Range: <ETag>`. Only a `206` with `Content-Range: bytes N-(size-1)/size` is taken as the rest. A `200` is the whole file again (a server without Range, or a file that changed): what was kept is deleted, with its part of the hash, and the file starts over. Any other answer, a length other than the signed size, or one byte more than the signed size ends the file. A transfer that breaks, or sends no byte for 60 s, is tried again from where it stopped, five tries in all (2, 5, 15 and 30 s apart); then the panel says what happened and its button goes on from there. A request is sent with no cookie and no referrer, `cache: "no-store"` (the files are kept once, here), and `redirect: "error"`.
+
+**A later visit.** The release's directory is found by version, and each file's record by the signed SHA-256; a file that is complete is not downloaded again. It is read back from disk through the same check before it is used, on every visit (12 s or so for the root image at the module's hashing speed), because bytes on a disk can change between visits and the check costs no download.
+
+**A release saved on this computer.** The panel's file inputs take the release's files (any number, by name: every name the page needs is unique in a release), its folder, or its `.tar` (GNU tar, as `tools/lib/bundle-tar.sh` makes it: ustar headers with their checksum, GNU long names and pax headers read, base-256 sizes; its members become slices of the `.tar`, read in place). The small files go through the same check, and every large file is checked at once, the root image a piece at a time.
+
+**The page that ships** downloads and checks the release, and then does what it did: its flow ends at the dry run, which sends no image to the phone. **The write preview** hands the checked files to its walk (`page.large`), which checks each again, as it checked the picked files before; its file picker on the dry run's screen stays for when there is no release in the panel.
+
+**Each step waits for the one before it.** The panel's download button can be pressed only once the release's small files passed the module's check; the preview's "Run the dry run" only once every file of the release is there (downloaded and checked, or picked with the names and sizes the release lists). The core's flow orders the rest.
+
+**The phone, picked again.** When an action fails because the browser lost the device (the phone restarted, the cable moved), the page forgets the device, and the next step's button says "Choose the phone and run the dry run": the chooser needs the owner's click, so the page cannot do it by itself. It adds no sentence of its own about the phone (DESIGN §7, rule 1); the error under the screen is the browser's.
+
+**The preview's wake lock** is taken again whenever the tab is shown, while a write lasts: the browser lets go of it each time the tab is hidden.
+
+**Its tests.** In node (`web/fetch-test.sh`, `web/test/release-fetch.test.mjs`, 22 tests), against a stand-in for the release server on 127.0.0.1 (`web/test/release-server.mjs`: the headers `tools/server/releases-nginx.sh` sets, ranges with an ETag and `If-Range`, an `OPTIONS` preflight, and a way to break each answer) and a stand-in for the browser's file system on disk with its commit-on-close (`web/test/opfs-stand-in.mjs`). The release is `fixtures/selftest`, signed with a test key whose secret was never kept, checked with that key by a function of the self-test builds only (`selftest_verify_release`; `check-shipping --built` reads that the shipping module has none of it), and refused by the built-in release keys.
+
+| Asked for | Test |
+| --- | --- |
+| A whole download | "a whole download …": every file once, without a range, the bytes the release's, persistence asked; "a second visit downloads nothing …" |
+| A resumed download after a cut | "a download that is cut goes on from the byte it reached …" (the second request's range is exactly the bytes that arrived, with the ETag; about the file's size written in all); "a transfer that goes quiet …"; "a tab closed in the middle …" (only closed parts are kept, and the next visit asks from their end) |
+| A bad checksum | "a root image with one byte changed …", "a boot image with one byte changed …" (nothing after it is fetched), "more bytes than the signed size …"; both deleted |
+| A bad signature | "a signature that does not verify …": the module refuses, the flow begun from the files stops at `release-not-verified`, nothing large is fetched |
+| A server without Range | "a server without Range …": the cut file starts over, with its hash; "an answer for another range …" is refused |
+| Too little quota | "too little room …": refused before the first large byte, with both numbers; "persistence refused …" goes on |
+| The pointer | "a pointer to anywhere but beside itself is not followed …" |
+| A saved release | its files, its `.tar` (made by GNU tar in the test), a changed root image and a missing signature |
+| The preview's walk | "downloaded into the file system, the release goes through the write preview's walk …": a cut download, the dry run and the write to the pretend phone from the kept parts, slot B active |
+
+A browser's `fetch` refuses to be called as a method of another object, and node's does not: the tests' `fetch` refuses the same way, after the page's first run in Chromium found such a call. Each guard was removed once to see a test fail: the range on resume (3 tests), the root image's check, the boot images' check, the quota check, the pointer's rule, the restart on a `200`, the `Content-Range` check (one test each), and `fetch` called as a method (16).
+
+**In a headless Chromium** (`web/selftest.sh`, section 8 of the page's self-test, 10 more checks): the page that ships, built for its self-test, downloads from the same stand-in on another origin, so the browser's own cross-origin rules and its own Origin Private File System are the ones in use: a cut download resumed with a range, every file a `File` of that file system, a later visit that downloads nothing, a changed root image refused and deleted, a signature that does not verify (no download offered), a server without Range, and the delete button. The browser is held to 127.0.0.1 as before.
+
+**Measured, with the stand-ins** (this computer, no phone, no network but the loopback):
+
+| What | Where | Result |
+| --- | --- | --- |
+| A made-up release with a root image of 1 GiB of random bytes, signed with a key made for the run (`web/test/measure-download.mjs 1024`), downloaded whole | node 26, the stand-in server, the file-system stand-in on an SSD | 5.3 s: 194 MiB/s, bound by the module's SHA-256 (about 270 MiB/s, §6 "What was measured"); 32 parts; 1024 MiB written |
+| The same, cut at half and gone on with | the same | 7.7 s in all: the kept 512 MiB hashed again (about 2.5 s), then the other 512 MiB asked with `Range: bytes=536870912-`; 1024 MiB written in all, nothing twice |
+| A later visit | the same | 5.4 s, nothing downloaded and nothing written: the kept GiB read back and hashed |
+| For the published root image (3.4 GB), from these | extrapolated | about 18 s of hashing for a download at loopback speed, the same again on each later visit; the network is the bound on a real download |
+| The test release (1.6 MB) in headless Chromium 155, cut once | the page's self-test | 2.1 s, nearly all of it the first retry's 2 s wait; a later visit's check 0.1 s. Says that it works in a browser, not how fast |
+
+### What only a real browser and the real server can answer about the download
+
+1. **A whole download of 3.4 GB in a real tab:** the time, and whether the tab stays awake and in front long enough (whether Chrome freezes a hidden tab while it downloads, before any phone is attached, was not looked up or tried).
+2. **The quota Chrome gives the origin on an ordinary disk,** and what `persist()` answers there without a prompt (Chrome decides by site engagement; Firefox asks). Headless Chromium answered no, with a quota of 10 GiB.
+3. **Whether `new File(parts)` of OPFS files stays on disk** in a real tab, or the browser reads them into memory somewhere: the tab's memory while the root image is hashed and walked.
+4. **What a real dropped connection looks like** (a laptop changing networks, a sleep): which error `fetch` gives and after how long, against the 60 s stall timer.
+5. **The real server's answers to the page's range requests** from a browser: the `206`, `Content-Range` and `ETag` through nginx's CORS headers (the server's script exposes them; only `curl` has read them), and that its `no-cache` on `latest.json` and a year's cache on the version directory do what the page expects with `cache: "no-store"`.
+6. **The site's own headers** where the page is served: its Content-Security-Policy must allow `connect-src https://pkgs.omamobile.org` (as `web/serve.py` now sends it), and its Permissions-Policy must allow `usb`.
+7. **Eviction:** what a browser does with the 3.4 GB under storage pressure between two visits. The page checks everything again, so the cost is a new download, not a wrong file.
 
 ### Decompressing and cutting without holding it
 
@@ -159,7 +228,7 @@ compressed bytes -> the session's SHA-256 (userdata_streamed)
 
 ### What is implemented
 
-The owner's files through the File API; the checks before each session; the push-fed loop in the core, shared with the tool; the transport with the core's wait; progress as the session reports it; the wake lock and the question before closing. Not implemented: any download of the release by the page, storage, resume, and anything that survives a reload (a reload starts a new flow, and a rerun writes everything again: DESIGN §11, "Interrupted").
+The release downloaded by the page and kept in the browser, with resume, or a saved release picked (above); the owner's files through the File API on the dry run's screen; the checks before each session; the push-fed loop in the core, shared with the tool; the transport with the core's wait; progress as the session reports it; the wake lock and the question before closing. Not implemented: anything of the install that survives a reload (the release's files do; a reload starts a new flow, and a rerun writes everything again: DESIGN §11, "Interrupted").
 
 ### What was measured, and in what
 
@@ -203,6 +272,18 @@ Each is the maintainer's to confirm or change at review.
 9. **The wake lock and the question before closing the tab** (§6).
 10. **Where the builds go** (`web/dist-preview`, `web/dist-preview-test`), and `web/serve.py --dir`.
 
+Added with the page's download (2026-11-13):
+
+11. **The phone is chosen on the page before anything is fetched** (a list of codenames the release server has releases for, the Pixel 7 Pro today), because the flow begins from a release and the phone is looked at only after the warning. A wrong choice ends at the flow's own stop for another model.
+12. **The pin is the primary key's fingerprint, as in the tool,** and the certificate comes from the release. Pinning the whole certificate in the page would also pin the signing subkey, which expires on 2028-10-26 and would then need a new page; the fingerprint survives a renewed or replaced subkey.
+13. **The large files are downloaded on the owner's click,** not when the page opens; the small files are fetched when it opens.
+14. **Parts of 32 MiB,** five tries a file, a 60 s stall timer, 256 MiB of quota to spare: numbers chosen here, none measured in a real browser.
+15. **Kept files are checked again on every visit,** not trusted from their record.
+16. **A download is never trusted to `latest.json`:** it is followed only to the directory beside it, and its digest of `manifest.json` only gives an earlier message. The server could still point to an older signed release; nothing here refuses one older than the last seen (there is no signed index of versions to compare with).
+17. **The shipping page no longer reads `release/`** from its own origin; that directory stays in the builds for the self-test's look at the published release. The attended run below takes the release from the server or from a saved release.
+18. **Each step's button waits for the one before it** (the panel's download for the release's check, the preview's dry run for the files). The page's run in a browser checked that a press without the files gives a message; it now checks that the button cannot be pressed.
+19. **The phone picked again** after the browser lost it, by the next step's button, without a sentence of the page's own about the phone (DESIGN §7, rule 1).
+
 **The shipping module, compared.** `web/build.sh` was run at the commit this branch started from and at its head, on one computer with one toolchain. The glue (`omamobile_installer_web.js`) is the same file, by SHA-256. The module (`omamobile_installer_web_bg.wasm`) has the same size and differs in 13 bytes, all in the table of source positions it keeps for its panic messages: they are line numbers in `web/src/lib.rs`, which moved because lines were added above them (the `cfg` lines and the comment for the preview). No instruction and no string differs. It is not a claim of reproducible builds.
 
 ## 8. The first attended run in a browser, against a real Pixel 7 Pro: runbook
@@ -229,12 +310,10 @@ web/build.sh
 web/build.sh web-write-preview
 tools/check-shipping --built --preview
 web/preview-test.sh
-for d in dist dist-preview; do
-  for f in SHA256SUMS SHA256SUMS.sig omamobile.gpg manifest.json MANIFEST device.conf factory-builds.json; do
-    cp <RELEASE_DIR>/$f web/$d/release/
-  done
-done
+web/fetch-test.sh
 ```
+
+Both pages take the release from the release server (the latest for the chosen phone) or from `<RELEASE_DIR>`, picked in their release panel; nothing is copied into a build.
 
 - **Pass:** every line of `check-shipping` is `ok`; the node tests and the page's run pass. Record `git rev-parse --short HEAD`.
 - **Stop:** any `not ok`, any failing test.
@@ -258,6 +337,8 @@ Two terminals, then Chromium (an ordinary install, not one packaged so that it c
 web/serve.py 8765                      # the page that ships:   http://127.0.0.1:8765/
 web/serve.py 8766 --dir dist-preview   # the write preview:     http://127.0.0.1:8766/
 ```
+
+For each tab: either the page's release panel shows the server's latest release, or pick `<RELEASE_DIR>`'s folder (or its `.tar`) in the panel. Optionally, on 8765, "Download and check the release" (3.4 GB into the browser; record the time, the quota the page reports, what `persist()` answered, and the tab's memory in the browser's task manager while the root image is checked), then reload the page and "Check the downloaded release": nothing is downloaded again.
 
 - **Expect:** on 8765, the banner "This is a preview. It cannot write to a phone …", then "loaded (this page cannot write to a phone)" and the release's version, "signed by" the release key, and the screen "Read this once". On 8766, the banner "This is a write preview … this build can write to a phone … It has never been run against a real phone.", "loaded (a write preview: this build can write to a phone)", the same release line and the same first screen.
 - **Stop:** a stop screen instead of the warning (`release-not-verified`, `no-build-index`, `build-index-refused`, `writes-not-for-this-device`): the release is not one this run can use. Either page saying what the other should.
