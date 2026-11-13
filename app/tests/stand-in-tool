@@ -18,6 +18,8 @@ What it sends is what was recorded, in an order that looks like an install.
     flow-unplugged  a run that writes, whose write ends in the core's stop for a lost link
     flow-no-phone   a run that writes, whose first try at the writes finds no phone
     flow-long-write a run that writes, whose write takes two and a half seconds
+    flow-odd-write  a run that writes, and says something that is not of the protocol in the
+                    middle of the write, which it then finishes whoever still listens
     other-mode      a hello that says the opposite of what it was started for
     screen:NAME     the recorded screen NAME, again after every action
     mismatch        a hello with another protocol number
@@ -162,6 +164,9 @@ def flow(first):
                 say({"type": "sent", "command": command})
             if MODE == "flow-long-write":
                 time.sleep(2.5)
+            if MODE == "flow-odd-write":
+                say({"type": "surprise"})
+                time.sleep(1.2)
             piece(1)
             if MODE == "flow-unplugged":
                 say({"type": "account", "lines": ACCOUNT[:1] + ["userdata, sent and not confirmed: piece 2: 63 blocks, 252 KiB written on the phone, 258112 bytes sent, not answered"]})

@@ -453,9 +453,9 @@ ApplicationWindow {
                     ActionButton {
                         id: secondaryButton
                         objectName: "secondaryButton"
-                        visible: win.secondaryLabel !== "" && !backend.writing
+                        visible: win.secondaryLabel !== "" && (!backend.writing || win.toolFailed)
                         text: win.secondaryLabel
-                        enabled: !backend.busy || backend.pending === "download" || win.toolFailed
+                        enabled: (!backend.busy || backend.pending === "download" || win.toolFailed) && !backend.writing
                         onClicked: win.secondary()
                     }
                     Item { Layout.fillWidth: true }
@@ -491,7 +491,8 @@ ApplicationWindow {
                         primary: true
                         text: win.primaryLabel
                         // The codename is typed first: an empty field is no go-ahead.
-                        enabled: (!backend.busy && (win.action !== "confirm" || codenameField.text !== "")) || win.toolFailed
+                        // And no new run while a tool that failed may still be writing.
+                        enabled: ((!backend.busy && (win.action !== "confirm" || codenameField.text !== "")) || win.toolFailed) && !backend.writing
                         onClicked: win.primary()
                     }
                 }

@@ -1645,6 +1645,53 @@ private slots:
         QVERIFY2(QFile::exists(directory.filePath("done")), "the tool was ended while it was writing");
     }
 
+    void aToolTheAppCannotReadWhileItWritesIsNotEnded() {
+        // Whatever the app does with a tool it can no longer read, it does
+        // not end one that is writing to a phone.
+        QTemporaryDir directory;
+        const QString done = directory.filePath("done");
+        standIn("flow-odd-write");
+        qputenv("OMAINSTALL_STANDIN_DONE", done.toUtf8());
+        Backend backend;
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QTRY_COMPARE(backend.toolErrorKind(), QString("malformed"));
+        QVERIFY2(backend.toolErrorDetail().contains("has not ended it"), qPrintable(backend.toolErrorDetail()));
+        // The tool goes on writing, and the app knows it may.
+        QVERIFY(backend.writing());
+        QVERIFY(!QFile::exists(done));
+        w.settle();
+        QVERIFY(w.shown("toolError"));
+        // No new run meanwhile, by the button or otherwise, and no way out
+        // of the window.
+        QVERIFY(!w.click("primaryButton"));
+        QVERIFY(!w.click("secondaryButton"));
+        backend.restart();
+        QCOMPARE(backend.toolErrorKind(), QString("malformed"));
+        w.window->close();
+        w.settle();
+        QVERIFY(w.window->isVisible());
+        QVERIFY(w.shown("writeHold"));
+        // The write ran to its end, and then the tool left by itself.
+        QVERIFY(QTest::qWaitFor([&] { return QFile::exists(done); }, 10000));
+        QTRY_VERIFY(!backend.writing());
+        w.settle();
+        QVERIFY(!w.shown("writeHold"));
+        // What the window says is still the failure: it guesses nothing
+        // about how the write ended.
+        QCOMPARE(backend.toolErrorKind(), QString("malformed"));
+        QVERIFY(!backend.hasScreen() || backend.state() != "installed");
+        // Now a new run can start.
+        standIn("screen:warning");
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "warning"));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
     void aWriteThatFindsNoPhoneIsTriedAgainByHand() {
         standIn("flow-no-phone");
         Backend backend;

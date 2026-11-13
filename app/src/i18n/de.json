@@ -62,6 +62,7 @@
   "The installer's tool speaks protocol %1 and this app speaks protocol %2. Update whichever is older.": "Das Werkzeug des Installers spricht Protokoll %1, diese App Protokoll %2. Aktualisiere das ältere von beiden.",
   "The installer's tool started and did not say hello, so the app stopped it.": "Das Werkzeug des Installers ist gestartet und hat sich nicht gemeldet. Die App hat es angehalten.",
   "The installer's tool stopped unexpectedly (exit status %1).": "Das Werkzeug des Installers hat sich unerwartet beendet (Status %1).",
+  "The installer's tool was writing to the phone when this happened. The app has not ended it: it finishes the write and then leaves. Keep the phone connected.": "Das Werkzeug des Installationsprogramms schrieb gerade auf das Telefon, als dies geschah. Die App hat es nicht beendet: Es schreibt zu Ende und beendet sich dann. Lassen Sie das Telefon angeschlossen.",
   "The phone's codename": "Der Codename des Telefons",
   "The phone's name (optional)": "Der Name des Telefons (optional)",
   "The same again": "Noch einmal dasselbe",

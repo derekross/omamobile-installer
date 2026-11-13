@@ -128,6 +128,9 @@ void Backend::probe() {
 }
 
 void Backend::restart() {
+    // Not while a tool may still be writing: a new run would have to end it.
+    if (m_writeInHand && m_process.state() != QProcess::NotRunning)
+        return;
     shutdown();
     launch(false);
 }
@@ -148,6 +151,8 @@ void Backend::reset() {
     m_toolVersion.clear();
     m_toolProtocol = 0;
     m_busy = false;
+    m_writeInHand = false;
+    m_inputClosed = false;
     m_hasProgress = false;
     m_sentLines.clear();
     emit sentLinesChanged();
@@ -196,13 +201,18 @@ void Backend::shutdown() {
         return;
     // A tool that is writing is never ended from here: it takes the quit in
     // its turn, after the write, and the app waits for that.
-    const bool wasWriting = writing();
+    const bool wasWriting = m_writeInHand;
     m_leaving = true;
     if (m_process.state() == QProcess::Running) {
-        const QByteArray line = "{\"type\":\"quit\"}\n";
-        m_process.write(line);
-        emit sent(line);
-        m_process.closeWriteChannel();
+        // A tool the app stopped reading while it wrote was already told
+        // that nothing more comes.
+        if (!m_inputClosed) {
+            const QByteArray line = "{\"type\":\"quit\"}\n";
+            m_process.write(line);
+            emit sent(line);
+            m_process.closeWriteChannel();
+            m_inputClosed = true;
+        }
         if (m_process.waitForFinished(wasWriting ? m_writeWait : 1500))
             return;
     }
@@ -213,8 +223,16 @@ void Backend::shutdown() {
 void Backend::stopTool() {
     m_helloTimer.stop();
     m_leaving = true;
-    if (m_process.state() != QProcess::NotRunning)
+    if (m_process.state() == QProcess::NotRunning)
+        return;
+    // A tool that may be writing to a phone is not ended, whatever it sent:
+    // it is told that nothing more comes, finishes the write, and leaves.
+    if (m_writeInHand) {
+        m_process.closeWriteChannel();
+        m_inputClosed = true;
+    } else {
         m_process.kill();
+    }
 }
 
 void Backend::fail(const QString &kind, const QString &line, const QString &detail) {
@@ -223,6 +241,10 @@ void Backend::fail(const QString &kind, const QString &line, const QString &deta
     m_toolErrorKind = kind;
     m_toolError = line;
     m_toolErrorDetail = detail;
+    if (m_writeInHand && m_process.state() != QProcess::NotRunning) {
+        const QString still = tr("The installer's tool was writing to the phone when this happened. The app has not ended it: it finishes the write and then leaves. Keep the phone connected.");
+        m_toolErrorDetail = m_toolErrorDetail.isEmpty() ? still : m_toolErrorDetail + "\n" + still;
+    }
     stopTool();
     clearProgress();
     setBusy(false);
@@ -231,6 +253,10 @@ void Backend::fail(const QString &kind, const QString &line, const QString &deta
 
 void Backend::exited(int code, QProcess::ExitStatus status) {
     m_helloTimer.stop();
+    if (m_writeInHand) {
+        m_writeInHand = false;
+        emit busyChanged();
+    }
     if (m_leaving || !m_toolErrorKind.isEmpty())
         return;
     // What it wrote before it went still counts.
@@ -296,6 +322,8 @@ void Backend::handle(const QByteArray &raw) {
             return;
         }
         const QString answered = m_pending;
+        // Whatever was asked for is answered: a write that was in hand is over.
+        m_writeInHand = false;
         m_screen = screen.toVariantMap();
         clearProgress();
         emit screenChanged();
@@ -457,7 +485,17 @@ bool Backend::acceptTerms() { return sendFor({"accept-terms"}, {{"type", "accept
 bool Backend::declineTerms() { return sendFor({"accept-terms"}, {{"type", "decline-terms"}}); }
 bool Backend::download() { return sendFor({"download"}, {{"type", "download"}, {"do", "start"}}); }
 bool Backend::dryRun() { return sendFor({"dry-run"}, {{"type", "dry-run"}}); }
-bool Backend::write() { return sendFor({"write"}, {{"type", "write"}}); }
+bool Backend::write() {
+    if (m_busy || action() != "write")
+        return false;
+    // Set before the message leaves, so that nothing between here and the
+    // tool's answer can take the tool for one that may be ended.
+    m_writeInHand = true;
+    if (send({{"type", "write"}}))
+        return true;
+    m_writeInHand = false;
+    return false;
+}
 bool Backend::declineInstall() { return sendFor({"confirm"}, {{"type", "confirm"}, {"typed", ""}}); }
 
 bool Backend::confirmInstall(const QString &typed) {

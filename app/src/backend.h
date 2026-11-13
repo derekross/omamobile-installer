@@ -107,7 +107,10 @@ public:
         return action() == "none" && (retry == "whenever" || retry == "after-fix");
     }
     bool writes() const { return m_write; }
-    bool writing() const { return m_busy && m_pending == "write"; }
+    // From the moment the writes were asked for until the tool answered
+    // them with a screen, or left. Also true after the app stopped reading
+    // the tool (a line it could not read): the tool may still be writing.
+    bool writing() const { return m_writeInHand; }
     QStringList sentLines() const { return m_sentLines; }
     bool busy() const { return m_busy; }
     QString pending() const { return m_busy ? m_pending : QString(); }
@@ -216,6 +219,8 @@ private:
     bool m_leaving = false;
     bool m_reinstall = false;
     bool m_write = false;
+    bool m_writeInHand = false;
+    bool m_inputClosed = false;
     int m_writeWait = 30 * 60 * 1000;
     QString m_releaseDirectory;
 
