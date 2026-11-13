@@ -1,0 +1,444 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Stage L3 of the install link (Omarchy Mobile's INSTALL-LINK-PLAN §11.1,
+# docs/LINKD.md §5): omamobile-linkd on real FunctionFS over the kernel's
+# virtual USB controller, dummy_hcd, on this computer. The one part that
+# needs root.
+#
+#   sudo tools/l3-run-as-root [--speeds "high full super"] [--big-bytes N] [--only FILTER]
+#   tools/l3-run-as-root --dry-run     (prints every root command, runs none)
+#
+# As root it only: loads dummy_hcd, libcomposite, usb_f_fs and usb_f_ss_lb
+# (and records which it loaded); mounts configfs if it is not; adds a udev
+# rule under /run that gives the invoking user the device nodes of the
+# virtual bus, and nothing else; creates ONE gadget of its own,
+# omamobile-l3-PID (never touching any other), bound only to a dummy_udc;
+# and runs a broker that runs linkd/gadget/omamobile-link-gadget as root for
+# the tests, for the scratch roots under its own directory only. The
+# daemon, the build and the host tests run as the invoking user.
+#
+# An EXIT trap always takes it all back: the daemons stopped, the gadget
+# unbound and removed, FunctionFS unmounted, the rule removed, exactly the
+# modules it loaded unloaded, configfs unmounted if it mounted it. Ctrl-C
+# is safe; a run that was killed outright is cleaned up by the next one
+# (/run/omamobile-l3.state). Nothing here opens a real USB device: the host
+# tests open only devices under dummy_hcd.
+#
+# The log (plain text, to paste) is target/l3/l3-YYYYMMDD-HHMMSS.log.
+set -euo pipefail
+
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+dry=0 speeds="high full super" big= only=
+usage() {
+  cat >&2 <<'EOF'
+usage: sudo tools/l3-run-as-root [--speeds LIST] [--big-bytes N] [--only FILTER]
+       tools/l3-run-as-root --dry-run [same options]
+  --speeds LIST   which of full, high and super, in order (default "high full super")
+  --big-bytes N   the streamed file's length (default 4 GiB + 1000; 0: not run)
+  --only FILTER   run only the tests whose names contain FILTER (cargo test's filter)
+  --dry-run       print every command that would run as root, and run none
+EOF
+  exit 2
+}
+while (( $# )); do
+  case $1 in
+    --dry-run) dry=1 ;;
+    --speeds) (( $# >= 2 )) || usage; speeds=$2; shift ;;
+    --big-bytes) (( $# >= 2 )) || usage; big=$2; shift ;;
+    --only) (( $# >= 2 )) || usage; only=$2; shift ;;
+    -h|--help) usage ;;
+    *) echo "l3-run-as-root: unknown argument: $1" >&2; usage ;;
+  esac
+  shift
+done
+for s in $speeds; do
+  [[ $s == full || $s == high || $s == super ]] || { echo "l3-run-as-root: no such speed: $s" >&2; usage; }
+done
+[[ -n $speeds ]] || usage
+[[ -z $big || $big =~ ^[0-9]+$ ]] || { echo "l3-run-as-root: --big-bytes takes a number" >&2; usage; }
+[[ $only =~ ^[A-Za-z0-9_]*$ ]] || { echo "l3-run-as-root: --only takes a test name's part (letters, digits, _)" >&2; usage; }
+
+die() { echo "l3-run-as-root: $*" >&2; exit 1; }
+# A refusal the dry run reports and goes on past
+refuse() { if (( dry )); then log "(a real run would stop here: $*)"; else die "$*"; fi; }
+
+# Who runs it: root through sudo, for a named user (a dry run: anyone)
+if (( ! dry )); then
+  (( EUID == 0 )) || die "it needs root for the modules and the gadget: run it as sudo tools/l3-run-as-root (or --dry-run to see what it would do)"
+  [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]] ||
+    die "run it with sudo from your own account (SUDO_USER is not set, or is root): the tests run as that user"
+  user=$SUDO_USER
+else
+  user=${SUDO_USER:-$(id -un)}
+fi
+uid=$(id -u "$user") || die "no such user: $user"
+gid=$(id -g "$user")
+(( uid != 0 )) || die "the tests must run as a user other than root"
+home=$(getent passwd "$user" | cut -d: -f6)
+[[ -d $home ]] || die "no home directory for $user"
+[[ $(stat -c %u "$repo") == "$uid" ]] || die "the checkout is not $user's: $repo"
+
+cfs=/sys/kernel/config
+gname=omamobile-l3-$$
+g=$cfs/usb_gadget/$gname
+state_file=/run/omamobile-l3.state
+work=$repo/target/l3
+stamp=$(date +%Y%m%d-%H%M%S)
+log_file=$work/l3-$stamp.log
+rule=/run/udev/rules.d/99-omamobile-l3-$$.rules
+broker_dir=$work/broker-$$
+user_path=$home/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+# --- Printing and running ---------------------------------------------------
+q() { local a out=; for a in "$@"; do out+=" $(printf '%q' "$a")"; done; printf '%s' "${out# }"; }
+log() {
+  if (( dry )); then printf '%s\n' "$*"; else printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$log_file"; fi
+}
+# A command as root
+run() {
+  if (( dry )); then printf '+ %s\n' "$(q "$@")"; return 0; fi
+  printf '%s + %s\n' "$(date +%T)" "$(q "$@")" >> "$log_file"
+  "$@"
+}
+# VALUE into a file, as root (configfs attributes)
+put() {
+  if (( dry )); then printf '+ echo %s > %s\n' "$(q "$1")" "$(q "$2")"; return 0; fi
+  printf '%s + echo %s > %s\n' "$(date +%T)" "$(q "$1")" "$(q "$2")" >> "$log_file"
+  printf '%s\n' "$1" > "$2"
+}
+# A command as the invoking user, in the checkout
+as_user() {
+  if (( dry )); then printf '+ (as %s) %s\n' "$user" "$(q "$@")"; return 0; fi
+  printf '%s + (as %s) %s\n' "$(date +%T)" "$user" "$(q "$@")" >> "$log_file"
+  (cd "$repo" && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" PATH="$user_path" \
+     TERM="${TERM:-dumb}" "$@")
+}
+mods() { awk '{print $1}' /proc/modules 2>/dev/null | sort; }
+loaded_mod() { [[ -d /sys/module/$1 ]]; }
+
+# --- What this run changed, for the trap and for a run after a killed one ----
+LOADED=() mounted_cfs=0 made_gadget=0 made_rule=0 broker_pid= tmp_made=
+save_state() {
+  (( dry )) && return 0
+  printf 'pid=%s\ngadget=%s\nmodules=%s\nconfigfs=%s\nrule=%s\nbroker=%s\ntmp=%s\nuser=%s\n' \
+    "$$" "$gname" "${LOADED[*]:-}" "$mounted_cfs" "$rule" "$broker_dir" "$tmp_made" "$user" > "$state_file.new"
+  mv -f "$state_file.new" "$state_file"
+}
+
+# Unload exactly these modules (the ones a run loaded), the last loaded
+# first; a module another still uses waits for the next pass
+unload() {
+  local -a left=("$@") next
+  local pass i m
+  for (( pass = 0; pass < 4 && ${#left[@]}; pass++ )); do
+    next=()
+    for (( i = ${#left[@]} - 1; i >= 0; i-- )); do
+      m=${left[i]}
+      (( dry )) || loaded_mod "$m" || continue
+      if (( dry )); then run rmmod "$m"; else rmmod "$m" 2>/dev/null && printf '%s + rmmod %s\n' "$(date +%T)" "$m" >> "$log_file" || next=("$m" "${next[@]}"); fi
+    done
+    left=("${next[@]}")
+  done
+  (( ${#left[@]} == 0 )) || log "cleanup: could not unload ${left[*]}"
+}
+
+remove_gadget() {   # remove_gadget DIR: one of this script's gadgets only
+  local d=$1 l f
+  if (( dry )); then
+    put "" "$d/UDC"
+    run rm -f "$d/configs/c.1/SourceSink.base" "$d/configs/c.1/ffs.link" "$d/os_desc/c.1"
+    printf '+ umount every FunctionFS mounted under %s (a test left mounted)\n' "$tmp"
+    run rmdir "$d/functions/SourceSink.base" "$d/configs/c.1/strings/0x409" "$d/configs/c.1" "$d/strings/0x409" "$d"
+    return 0
+  fi
+  [[ $d == "$cfs/usb_gadget/omamobile-l3-"* && -d $d ]] || return 0
+  if [[ -n $(cat "$d/UDC" 2>/dev/null) ]]; then put "" "$d/UDC" || log "cleanup: could not unbind $d"; fi
+  for l in "$d"/configs/*/* "$d"/os_desc/*; do [[ -L $l ]] && run rm -f "$l"; done
+  # A FunctionFS a test left mounted (the tests' scratch roots only)
+  while read -r f; do
+    [[ -n $f ]] && { run umount "$f" || run umount -l "$f" || log "cleanup: could not unmount $f"; }
+  done < <(findmnt -rn -t functionfs -o TARGET 2>/dev/null | grep -F -e "$work/" -e "${tmp:-$work}/" || true)
+  for f in "$d"/functions/*; do [[ -d $f ]] && { run rmdir "$f" || log "cleanup: could not remove $f"; }; done
+  for f in "$d"/configs/*/strings/* "$d"/configs/* "$d"/strings/*; do
+    [[ -d $f ]] && { run rmdir "$f" || log "cleanup: could not remove $f"; }
+  done
+  run rmdir "$d" || log "cleanup: could not remove $d"
+}
+
+stop_tests() {
+  # The daemons and host tests of this run: processes of the user whose
+  # command line names this run's scratch directory
+  local t=${tmp:-$work/t}
+  run pkill -KILL -u "$user" -f -- "--root $t/" 2>/dev/null || true
+}
+
+cleanup() {
+  local rc=$? m i
+  trap - EXIT INT TERM HUP
+  set +e
+  log "cleanup: putting the computer back"
+  [[ -n $broker_pid ]] && { kill "$broker_pid" 2>/dev/null; wait "$broker_pid" 2>/dev/null; }
+  stop_tests
+  (( made_gadget )) && remove_gadget "$g"
+  if (( made_rule )); then run rm -f "$rule"; run udevadm control --reload; fi
+  unload "${LOADED[@]}"
+  (( mounted_cfs )) && { run umount "$cfs" || log "cleanup: could not unmount configfs"; }
+  [[ -d $broker_dir ]] && run rm -rf -- "$broker_dir"
+  [[ -n $tmp_made && -d $tmp_made ]] && run rm -rf -- "$tmp_made"
+  (( dry )) || rm -f "$state_file"
+  log "cleanup: done (modules unloaded: ${LOADED[*]:-none})"
+  (( dry )) || log "the log: $log_file"
+  exit "$rc"
+}
+
+# --- An earlier run that was killed outright ---------------------------------
+if [[ -r $state_file ]]; then
+  declare -A old=()
+  while IFS='=' read -r k v; do old[$k]=$v; done < "$state_file"
+  if [[ -n ${old[pid]:-} ]] && kill -0 "${old[pid]}" 2>/dev/null; then
+    die "another run (pid ${old[pid]}) is going on"
+  fi
+  log "an earlier run was killed before it cleaned up; doing that first"
+  if (( ! dry )); then mkdir -p "$work"; : > "$log_file"; chown "$uid:$gid" "$work" "$log_file"; fi
+  [[ -n ${old[gadget]:-} ]] && remove_gadget "$cfs/usb_gadget/${old[gadget]}"
+  [[ -n ${old[rule]:-} && ${old[rule]} == /run/udev/rules.d/99-omamobile-l3-* ]] &&
+    { run rm -f "${old[rule]}"; run udevadm control --reload; }
+  read -ra old_mods <<< "${old[modules]:-}"
+  unload "${old_mods[@]}"
+  [[ ${old[configfs]:-0} == 1 ]] && { run umount "$cfs" || true; }
+  [[ ${old[broker]:-} == "$work/broker-"* ]] && run rm -rf -- "${old[broker]}"
+  [[ ${old[tmp]:-} == /var/tmp/omamobile-l3.* ]] && run rm -rf -- "${old[tmp]}"
+  (( dry )) || rm -f "$state_file"
+fi
+
+# --- Read-only checks ---------------------------------------------------------
+if (( ! dry )); then
+  mkdir -p "$work"; chown "$uid:$gid" "$work"
+  : > "$log_file"; chown "$uid:$gid" "$log_file"
+fi
+log "stage L3, $(uname -r), as $user, speeds: $speeds"
+for m in dummy_hcd libcomposite usb_f_fs usb_f_ss_lb; do
+  modinfo -n "$m" > /dev/null 2>&1 || refuse "this kernel has no module $m (CONFIG_USB_DUMMY_HCD, CONFIG_USB_F_FS, CONFIG_USB_F_SS_LB)"
+done
+if systemctl is-active --quiet usbguard 2>/dev/null; then
+  refuse "usbguard is active: it would block the virtual device, and this script does not change its policy"
+fi
+if [[ -d $cfs/usb_gadget ]]; then
+  for d in "$cfs"/usb_gadget/*; do
+    [[ -d $d ]] || continue
+    u=$(cat "$d/UDC" 2>/dev/null || true)
+    [[ $u == dummy_udc.* ]] && refuse "another gadget (${d##*/}) is bound to $u: this run would share the virtual bus"
+  done
+fi
+if loaded_mod dummy_hcd; then
+  hs=$(cat /sys/module/dummy_hcd/parameters/is_high_speed 2>/dev/null || echo Y)
+  ss=$(cat /sys/module/dummy_hcd/parameters/is_super_speed 2>/dev/null || echo N)
+  have=full; [[ $hs == Y ]] && have=high; [[ $ss == Y ]] && have=super
+  log "dummy_hcd was loaded before this run (at $have speed): only that speed can run, and it stays loaded"
+  speeds=$have
+fi
+
+# The scratch roots hold local sockets, whose paths may be 107 bytes long
+tmp=$work/t
+probe="$tmp/linkd-4194304-999/run/omamobile-install-link/screen"
+if (( ${#probe} > 107 )); then
+  if (( dry )); then
+    tmp=/var/tmp/omamobile-l3.XXXXXX
+    log "(the checkout's path is too long for the tests' sockets: a real run uses $tmp)"
+  else
+    tmp=$(runuser -u "$user" -- mktemp -d /var/tmp/omamobile-l3.XXXXXX)
+    tmp_made=$tmp
+  fi
+fi
+if [[ -z $big ]]; then big=$(( (4 << 30) + 1000 )); fi
+space=$tmp; [[ -d $space ]] || space=$repo; [[ $space == *XXXXXX ]] && space=/var/tmp
+avail=$(( $(df -B1 --output=avail "$space" 2>/dev/null | tail -n1 || echo 0) ))
+if (( big > 0 && avail < big + (2 << 30) )); then
+  log "only $avail bytes free under $space: the streamed file is not run (it needs $big and 2 GiB more while it runs)"
+  big=0
+fi
+
+# --- Build, as the user -----------------------------------------------------------
+log "building the daemon and the tests (release) as $user"
+sink=$log_file; (( dry )) && sink=/dev/null
+as_user cargo test --locked --release -p omamobile-linkd --test l3 --no-run >> "$sink" 2>&1 ||
+  die "the build failed; see $log_file"
+
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+save_state
+
+# --- configfs and the rule ------------------------------------------------------
+if ! mountpoint -q "$cfs"; then
+  mounted_cfs=1; save_state
+  run mount -t configfs none "$cfs"
+fi
+made_rule=1; save_state
+if (( dry )); then
+  printf '+ cat > %s <<EOF\n  SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="dummy_hcd.[0-9]*", OWNER="%s", MODE="0600"\nEOF\n' "$rule" "$user"
+else
+  mkdir -p "${rule%/*}"
+  printf 'SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="dummy_hcd.[0-9]*", OWNER="%s", MODE="0600"\n' "$user" > "$rule"
+  printf '%s + wrote %s\n' "$(date +%T)" "$rule" >> "$log_file"
+fi
+run udevadm control --reload
+
+# --- The broker: the gadget script as root, for this run's scratch roots ---------
+broker_valid_root() {   # the scratch roots the tests make, and nothing else
+  local r=$1 d
+  [[ $r == "$tmp"/linkd-* && ${r#"$tmp"/} =~ ^linkd-[0-9]+-[0-9]+$ ]] || return 1
+  [[ -d $r && ! -L $r && $(stat -c %u "$r") == "$uid" ]] || return 1
+  [[ $(realpath -e "$r") == "$r" ]] || return 1
+  for d in run run/omamobile-install-link var var/lib var/lib/omamobile proc proc/sys proc/sys/kernel proc/sys/kernel/random; do
+    [[ ! -e $r/$d || ( -d $r/$d && ! -L $r/$d ) ]] || return 1
+  done
+}
+broker_dummy_devices() {
+  local d
+  for d in /sys/bus/usb/devices/*; do
+    [[ -f $d/idVendor && $(realpath "$d") == */dummy_hcd.* ]] || continue
+    [[ $(cat "$d/idVendor") == 1d6b && $(cat "$d/idProduct") == 0104 ]] && printf '%s\n' "$d"
+  done
+}
+broker_one() {   # VERB ROOT: an exit status
+  local verb=$1 r=$2 d
+  case $verb in
+    add|remove)
+      broker_valid_root "$r" || { echo "broker: refused root $r" >> "$log_file"; return 2; }
+      LINK_CONFIGFS=$cfs LINK_GADGET_NAME=$gname \
+      LINK_FFS_DIR=$r/run/omamobile-install-link/ffs LINK_RUN_DIR=$r/run/omamobile-install-link \
+      LINK_MARKER=$r/var/lib/omamobile/link-gadget-started LINK_BOOT_ID=$r/proc/sys/kernel/random/boot_id \
+      LINK_FFS_OPTS=uid=$uid,gid=$gid LINK_UDC_ALLOW='dummy_udc.*' \
+        timeout 60 "$repo/linkd/gadget/omamobile-link-gadget" "$verb" >> "$log_file" 2>&1
+      ;;
+    unbind) put "" "$g/UDC" ;;
+    bind) put "$udc" "$g/UDC" ;;
+    autosuspend)
+      for d in $(broker_dummy_devices); do put 0 "$d/power/autosuspend_delay_ms"; put auto "$d/power/control"; done ;;
+    noautosuspend)
+      for d in $(broker_dummy_devices); do put on "$d/power/control"; done ;;
+    *) return 2 ;;
+  esac
+}
+broker() {
+  local line verb r rc
+  while :; do
+    IFS= read -r line < "$broker_dir/req" || continue
+    verb=${line%% *} r=${line#* }
+    printf '%s broker: %s\n' "$(date +%T)" "$line" >> "$log_file"
+    rc=0; broker_one "$verb" "$r" || rc=$?
+    timeout 10 bash -c 'printf "%s\n" "$1" > "$2"' _ "$rc" "$broker_dir/resp" || true
+  done
+}
+start_broker() {
+  if (( dry )); then
+    printf '+ mkdir %s; mkfifo req resp (owned by %s, mode 600); write ask; start the broker\n' "$broker_dir" "$user"
+    return 0
+  fi
+  mkdir -m 0755 "$broker_dir"
+  mkfifo -m 0600 "$broker_dir/req" "$broker_dir/resp"
+  : > "$broker_dir/lock"
+  chown "$uid:$gid" "$broker_dir/req" "$broker_dir/resp" "$broker_dir/lock"
+  chmod 0600 "$broker_dir/lock"
+  cat > "$broker_dir/ask" <<'EOF'
+#!/bin/bash
+# ask VERB ROOT: one request to tools/l3-run-as-root's broker, its answer
+set -euo pipefail
+b=${0%/*}
+exec 9>> "$b/lock"
+flock -w 120 9
+printf '%s %s\n' "$1" "$2" > "$b/req"
+read -r rc < "$b/resp"
+exit "$rc"
+EOF
+  chmod 0755 "$broker_dir/ask"
+  broker & broker_pid=$!
+  save_state
+  printf '%s + started the broker (pid %s) in %s\n' "$(date +%T)" "$broker_pid" "$broker_dir" >> "$log_file"
+}
+stop_broker() {
+  [[ -n $broker_pid ]] || return 0
+  kill "$broker_pid" 2>/dev/null; wait "$broker_pid" 2>/dev/null || true
+  broker_pid=
+  run rm -rf -- "$broker_dir"
+}
+
+# --- Per speed ---------------------------------------------------------------------
+load() {   # modprobe NAME [PARAMS], recording the modules it loaded
+  local before after m
+  before=$(mods)
+  run modprobe "$@"
+  (( dry )) && { ours "$1" || LOADED+=("$1"); return 0; }
+  after=$(mods)
+  for m in $(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after")); do ours "$m" || LOADED+=("$m"); done
+  save_state
+}
+ours() { local m; for m in "${LOADED[@]}"; do [[ $m == "$1" ]] && return 0; done; return 1; }
+
+results=()
+for speed in $speeds; do
+  log "=== $speed speed ==="
+  case $speed in
+    full) hs=0 ss=0 max=full-speed ;;
+    high) hs=1 ss=0 max=high-speed ;;
+    super) hs=1 ss=1 max=super-speed ;;
+  esac
+  if ours dummy_hcd && { (( dry )) || loaded_mod dummy_hcd; }; then run rmmod dummy_hcd; fi
+  loaded_mod dummy_hcd || load dummy_hcd is_high_speed=$hs is_super_speed=$ss
+  for m in libcomposite usb_f_fs usb_f_ss_lb; do loaded_mod "$m" || { (( dry )) && ours "$m"; } || load "$m"; done
+
+  udc=
+  if (( dry )); then udc=dummy_udc.0; else
+    for _ in $(seq 50); do
+      for u in /sys/class/udc/dummy_udc.*; do [[ -e $u ]] && { udc=${u##*/}; break; }; done
+      [[ -n $udc ]] && break; sleep 0.1
+    done
+  fi
+  [[ $udc == dummy_udc.* ]] || die "no dummy_udc appeared"
+  for d in "$cfs"/usb_gadget/*; do
+    [[ -d $d && $(cat "$d/UDC" 2>/dev/null) == "$udc" ]] && die "$udc is taken by ${d##*/}"
+  done
+
+  # The gadget as an initramfs would make it, with a function no host
+  # driver binds (SourceSink) in place of NCM and ACM: the computer's
+  # network manager and modem manager see nothing
+  made_gadget=1; save_state
+  run mkdir "$g"
+  put 0x1d6b "$g/idVendor"; put 0x0104 "$g/idProduct"; put 0x0100 "$g/bcdDevice"; put 0x0200 "$g/bcdUSB"
+  put "$max" "$g/max_speed"
+  run mkdir "$g/strings/0x409"
+  put "Omarchy Mobile L3 test" "$g/strings/0x409/manufacturer"
+  put "L3 test gadget" "$g/strings/0x409/product"
+  put "l3-test" "$g/strings/0x409/serialnumber"
+  run mkdir "$g/configs/c.1"
+  run mkdir "$g/configs/c.1/strings/0x409"
+  put "L3" "$g/configs/c.1/strings/0x409/configuration"
+  run mkdir "$g/functions/SourceSink.base"
+  run ln -s "$g/functions/SourceSink.base" "$g/configs/c.1/SourceSink.base"
+  put "$udc" "$g/UDC"
+  start_broker
+
+  if (( ! dry )); then
+    runuser -u "$user" -- mkdir -p "$tmp"
+    for _ in $(seq 100); do
+      [[ -n $(broker_dummy_devices) ]] && break; sleep 0.1
+    done
+  fi
+  log "the test gadget $gname is on $udc; the tests run as $user"
+  rc=0
+  as_user env LINKD_L3=usb L3_SPEED="$speed" L3_BROKER="$broker_dir" L3_GADGET="$g" \
+    L3_BIG_BYTES="$big" TMPDIR="$tmp" \
+    cargo test --locked --release -p omamobile-linkd --test l3 -- --test-threads=1 --nocapture ${only:+"$only"} \
+    > >(tee -a "$sink") 2>&1 || rc=$?
+  results+=("$speed: $( (( rc == 0 )) && echo PASS || echo "FAIL ($rc)")")
+
+  stop_broker
+  stop_tests
+  remove_gadget "$g"; made_gadget=0; save_state
+done
+
+log "=== results ==="
+(( dry )) || { grep -h '^L3 ok - ' "$log_file" | sed 's/^/  /' || true; }
+for r in "${results[@]}"; do log "$r"; done
+for r in "${results[@]}"; do [[ $r == *FAIL* ]] && exit 1; done
+exit 0
