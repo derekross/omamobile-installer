@@ -1,0 +1,25 @@
+{
+  "state": "stopped",
+  "stop": "write-interrupted",
+  "retry": "whenever",
+  "title": "The install stopped partway",
+  "notice": null,
+  "body": [
+    "The install did not run through (USB: the phone left the bus).",
+    "The connection to the phone was lost. Check the cable, and don't unplug the phone or press its keys while the installer writes."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "Every image was written and the phone confirmed each one. The command that makes slot B the active slot was sent, and the phone's answer did not arrive: the installer does not know which slot is active.",
+    "What Android had stored on the phone is erased. If the phone starts Android now, Android finds its data gone and asks for a factory reset.",
+    "Bring the phone to Fastboot Mode and start the installer again: it checks the phone again and writes every image again, from the first.",
+    "If the installer then says that the phone runs from slot B, or asks what is on slot B, that is this install. Start the phone once from its Fastboot Mode screen, so that it runs slot B's own bootloader, bring it back to Fastboot Mode, and start the installer again as a reinstall: slot B holds Omarchy Mobile."
+  ],
+  "choices": [],
+  "action": "none"
+}

@@ -16,14 +16,19 @@
 //!   -> activate_and_reboot
 //! ```
 //!
+//! That is the order of Omarchy Mobile's `tools/install-phone`: slot B's
+//! boot images in the descriptor's order, `userdata`, `set_active:b` (what
+//! `fastboot --set-active=b` sends), `reboot`. Nothing else is done about
+//! the slots: no other slot is made active, and no slot is marked.
+//!
 //! What it can send: `getvar:`, `download:`, `flash:<p>` where `<p>` is a
 //! [`Partition`] of the verified release (slot B's boot images, `userdata`),
 //! `set_active:b` and `reboot`; and one question outside the session,
 //! [`unlock_ability`], which sends `flashing get_unlock_ability` and changes
 //! nothing on the phone. That list is closed, and checked again at the one
 //! place a command leaves (`Client::allowed`): a `flash:` leaves only for a
-//! partition on the session's own list, which `connect` builds from the
-//! verified release (the descriptor's `BOOT_IMAGES` with `_b`, and
+//! partition on the session's own list, which the session that writes
+//! builds from the verified release (the descriptor's `BOOT_IMAGES` with `_b`, and
 //! `userdata`), and the questions outside a session have an empty list.
 //! There is no code for `erase`, `format`, `oem`, any other `flashing`
 //! command (`flashing unlock` among them), another slot or a caller-chosen
@@ -38,7 +43,12 @@
 //! and every dry-run session) can send nothing that writes or stages a
 //! write: no `flash:`, no `download:`, no `set_active:b`, no `reboot`. And
 //! a `download:` carries exactly eight hex digits.
-use crate::bundle::{VerifiedImage, VerifiedRelease, VerifiedRootImage};
+//!
+//! A session that stops partway says how far it got ([`Session::reach`]),
+//! from what the phone confirmed: the flow's stop is worded from that.
+use crate::bundle::{RootImageCheck, VerifiedImage, VerifiedRelease, VerifiedRootImage};
+use crate::firstboot::RootAnswers;
+use crate::flow::WriteToken;
 use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
 use crate::sparse;
@@ -107,6 +117,54 @@ fn allowed(command: &str, flashable: &[String]) -> bool {
         && (command == "set_active:b" || command == "reboot" || is_download(command))
 }
 
+/// How far a session's writes got, from what the phone confirmed. A
+/// `download:` alone changes nothing on a phone (it is held in memory until
+/// a `flash:`), so only `flash:`, `set_active:b` and `reboot` count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteReach {
+    /// No command that changes the phone was sent.
+    Nothing,
+    /// Slot B's boot images: `done` of `of` were written and confirmed.
+    /// `in_doubt`: the next one's `flash:` was sent and not confirmed, so
+    /// that partition may be partly written. `userdata` is untouched.
+    BootImages { done: u32, of: u32, in_doubt: bool },
+    /// Every boot image is written, and `userdata` was begun: `pieces`
+    /// sparse images were confirmed, and one more may be partly written.
+    Userdata { pieces: u32 },
+    /// Every image is written and confirmed. Slot B was not made active.
+    Written,
+    /// As `Written`; `set_active:b` was sent and not confirmed.
+    SlotInDoubt,
+    /// Slot B is the active slot. `reboot` was not confirmed.
+    SlotSet,
+    /// Everything, and the phone confirmed the restart.
+    Rebooted,
+}
+
+/// One sparse image of the root image, as a session took it: what its
+/// `flash:` asked of the phone, and how long the phone took to answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PieceReport {
+    /// The bytes downloaded: the sparse image's own size.
+    pub bytes: u64,
+    /// The blocks of `userdata` (4096 bytes each) its `flash:` writes: at
+    /// most [`sparse::MAX_PIECE_BLOCKS`].
+    pub blocks: u32,
+    /// From `flash:userdata` sent to its `OKAY`, by the clock the front end
+    /// lent ([`Session::time_flashes_with`]). `None`: no clock, a dry run
+    /// (nothing was sent), or the answer never came.
+    pub flash: Option<core::time::Duration>,
+}
+
+/// What a walk of the root image through a session found: the raw image's
+/// size, `userdata`'s size on the phone, and how many sparse images it took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserdataWalk {
+    pub image_len: u64,
+    pub partition_size: u64,
+    pub pieces: u32,
+}
+
 /// A USB (or fake) link to a phone in fastboot mode: one bulk OUT and one
 /// bulk IN endpoint. Futures need not be `Send`, so a browser's can be used.
 #[allow(async_fn_in_trait)]
@@ -139,6 +197,13 @@ impl PhoneId {
     pub fn of_serial(serial: &str) -> Option<Self> {
         (!serial.is_empty()).then(|| PhoneId(sha256_hex(serial.as_bytes())))
     }
+    /// The digest itself, as lower-case hex: what a later step compares the
+    /// phone that answers with (over USB SSH, the phone works out the same
+    /// digest of the serial its bootloader handed the kernel). It still
+    /// identifies the phone: keep it private, as the radio backup.
+    pub fn digest(&self) -> &str {
+        &self.0
+    }
 }
 
 impl core::fmt::Debug for PhoneId {
@@ -164,6 +229,12 @@ pub struct PhoneReport {
 
 /// `version-bootloader` for one slot among `getvar:all`'s lines, under any
 /// of the spellings a bootloader may use.
+///
+/// A line with an empty value is a slot the phone did not report, as in
+/// Omarchy Mobile's `tools/install-phone` (`[[ -n $bl_a && -n $bl_b ]]`):
+/// two empty answers are not "both reported and equal". This is the one
+/// place a per-slot version is read, for the flow's judge ([`probe`]) and
+/// for every session (`connect`).
 fn slot_bootloader(all: &[String], slot: char) -> Option<String> {
     all.iter().find_map(|line| {
         let rest = line.strip_prefix("version-bootloader")?;
@@ -172,6 +243,7 @@ fn slot_bootloader(all: &[String], slot: char) -> Option<String> {
         (matches!(sep, '-' | '_' | ':') && c.next()? == slot)
             .then(|| c.as_str().strip_prefix(':').map(|v| v.trim().to_string()))
             .flatten()
+            .filter(|version| !version.is_empty())
     })
 }
 
@@ -418,39 +490,73 @@ fn parse_size(text: &str) -> Option<u64> {
 
 /// What the person running the install has said about the phone.
 ///
-/// The default is a dry run ([`PhoneOptions::default`]): a session that
-/// writes is one whose maker wrote `dry_run: false`.
+/// Nothing here says whether a session writes. That is not an option: a
+/// session opened with [`Session::connect`] or [`Session::connect_pinned`]
+/// holds every write back, whatever its options, and the one that writes is
+/// opened by [`crate::flow::Flow::begin_write`] alone, with a
+/// [`WriteToken`] only that function can make. The field that used to say
+/// it is gone, and with it the way for a caller to ask for a writing
+/// session:
+///
+/// ```compile_fail
+/// use omamobile_installer_core::fastboot::PhoneOptions;
+/// let options = PhoneOptions { dry_run: false, ..Default::default() };
+/// ```
+///
+/// The control, which compiles: the same lines with a field there is.
+///
+/// ```
+/// use omamobile_installer_core::fastboot::PhoneOptions;
+/// let options = PhoneOptions { reinstall: true, ..Default::default() };
+/// ```
 #[derive(Debug, Clone)]
 pub struct PhoneOptions {
     /// Slot B is the current slot and holds Omarchy Mobile. Without it a
     /// phone running from slot B is refused: stock Android runs there after
-    /// a system update.
+    /// a system update. With it, on a phone that runs from slot B and
+    /// reports one bootloader copy's version only, that version is slot
+    /// B's, and it passes the bootloader-slot check.
     pub reinstall: bool,
     /// When the bootloader reports no per-slot versions: the version the
     /// owner checked on the other slot. It must equal the current slot's.
     pub bootloader_slots_confirmed: Option<String>,
-    /// Do every check, send no write: each is recorded in the log as
-    /// `would: ...` instead. On by default.
-    pub dry_run: bool,
     /// The maintainer's override, for a dry run only: go on when the
     /// bootloader reports only the current slot's version, without knowing
     /// the other. It never passes two versions that are known to differ.
-    /// Without `dry_run` the session is refused before anything is sent
+    /// The session that writes is refused with it before anything is sent
     /// ([`Error::OverrideOutsideDryRun`]).
     pub maintainer_skip_bootloader_slot_check: bool,
+    /// This computer's SSH public key (one OpenSSH line), appended to slot
+    /// B's initramfs as `tools/install-phone` appends it
+    /// ([`crate::ramdisk_key`]): the image that carries the vendor ramdisk
+    /// (`vendor_kernel_boot`, else `vendor_boot`) is written with it, and
+    /// every other image as the release signed it.
+    pub owner_ssh_key: Option<String>,
 }
 
 impl Default for PhoneOptions {
-    /// A dry run, with nothing said about the phone. Options that write are
-    /// never what a caller gets without asking for them.
+    /// Nothing said about the phone, and no check skipped.
     fn default() -> Self {
         PhoneOptions {
             reinstall: false,
             bootloader_slots_confirmed: None,
-            dry_run: true,
             maintainer_skip_bootloader_slot_check: false,
+            owner_ssh_key: None,
         }
     }
+}
+
+/// The boot image that carries slot B's vendor ramdisk, where the owner's
+/// key goes: `vendor_kernel_boot`, or `vendor_boot` on a phone without one.
+/// Its place in the release's writes.
+pub fn ramdisk_write(m: &Manifest) -> Option<usize> {
+    ["vendor_kernel_boot_b", "vendor_boot_b"]
+        .iter()
+        .find_map(|name| {
+            m.boot_writes
+                .iter()
+                .position(|w| w.partition.name() == *name)
+        })
 }
 
 /// What the read-only checks found, for the confirmation screen.
@@ -483,10 +589,36 @@ pub struct Session<T: Transport> {
     serial: String,
     facts: PhoneFacts,
     state: State,
-    dry_run: bool,
+    /// What lets this session write: the token `Flow::begin_write` made
+    /// for it. `None` in every other session, which holds every write back
+    /// (a dry run).
+    token: Option<WriteToken>,
     /// The bootloader-slot check was skipped by the maintainer's override.
-    /// Only ever true together with `dry_run`.
+    /// Only ever true in a dry run.
     slot_check_skipped: bool,
+    /// The phone's size for each boot image's partition, in the plan's order.
+    boot_partition_sizes: Vec<u64>,
+    /// The root image's size, when it was checked against `userdata` before
+    /// the first write ([`Self::preflight_userdata`]).
+    userdata_preflight: Option<u64>,
+    userdata_walk: Option<UserdataWalk>,
+    /// The hash of the compressed root image as it was streamed to this
+    /// session ([`Self::userdata_streamed`]): `finish_userdata` compares it
+    /// with the signed manifest's before slot B can be made active.
+    streamed: Option<RootImageCheck>,
+    /// Each sparse image of the root image this session took, in order.
+    pieces: Vec<PieceReport>,
+    /// The front end's clock, for how long each `flash:userdata` took. The
+    /// core has none of its own.
+    clock: Option<Box<dyn Fn() -> core::time::Duration>>,
+    reach: WriteReach,
+    /// The owner's answers for the root image's placeholders, from the flow
+    /// ([`Self::set_answers`]), and for each of their blocks whether a
+    /// piece this session took carried them.
+    answers: Option<RootAnswers>,
+    answers_sent: Vec<bool>,
+    /// The owner's key, and the boot write it is appended to.
+    owner_key: Option<(String, usize)>,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -501,7 +633,9 @@ impl<T: Transport> core::fmt::Debug for Session<T> {
 
 impl<T: Transport> Session<T> {
     /// Open a session on one phone and run every read-only check. Nothing is
-    /// written. `expected_serial` is the serial number of the USB device the
+    /// written, by this call or through the session it gives: it is a dry
+    /// run, which records each write as `would: ...` in its log and sends
+    /// none. `expected_serial` is the serial number of the USB device the
     /// person chose; the phone must report the same one.
     pub async fn connect(
         transport: T,
@@ -515,16 +649,41 @@ impl<T: Transport> Session<T> {
     }
 
     /// As [`Self::connect`], for a phone already known by its [`PhoneId`]
-    /// (the one an earlier step looked at).
+    /// (the one an earlier step looked at). A dry run, like it.
     pub async fn connect_pinned(
         transport: T,
         release: &VerifiedRelease,
         expected: &PhoneId,
         options: PhoneOptions,
     ) -> Result<Self> {
+        Self::open(transport, release, expected, options, None).await
+    }
+
+    /// The session that writes. It takes a [`WriteToken`], which only
+    /// [`crate::flow::Flow::begin_write`] can make, after it has checked
+    /// every condition of a write; and it is not public, so no other crate
+    /// can call it even with one. The checks are the same as a dry run's.
+    pub(crate) async fn connect_writing(
+        transport: T,
+        release: &VerifiedRelease,
+        expected: &PhoneId,
+        options: PhoneOptions,
+        token: WriteToken,
+    ) -> Result<Self> {
+        Self::open(transport, release, expected, options, Some(token)).await
+    }
+
+    async fn open(
+        transport: T,
+        release: &VerifiedRelease,
+        expected: &PhoneId,
+        options: PhoneOptions,
+        token: Option<WriteToken>,
+    ) -> Result<Self> {
+        let dry_run = token.is_none();
         // The override exists for dry runs. A session that could write
         // refuses it whole, before a question is asked of the phone.
-        if options.maintainer_skip_bootloader_slot_check && !options.dry_run {
+        if options.maintainer_skip_bootloader_slot_check && !dry_run {
             return Err(Error::OverrideOutsideDryRun);
         }
         let m: &Manifest = release.manifest();
@@ -537,7 +696,25 @@ impl<T: Transport> Session<T> {
             .map(|w| w.partition.name().to_string())
             .collect();
         flashable.push(m.root_image.partition.name().to_string());
-        let mut client = Client::for_session(transport, flashable, options.dry_run);
+        // The owner's key goes into one image, and only one that carries
+        // no AVB footer: a signed image changed by a byte no longer passes
+        let owner_key = match options.owner_ssh_key {
+            None => None,
+            Some(key) => {
+                let at = ramdisk_write(m).ok_or_else(|| {
+                    Error::Refused("this release has no image that carries slot B's initramfs, so the SSH key can't be added".into())
+                })?;
+                if m.boot_writes[at].partition_size.is_some() {
+                    return Err(Error::Refused(format!(
+                        "{} carries an AVB footer, so the SSH key can't be added to it",
+                        m.boot_writes[at].source
+                    )));
+                }
+                crate::firstboot::check_ssh_key(&key)?;
+                Some((key, at))
+            }
+        };
+        let mut client = Client::for_session(transport, flashable, dry_run);
         let serial = client.getvar("serialno").await?;
         if PhoneId::of_serial(&serial).as_ref() != Some(expected) {
             return Err(Error::Refused(
@@ -586,10 +763,17 @@ impl<T: Transport> Session<T> {
         match (per_slot('a'), per_slot('b'), &options.bootloader_slots_confirmed) {
             (Some(a), Some(b), _) if a == b => {}
             (Some(a), Some(b), _) => return Err(Error::Phone(format!("the bootloader slots differ (a: {a}, b: {b})"))),
-            (_, _, Some(confirmed)) if *confirmed == bootloader => {}
-            (_, _, Some(confirmed)) => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
+            (_, _, Some(confirmed)) if *confirmed != bootloader => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
+            // A reinstall on a phone that runs from slot B: the version it
+            // tells is slot B's own, the bootloader an install that stays on
+            // slot B starts with. Slot A's is not needed (the maintainer's
+            // decision of 2026-11-13)
+            _ if current_slot == "b" && options.reinstall => {
+                client.log.push("bootloader: slot b's, which the phone runs (a reinstall); no slot is switched".into());
+            }
+            (_, _, Some(_)) => {}
             // Only the unknown case, and only in a dry run (checked above too)
-            _ if options.maintainer_skip_bootloader_slot_check && options.dry_run => {
+            _ if options.maintainer_skip_bootloader_slot_check && dry_run => {
                 slot_check_skipped = true;
                 client.log.push("skipped: the bootloader-slot check (maintainer override, dry run only)".into());
             }
@@ -606,6 +790,7 @@ impl<T: Transport> Session<T> {
             )));
         }
         // Each image must fit its slot B partition, a footer image exactly.
+        let mut boot_partition_sizes = Vec::with_capacity(m.boot_writes.len());
         for w in &m.boot_writes {
             let name = w.partition.name();
             let psize = parse_size(&client.getvar(&format!("partition-size:{name}")).await?)
@@ -630,6 +815,7 @@ impl<T: Transport> Session<T> {
                     w.source
                 )));
             }
+            boot_partition_sizes.push(psize);
         }
         let baseband = client
             .getvar("version-baseband")
@@ -649,9 +835,170 @@ impl<T: Transport> Session<T> {
             serial,
             facts,
             state: State::Boot(0),
-            dry_run: options.dry_run,
+            token,
             slot_check_skipped,
+            boot_partition_sizes,
+            userdata_preflight: None,
+            userdata_walk: None,
+            streamed: None,
+            pieces: Vec::new(),
+            clock: None,
+            reach: WriteReach::Nothing,
+            answers: None,
+            answers_sent: Vec::new(),
+            owner_key,
         })
+    }
+
+    /// The owner's answers for this release's root image, before `userdata`
+    /// begins. Only the flow hands them in, from what the owner answered in
+    /// this run. From then on every piece of the root image is checked
+    /// where they go: a piece that covers one of their blocks must carry
+    /// them there, and `userdata` is not finished until each block was sent.
+    pub(crate) fn set_answers(&mut self, answers: RootAnswers) -> Result<()> {
+        if !matches!(self.state, State::Boot(_)) {
+            return Err(Error::Refused(
+                "the answers go in before userdata is begun".into(),
+            ));
+        }
+        if answers.release != self.release.id() {
+            return Err(Error::Refused(
+                "the answers were made for another release".into(),
+            ));
+        }
+        self.answers_sent = vec![false; answers.regions.len()];
+        self.answers = Some(answers);
+        Ok(())
+    }
+
+    /// A phone written without the answers starts with no account and
+    /// nothing to unlock it with: a session that writes takes the root
+    /// image only with them, and only from a release whose image has a
+    /// place for them. A release whose root image offers the install link
+    /// is the exception: the link gives the phone its answers after the
+    /// write, and its image is written as the release signed it, with no
+    /// answers in it (docs/DESIGN.md §12).
+    fn answers_ready(&self) -> Result<()> {
+        if self.is_dry_run() {
+            return Ok(());
+        }
+        if self.release.manifest().install_link.is_some() {
+            return match self.answers {
+                None => Ok(()),
+                Some(_) => Err(Error::Refused(
+                    "this release takes the owner's answers over the install link, not in its image: nothing is written".into(),
+                )),
+            };
+        }
+        if self.release.manifest().root_image.placeholders.is_empty() {
+            return Err(Error::Refused(
+                "this release's system image keeps no place for the owner's answers: nothing is written".into(),
+            ));
+        }
+        if self.answers.is_none() {
+            return Err(Error::Refused(
+                "the owner's answers were not given to this install: nothing is written".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The answers this session puts into the root image, if any.
+    pub fn answers(&self) -> Option<&RootAnswers> {
+        self.answers.as_ref()
+    }
+
+    /// What a piece of the root image writes where the answers go: their
+    /// bytes, or nothing; anything else is refused before it is sent.
+    fn check_answers_in(&mut self, segment: &[u8]) -> Result<()> {
+        let Some(answers) = &self.answers else {
+            return Ok(());
+        };
+        for (i, r) in answers.regions.iter().enumerate() {
+            let first = r.offset / sparse::BLOCK as u64;
+            for (n, want) in r.bytes.chunks(sparse::BLOCK).enumerate() {
+                match sparse::block_in(segment, first + n as u64)? {
+                    sparse::BlockIn::Skipped => {}
+                    sparse::BlockIn::Raw(got) if got == want => self.answers_sent[i] = true,
+                    _ => {
+                        return Err(Error::Refused(format!(
+                            "a piece of the system image carries something else than the owner's answers where {} goes",
+                            r.path
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The phone's size for each boot image's partition, in the plan's
+    /// order, as read by the checks.
+    pub fn boot_partition_sizes(&self) -> &[u64] {
+        &self.boot_partition_sizes
+    }
+    /// What the walk of the root image found, once it was begun.
+    pub fn userdata_walk(&self) -> Option<UserdataWalk> {
+        self.userdata_walk
+    }
+    /// The partitions the gate lets this session's `flash:` name: the
+    /// verified release's (its boot images with `_b`, and `userdata`) in
+    /// the session that writes, and none at all in a dry run, where the
+    /// gate passes no command that writes or stages a write.
+    pub fn may_flash(&self) -> &[String] {
+        &self.client.flashable
+    }
+    /// How far this session's writes got. In a dry run: nothing, always.
+    /// The serial number the session pinned and read again before each
+    /// write. For the flow alone: the install link's serial proof is
+    /// compared against it after the restart (INSTALL-LINK-PLAN §2.5).
+    pub(crate) fn serial(&self) -> &str {
+        &self.serial
+    }
+
+    pub fn reach(&self) -> WriteReach {
+        self.reach
+    }
+    /// Each sparse image of the root image handed to this session so far:
+    /// its size, the blocks its `flash:` covers, and how long that flash
+    /// took. The last one is the piece in doubt when a write stopped: its
+    /// `flash` is `None` until the phone confirms it.
+    pub fn pieces(&self) -> &[PieceReport] {
+        &self.pieces
+    }
+    /// Lend the session a clock (time since any fixed moment), so that it
+    /// can say how long the phone took over each `flash:userdata`. The core
+    /// reads no clock of its own.
+    pub fn time_flashes_with(&mut self, clock: Box<dyn Fn() -> core::time::Duration>) {
+        self.clock = Some(clock);
+    }
+
+    async fn userdata_size(&mut self) -> Result<u64> {
+        parse_size(&self.client.getvar("partition-size:userdata").await?)
+            .ok_or_else(|| Error::Phone("the phone reports no partition-size for userdata".into()))
+    }
+
+    /// Before the first write: the root image, `image_len` bytes unpacked
+    /// (as a dry run of the same release found), must fit `userdata`. The
+    /// boot images were checked at `connect`; with this every image is
+    /// checked against its partition before anything is written. The root
+    /// image that is then streamed must be that size.
+    pub async fn preflight_userdata(&mut self, image_len: u64) -> Result<()> {
+        if self.state != State::Boot(0) {
+            return Err(Error::Refused(
+                "userdata's size is checked before the first write".into(),
+            ));
+        }
+        // Before the first write, so a session without them writes nothing
+        self.answers_ready()?;
+        let size = self.userdata_size().await?;
+        if image_len > size {
+            return Err(Error::Phone(format!(
+                "the root image is {image_len} bytes, larger than userdata ({size} bytes)"
+            )));
+        }
+        self.userdata_preflight = Some(image_len);
+        Ok(())
     }
 
     pub fn facts(&self) -> &PhoneFacts {
@@ -693,7 +1040,7 @@ impl<T: Transport> Session<T> {
     }
     /// Whether this session holds every write back.
     pub fn is_dry_run(&self) -> bool {
-        self.dry_run
+        self.token.is_none()
     }
     /// Whether the maintainer's override skipped the bootloader-slot check.
     /// Such a session is a dry run, and says nothing about a real install.
@@ -732,7 +1079,13 @@ impl<T: Transport> Session<T> {
 
     /// The one place a write is sent: `partition` can only be a name the
     /// verified manifest's rules produced.
-    async fn write(&mut self, partition: &Partition, data: &[u8]) -> Result<()> {
+    /// `Ok(Some(_))`: how long the phone took over the `flash:`, when the
+    /// front end lent a clock and the write was sent.
+    async fn write(
+        &mut self,
+        partition: &Partition,
+        data: &[u8],
+    ) -> Result<Option<core::time::Duration>> {
         if data.len() as u64 > self.facts.max_download_size {
             return Err(Error::Refused(format!(
                 "{} bytes is over the phone's max-download-size",
@@ -740,20 +1093,51 @@ impl<T: Transport> Session<T> {
             )));
         }
         self.still_pinned().await?;
-        if self.dry_run {
+        if self.is_dry_run() {
             self.client.log.push(format!(
                 "would: download {} bytes, flash:{}",
                 data.len(),
                 partition.name()
             ));
-            return Ok(());
+            return Ok(None);
         }
         self.may_write()?;
         self.client.download(data).await?;
+        // From here the partition may be partly written until the phone
+        // confirms: recorded before the command leaves
+        let boots = self.release.manifest().boot_writes.len() as u32;
+        let before = self.reach;
+        self.reach = match before {
+            WriteReach::Nothing => WriteReach::BootImages {
+                done: 0,
+                of: boots,
+                in_doubt: true,
+            },
+            WriteReach::BootImages { done, of, .. } if done < of => WriteReach::BootImages {
+                done,
+                of,
+                in_doubt: true,
+            },
+            WriteReach::BootImages { .. } => WriteReach::Userdata { pieces: 0 },
+            other => other,
+        };
+        let sent = self.clock.as_ref().map(|now| now());
         self.client
             .simple(&format!("flash:{}", partition.name()))
             .await?;
-        Ok(())
+        let took = sent
+            .zip(self.clock.as_ref().map(|now| now()))
+            .map(|(sent, answered)| answered.saturating_sub(sent));
+        self.reach = match self.reach {
+            WriteReach::BootImages { done, of, .. } => WriteReach::BootImages {
+                done: done + 1,
+                of,
+                in_doubt: false,
+            },
+            WriteReach::Userdata { pieces } => WriteReach::Userdata { pieces: pieces + 1 },
+            other => other,
+        };
+        Ok(took)
     }
 
     /// Write the next boot image of the plan to its slot B partition.
@@ -763,6 +1147,9 @@ impl<T: Transport> Session<T> {
                 "boot images are written first, once each".into(),
             ));
         };
+        // Not even slot B's boot images without the answers: the install
+        // they begin could only end in a phone with no account
+        self.answers_ready()?;
         if image.release != self.release.id() {
             return Err(Error::Refused(
                 "the image was verified against another release".into(),
@@ -774,8 +1161,28 @@ impl<T: Transport> Session<T> {
             ));
         }
         let partition = self.release.manifest().boot_writes[next].partition.clone();
-        match self.write(&partition, image.bytes).await {
-            Ok(()) => {
+        // The image that carries the initramfs, with the owner's key: made
+        // here from the verified bytes, checked against its partition and
+        // the download limit before anything of it is sent
+        let keyed = match &self.owner_key {
+            Some((key, at)) if *at == next => {
+                let keyed = crate::ramdisk_key::with_owner_key(image.bytes, key)?;
+                let psize = self.boot_partition_sizes[next];
+                if keyed.len() as u64 > psize || keyed.len() as u64 > self.facts.max_download_size {
+                    return Err(Error::Phone(format!(
+                        "{} with the SSH key is {} bytes, larger than {} ({psize} bytes) or the phone's max-download-size",
+                        self.release.manifest().boot_writes[next].source,
+                        keyed.len(),
+                        partition.name()
+                    )));
+                }
+                Some(keyed)
+            }
+            _ => None,
+        };
+        let bytes = keyed.as_deref().unwrap_or(image.bytes);
+        match self.write(&partition, bytes).await {
+            Ok(_) => {
                 self.state = State::Boot(next + 1);
                 Ok(())
             }
@@ -801,15 +1208,27 @@ impl<T: Transport> Session<T> {
                 "the root image was verified against another release".into(),
             ));
         }
-        let size =
-            parse_size(&self.client.getvar("partition-size:userdata").await?).ok_or_else(|| {
-                Error::Phone("the phone reports no partition-size for userdata".into())
-            })?;
+        if self
+            .userdata_preflight
+            .is_some_and(|checked| checked != image_len)
+        {
+            return Err(Error::Refused(format!(
+                "the root image is {image_len} bytes, not the size that was checked against userdata before the first write"
+            )));
+        }
+        // Again here, for a front end that never asked before the writes
+        self.answers_ready()?;
+        let size = self.userdata_size().await?;
         if image_len > size {
             return Err(Error::Phone(format!(
                 "the root image is {image_len} bytes, larger than userdata ({size} bytes)"
             )));
         }
+        self.userdata_walk = Some(UserdataWalk {
+            image_len,
+            partition_size: size,
+            pieces: 0,
+        });
         self.state = State::Userdata {
             image_len,
             segments: 0,
@@ -826,34 +1245,97 @@ impl<T: Transport> Session<T> {
         else {
             return Err(Error::Refused("no userdata write is open".into()));
         };
-        // A sparse image of exactly this root image, nothing else
-        let header_ok = segment.len() >= 28
-            && segment[0..4] == 0xed26_ff3a_u32.to_le_bytes()
-            && u32::from_le_bytes(segment[12..16].try_into().unwrap()) as u64
-                * u32::from_le_bytes(segment[16..20].try_into().unwrap()) as u64
-                == image_len;
-        if !header_ok {
-            return self.fail(Error::Refused(
-                "not a sparse image of the root image".into(),
-            ));
+        // A sparse image of exactly this root image, nothing else, read
+        // chunk by chunk
+        let cover = match sparse::cover(segment) {
+            Ok(cover) if cover.total_blocks as u64 * sparse::BLOCK as u64 == image_len => cover,
+            _ => {
+                return self.fail(Error::Refused(
+                    "not a sparse image of the root image".into(),
+                ))
+            }
+        };
+        // Bounded in what it makes the phone write, whoever cut it: one
+        // flash never covers more than the phone can be waited for
+        if cover.written_blocks == 0 || cover.written_blocks > sparse::MAX_PIECE_BLOCKS {
+            return self.fail(Error::Refused(format!(
+                "a piece of the root image that writes {} blocks: one flash covers at least 1 and at most {}",
+                cover.written_blocks,
+                sparse::MAX_PIECE_BLOCKS
+            )));
+        }
+        if let Err(e) = self.check_answers_in(segment) {
+            return self.fail(e);
         }
         let partition = self.release.manifest().root_image.partition.clone();
+        // Recorded before it is sent: if the answer never comes, this is
+        // the piece in doubt
+        self.pieces.push(PieceReport {
+            bytes: segment.len() as u64,
+            blocks: cover.written_blocks,
+            flash: None,
+        });
         match self.write(&partition, segment).await {
-            Ok(()) => {
+            Ok(took) => {
+                if let Some(piece) = self.pieces.last_mut() {
+                    piece.flash = took;
+                }
                 self.state = State::Userdata {
                     image_len,
                     segments: segments + 1,
                 };
+                if let Some(walk) = self.userdata_walk.as_mut() {
+                    walk.pieces = segments + 1;
+                }
                 Ok(())
             }
             Err(e) => self.fail(e),
         }
     }
 
+    /// The compressed root image, as it is read: every byte that is cut
+    /// into the pieces this session is handed, in order, from the first.
+    /// The session hashes them, and [`Self::finish_userdata`] refuses
+    /// unless they were the image the signed manifest lists. So the bytes
+    /// that were sent are the bytes that were verified, whatever the proof
+    /// given to [`Self::begin_userdata`] was made from: a file that changed
+    /// between the two readings ends the install before slot B is made
+    /// active. [`crate::install::flash_userdata_with_progress`] feeds this
+    /// and the splitter from the same buffer.
+    pub fn userdata_streamed(&mut self, compressed: &[u8]) {
+        if matches!(self.state, State::Boot(_) | State::Userdata { .. }) {
+            let release = &self.release;
+            self.streamed
+                .get_or_insert_with(|| release.root_image_check())
+                .update(compressed);
+        }
+    }
+
+    /// Every piece was taken. The bytes that were streamed must be the
+    /// signed root image ([`Self::userdata_streamed`]); if they are not,
+    /// the session fails here and slot B is never made active.
     pub async fn finish_userdata(&mut self) -> Result<()> {
         match self.state {
             State::Userdata { segments, .. } if segments > 0 => {
+                let streamed = self
+                    .streamed
+                    .take()
+                    .unwrap_or_else(|| self.release.root_image_check());
+                if let Err(e) = streamed.finish() {
+                    return self.fail(Error::Checksum(format!(
+                        "the root image that was sent to the phone is not the one that was checked before the first write ({e}): slot B is not made active"
+                    )));
+                }
+                if let Some(i) = self.answers_sent.iter().position(|sent| !sent) {
+                    let path = self.answers.as_ref().map_or("", |a| a.regions[i].path);
+                    return self.fail(Error::Refused(format!(
+                        "no piece of the system image carried the owner's answers for {path}: slot B is not made active"
+                    )));
+                }
                 self.state = State::UserdataDone;
+                if !self.is_dry_run() {
+                    self.reach = WriteReach::Written;
+                }
                 Ok(())
             }
             _ => Err(Error::Refused("userdata has not been written".into())),
@@ -870,7 +1352,7 @@ impl<T: Transport> Session<T> {
         if let Err(e) = self.still_pinned().await {
             return self.fail(e);
         }
-        if self.dry_run {
+        if self.is_dry_run() {
             self.client.log.push("would: set_active:b".into());
             self.client.log.push("would: reboot".into());
             self.state = State::Rebooted;
@@ -879,12 +1361,19 @@ impl<T: Transport> Session<T> {
         if let Err(e) = self.may_write() {
             return self.fail(e);
         }
+        self.reach = WriteReach::SlotInDoubt;
         if let Err(e) = self.client.simple("set_active:b").await {
+            // FAIL is the phone's answer: the slot was not changed
+            if matches!(e, Error::DeviceFail { .. }) {
+                self.reach = WriteReach::Written;
+            }
             return self.fail(e);
         }
+        self.reach = WriteReach::SlotSet;
         match self.client.simple("reboot").await {
             Ok(_) => {
                 self.state = State::Rebooted;
+                self.reach = WriteReach::Rebooted;
                 Ok(())
             }
             Err(e) => self.fail(e),
@@ -1184,11 +1673,41 @@ mod tests {
     }
 
     #[test]
-    fn the_default_options_are_a_dry_run() {
-        let options = PhoneOptions::default();
-        assert!(options.dry_run);
-        assert!(!options.reinstall && !options.maintainer_skip_bootloader_slot_check);
-        assert_eq!(options.bootloader_slots_confirmed, None);
+    fn a_slot_whose_bootloader_version_is_empty_is_a_slot_not_reported() {
+        let lines = |a: &str, b: &str| {
+            vec![
+                "version-bootloader:fake-1.0".to_string(),
+                format!("version-bootloader{a}"),
+                format!("version-bootloader{b}"),
+            ]
+        };
+        // Each spelling, with a value: reported
+        for (a, b) in [("-a:", "-b:"), ("_a:", "_b:"), (":a:", ":b:")] {
+            let all = lines(&format!("{a}fake-1.0"), &format!("{b} fake-1.1 "));
+            assert_eq!(slot_bootloader(&all, 'a').as_deref(), Some("fake-1.0"));
+            assert_eq!(slot_bootloader(&all, 'b').as_deref(), Some("fake-1.1"));
+            // The same lines with nothing after the colon, or only spaces:
+            // not reported, so never "both reported and equal"
+            for empty in ["", " ", "\t"] {
+                let all = lines(&format!("{a}{empty}"), &format!("{b}{empty}"));
+                assert_eq!(slot_bootloader(&all, 'a'), None, "{a:?} {empty:?}");
+                assert_eq!(slot_bootloader(&all, 'b'), None, "{b:?} {empty:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_options_say_nothing_and_skip_nothing() {
+        // Whether a session writes is not among them: see `WriteToken`
+        let PhoneOptions {
+            reinstall,
+            bootloader_slots_confirmed,
+            maintainer_skip_bootloader_slot_check,
+            owner_ssh_key,
+        } = PhoneOptions::default();
+        assert!(!reinstall && !maintainer_skip_bootloader_slot_check);
+        assert_eq!(bootloader_slots_confirmed, None);
+        assert_eq!(owner_ssh_key, None);
     }
 
     /// A phone that answers every command with the packets it was given.

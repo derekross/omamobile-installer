@@ -1,0 +1,23 @@
+{
+  "state": "stopped",
+  "stop": "override-in-an-install",
+  "retry": "after-fix",
+  "title": "The bootloader-slot check can't be skipped in an install",
+  "notice": null,
+  "body": [
+    "This run was started to write to a phone, and with the maintainer's override that skips the bootloader-slot check. The override is for dry runs only: nothing is ever written to a phone whose second bootloader copy was not checked.",
+    "Start the installer again without the override, or as a dry run."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "Nothing was sent to a phone.",
+    "Start the installer again once that is done."
+  ],
+  "choices": [],
+  "action": "none"
+}

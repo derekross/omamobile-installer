@@ -1,0 +1,13 @@
+frame: host-05-bye
+bye, id 5
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 4
+len: 18
+offset: 0
+payload sha256: 3a1096cea2939da18daa06212120bea32b7b868a77c27f9a0e8987237148d5d2
+pad byte: no
+frame bytes: 74
+frame sha256: 458e31baff20cf91a4ad2f73decdbd54dcafafac988f68ff2d86796aa71a2d86
+payload: {"t":"bye","id":5}

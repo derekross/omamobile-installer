@@ -20,10 +20,26 @@
 //!   address in the signed build index and decided here, answer by answer.
 //! - [`text`]: what a phone, a server or a file name says, made fit to print
 //!   before it is kept, compared or put on a screen.
+//! - [`flow`]: the install as one state machine for every front end, with
+//!   the write path behind a typed confirmation;
+//! - [`ramdisk_key`]: the owner's SSH key appended to slot B's initramfs, as
+//!   `tools/install-phone` appends it, for the initramfs's rescue SSH.
+//! - [`firstboot`]: the owner's answers as the files a first start reads,
+//!   as the blocks of the root image's placeholders that
+//!   [`install::UserdataStream`] swaps in (docs/DESIGN.md §12), and the
+//!   password's hash the install link carries.
+//! - [`link`]: after the write, the install link (the `omamobile-link`
+//!   crate's host machine) from the phone's first start to a phone that is
+//!   ready, over a transport and a shell the front end lends.
 //!
 //! Nothing here does I/O on its own: bytes come in from the caller, and the
 //! only ways out are the transport trait and, for Google's factory image, a
 //! typed request the front end carries out ([`download::FetchRequest`]).
+
+// The tests' support files (core/tests/support) name this crate from the
+// outside; the unit tests that borrow them see it under the same name.
+#[cfg(test)]
+extern crate self as omamobile_installer_core;
 
 pub mod build_index;
 pub mod bundle;
@@ -31,10 +47,13 @@ pub mod device_conf;
 pub mod download;
 pub mod error;
 pub mod fastboot;
+pub mod firstboot;
 pub mod flow;
 pub mod hash;
 pub mod install;
+pub mod link;
 pub mod manifest;
+pub mod ramdisk_key;
 pub mod signature;
 pub mod sparse;
 pub mod text;

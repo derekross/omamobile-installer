@@ -14,7 +14,7 @@ path = "src/main.rs"
 # for `omamobile-install flow DIR --fake-phone STATE`: the whole install flow
 # with no USB device. That command trusts the test key beside a test bundle,
 # so it is not in a default build.
-fake-phone = []
+fake-phone = ["omamobile-installer-core/pretend-link"]
 
 [[test]]
 name = "flow_fake_phone"
@@ -22,6 +22,22 @@ required-features = ["fake-phone"]
 
 [[test]]
 name = "factory_download"
+required-features = ["fake-phone"]
+
+[[test]]
+name = "json_mode"
+required-features = ["fake-phone"]
+
+[[test]]
+name = "after_write"
+required-features = ["fake-phone"]
+
+[[test]]
+name = "json_link"
+required-features = ["fake-phone"]
+
+[[test]]
+name = "link_fake_phone"
 required-features = ["fake-phone"]
 
 [dependencies]
@@ -33,3 +49,18 @@ pollster = "1"
 # hands over (core/src/download.rs). Blocking, no async runtime; TLS by
 # rustls with the webpki roots. No gzip: the file is fetched as it is.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# The JSON mode's messages (docs/APP.md): the core's Screen as serde
+# serialises it, and the app's lines parsed.
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+# The install link's protocol (the frames and messages the core drives)
+omamobile-link = { path = "../link" }
+# The operating system's randomness: each hello's nonce, and the password's
+# salt (Flow::answers): the core has no source of randomness of its own.
+getrandom = "0.2"
+
+# The JSON mode keeps standard output for the protocol alone: file descriptor
+# 1 is pointed at standard error, so nothing else in the process can print
+# there. `dup2_stdout` is the safe call for that.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "stdio"] }

@@ -6,6 +6,11 @@
 //! on the web), and that is the front end's part.
 //!
 //! Nothing here decides what is sent: it moves the core's bytes.
+#[cfg(not(target_arch = "wasm32"))]
+mod link;
+#[cfg(not(target_arch = "wasm32"))]
+pub use link::UsbLink;
+
 use nusb::transfer::{Bulk, Direction, In, Out};
 use nusb::{Device, Endpoint, Interface};
 use omamobile_installer_core::fastboot::{Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS};
@@ -54,10 +59,15 @@ impl UsbTransport {
     /// Claim the fastboot interface of an opened device.
     pub async fn open(device: &Device) -> Result<Self> {
         let (number, out, inp) = find_fastboot(device)?;
-        let interface = device
-            .claim_interface(number)
-            .await
-            .map_err(usb("claiming the fastboot interface"))?;
+        // Claiming blocks on a syscall. nusb runs that on an async runtime's
+        // blocking pool when awaited, and the tool has no runtime (the
+        // futures are driven by pollster), so on a computer it is waited
+        // for in place; the browser has no blocking call and awaits.
+        #[cfg(not(target_arch = "wasm32"))]
+        let claimed = nusb::MaybeFuture::wait(device.claim_interface(number));
+        #[cfg(target_arch = "wasm32")]
+        let claimed = device.claim_interface(number).await;
+        let interface = claimed.map_err(usb("claiming the fastboot interface"))?;
         let ep_out = interface
             .endpoint::<Bulk, Out>(out)
             .map_err(usb("opening the OUT endpoint"))?;
@@ -72,10 +82,14 @@ impl UsbTransport {
     }
 }
 
-/// How long the phone may take to answer. A flash of one large sparse image
-/// is the slow case.
+/// How long the phone may take to answer. A flash of one sparse image is
+/// the slow case, and the core bounds it: no piece covers more than
+/// `sparse::MAX_PIECE_BLOCKS` blocks (256 MiB), which a phone writing at
+/// `sparse::MIN_WRITE_KIB_PER_SECOND` or faster finishes inside this wait.
+/// The number is the core's, so the two cannot drift apart.
 #[cfg(not(target_arch = "wasm32"))]
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(omamobile_installer_core::sparse::FLASH_WAIT_SECONDS);
 
 impl Transport for UsbTransport {
     async fn send(&mut self, data: &[u8]) -> Result<usize> {

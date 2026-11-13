@@ -1,0 +1,13 @@
+frame: phone-37-error-backup-mismatch
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 36
+len: 130
+offset: 0
+payload sha256: 4cf2eff159f919c85381e3caa45e9662399ad70adf0cc62686cc26a55d81b689
+pad byte: no
+frame bytes: 186
+frame sha256: b52465719a5d93f5bc6acc70c6d6273e1b6a892d881d832caf0de0ee6de0d468
+payload: {"t":"error","re":21,"code":"backup-mismatch","message":"the computer's copy differs from a second read","stage":"firstboot-done"}

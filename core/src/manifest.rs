@@ -23,6 +23,16 @@ pub const SLOT_B_IMAGES: [&str; 5] = [
 /// The images every device has.
 const REQUIRED_IMAGES: [&str; 3] = ["boot", "vendor_boot", "dtbo"];
 pub const FORMAT: u64 = 1;
+/// The files a release's root image keeps a place for, for the owner's
+/// answers (Omarchy Mobile's `rootfs/placeholders`, RELEASES §6.1): the
+/// first-boot answers and the boot hook's switch. Each is one block.
+pub const PLACEHOLDER_PATHS: [&str; 2] = [
+    "/etc/omamobile/firstboot.conf",
+    "/etc/omamobile/boot-update.conf",
+];
+/// A placeholder's size: one 4096-byte block of the ext4 image, at a block
+/// boundary, so it is one whole block of the sparse images too.
+pub const PLACEHOLDER_LEN: u64 = 4096;
 
 /// A partition this installer may write. Only this module makes one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -54,6 +64,15 @@ struct Raw {
     files: Vec<RawFile>,
     #[serde(default)]
     base_url: Option<String>,
+    /// `{"protocol": N}`: the release's root image offers the install link
+    /// at its first start (INSTALL-LINK-PLAN §3.3). Closed, like the plan.
+    #[serde(default)]
+    install_link: Option<RawInstallLink>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallLink {
+    protocol: u32,
 }
 #[derive(Debug, Deserialize)]
 struct RawDevice {
@@ -73,6 +92,20 @@ struct RawRoot {
     size: Option<u64>,
     #[serde(default)]
     compression: Option<String>,
+    /// Absent in releases made before the placeholders: none.
+    #[serde(default)]
+    placeholders: Vec<RawPlaceholder>,
+}
+// What bytes an installer may change in the root image: closed, as the
+// install plan is. A key this installer doesn't know could be a rule about
+// those bytes that it would ignore.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPlaceholder {
+    path: String,
+    offset: u64,
+    length: u64,
+    sha256: String,
 }
 // The install plan is closed: a key this installer doesn't know could be a
 // rule it would ignore, so an unknown one is refused (stricter than
@@ -135,6 +168,18 @@ pub struct BootWrite {
     pub partition_size: Option<u64>,
 }
 
+/// One place the root image keeps for the owner's answers: a file whose
+/// data is `length` bytes at `offset` of the raw (unpacked) image, holding
+/// bytes with this SHA-256 as the release built it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placeholder {
+    /// One of [`PLACEHOLDER_PATHS`].
+    pub path: String,
+    pub offset: u64,
+    pub length: u64,
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootImage {
     pub name: String,
@@ -142,6 +187,16 @@ pub struct RootImage {
     /// Compressed size, when the manifest gives one.
     pub size: Option<u64>,
     pub partition: Partition,
+    /// In the order of their offsets. Empty for a release made before the
+    /// placeholders: such a release has no place for the owner's answers.
+    pub placeholders: Vec<Placeholder>,
+}
+
+impl RootImage {
+    /// The placeholder for `path`, if the release has one.
+    pub fn placeholder(&self, path: &str) -> Option<&Placeholder> {
+        self.placeholders.iter().find(|p| p.path == path)
+    }
 }
 
 /// A manifest that passed every rule.
@@ -160,6 +215,10 @@ pub struct Manifest {
     /// `install.bootloader_slot_probe`, when the manifest states it. It must
     /// agree with the descriptor's `BOOTLOADER_SLOT_PROBE`.
     pub bootloader_slot_probe: Option<bool>,
+    /// `install_link.protocol`: the release's root image offers the install
+    /// link at its first start, speaking this protocol. `None`: it does not,
+    /// and an install ends at the restart, as before the link existed.
+    pub install_link: Option<u32>,
 }
 
 fn err<T>(why: impl Into<String>) -> Result<T> {
@@ -377,6 +436,59 @@ impl Manifest {
         if r.compression.as_deref().is_some_and(|c| c != "zstd") {
             return err("root_image.compression must be zstd");
         }
+        let mut placeholders: Vec<Placeholder> = Vec::with_capacity(r.placeholders.len());
+        for p in r.placeholders {
+            if !PLACEHOLDER_PATHS.contains(&p.path.as_str()) {
+                return err(format!(
+                    "root_image.placeholders names {}, which this installer doesn't fill",
+                    p.path
+                ));
+            }
+            if placeholders.iter().any(|q| q.path == p.path) {
+                return err(format!("root_image.placeholders names {} twice", p.path));
+            }
+            if p.length != PLACEHOLDER_LEN || !p.offset.is_multiple_of(PLACEHOLDER_LEN) {
+                return err(format!(
+                    "{}'s placeholder is not one {PLACEHOLDER_LEN}-byte block at a block boundary",
+                    p.path
+                ));
+            }
+            if !is_sha256_hex(&p.sha256) {
+                return err(format!("{}'s placeholder has no SHA-256", p.path));
+            }
+            if placeholders.iter().any(|q| q.offset == p.offset) {
+                return err("two placeholders are at the same place");
+            }
+            placeholders.push(Placeholder {
+                path: p.path,
+                offset: p.offset,
+                length: p.length,
+                sha256: p.sha256,
+            });
+        }
+        placeholders.sort_by_key(|p| p.offset);
+        // The answers themselves go to firstboot.conf: a release that keeps
+        // places for others but not for it has none for the answers
+        if !placeholders.is_empty() && !placeholders.iter().any(|p| p.path == PLACEHOLDER_PATHS[0])
+        {
+            return err(format!(
+                "root_image.placeholders has none for {}",
+                PLACEHOLDER_PATHS[0]
+            ));
+        }
+        // A link this installer can't speak would leave the phone waiting
+        // for an installer that never comes: refused before anything is done
+        let install_link = match raw.install_link {
+            None => None,
+            Some(l) if l.protocol == omamobile_link::PROTOCOL => Some(l.protocol),
+            Some(l) => {
+                return err(format!(
+                "install_link.protocol is {}; this installer speaks the install link's protocol {}",
+                l.protocol,
+                omamobile_link::PROTOCOL
+            ))
+            }
+        };
 
         Ok(Manifest {
             version: raw.version,
@@ -389,11 +501,13 @@ impl Manifest {
             allowlist: allow,
             boot_writes,
             bootloader_slot_probe: i.bootloader_slot_probe,
+            install_link,
             root_image: RootImage {
                 name: r.name,
                 sha256: r.sha256,
                 size: r.size,
                 partition: Partition::userdata(),
+                placeholders,
             },
         })
     }

@@ -1,0 +1,24 @@
+{
+  "state": "stopped",
+  "stop": "bootloader-slots-stated-other",
+  "retry": "stops-again",
+  "title": "The bootloader version that was stated is not this phone's",
+  "notice": null,
+  "body": [
+    "This run was started with the statement that the bootloader version read from the phone's other system copy is fake-0.9, the same as the copy in use. The copy in use has another version: the phone reports fake-1.0.",
+    "If the version was mistyped, start the installer again with the version that was read from the phone.",
+    "If fake-0.9 is what was read from the other copy, the two copies differ, and Omarchy Mobile can't be installed on this phone as it is. Don't write a bootloader by hand: a wrong one can leave the phone unable to start. Ask at https://github.com/derekross/omarchy-mobile/issues"
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer only asked the phone what it is. It has written nothing to it.",
+    "Starting the installer again as things are will stop here again."
+  ],
+  "choices": [],
+  "action": "none"
+}

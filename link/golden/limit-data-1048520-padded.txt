@@ -1,0 +1,13 @@
+frame: limit-data-1048520-padded
+a data frame that fills 1048576 bytes with its header, so it takes the pad byte
+direction: host to phone
+kind: 2 (data)
+flags: 1
+seq: 101
+len: 1048520
+offset: 0
+payload sha256: 429b307e5621bbf781fc711e8254c1c25cc8a124f621bc6df1ab0099c25c41df
+pad byte: yes
+frame bytes: 1048577
+frame sha256: ec99c0d80266b9a12ec953c8a710d7f0681a7da92abd973d0eff3da40b3d6a4d
+payload: 1048520 bytes: byte i is (i * 31 + 7) mod 251

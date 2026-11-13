@@ -1,0 +1,13 @@
+frame: host-09-firstboot-retry
+firstboot-retry, id 9
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 8
+len: 30
+offset: 0
+payload sha256: b88cfc31af0ed8fd55557308c71d733e59c74871583fffe3ca81c9ed3febd0aa
+pad byte: no
+frame bytes: 86
+frame sha256: 9ad99dae1f9076fb78a844825b10faf423ae1e9e8de3d635ceff0ec2a7ca4d1f
+payload: {"t":"firstboot-retry","id":9}

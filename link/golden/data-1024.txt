@@ -1,0 +1,13 @@
+frame: data-1024
+one frame of the smallest max_data
+direction: phone to host
+kind: 2 (data)
+flags: 0
+seq: 7
+len: 1024
+offset: 2048
+payload sha256: 8dcdcf24d5ee9e222bebf46f1b93b5b923970230faccd3ce268adfd31e3ef19f
+pad byte: no
+frame bytes: 1080
+frame sha256: fd07dde5117fead146b524116b5baaa44bc2e34948fb7faa3e1b4bd4e6aa0afa
+payload: 1024 bytes: byte i is (i * 31 + 7) mod 251

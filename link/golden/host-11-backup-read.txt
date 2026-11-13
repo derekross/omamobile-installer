@@ -1,0 +1,13 @@
+frame: host-11-backup-read
+backup-read, id 11
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 10
+len: 57
+offset: 0
+payload sha256: 1560e5794783bab846ea45fac344cf69e198a5428e42839bb936206e114e3aeb
+pad byte: no
+frame bytes: 113
+frame sha256: 96a1bd96555fdc029ea2faee2de696f79de8b12d94d429f6427f3c6006df0568
+payload: {"t":"backup-read","id":11,"name":"efs","offset":2097152}

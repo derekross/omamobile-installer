@@ -1071,10 +1071,15 @@ dependencies = [
 name = "omamobile-installer-cli"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "nusb",
  "omamobile-installer-core",
  "omamobile-installer-usb",
+ "omamobile-link",
  "pollster",
+ "rustix",
+ "serde",
+ "serde_json",
  "ureq",
 ]
 
@@ -1082,6 +1087,8 @@ dependencies = [
 name = "omamobile-installer-core"
 version = "0.0.1"
 dependencies = [
+ "omamobile-installer-core",
+ "omamobile-link",
  "pgp",
  "pollster",
  "rand",
@@ -1103,14 +1110,35 @@ dependencies = [
 name = "omamobile-installer-web"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "js-sys",
  "nusb",
  "omamobile-installer-core",
  "omamobile-installer-usb",
+ "omamobile-link",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "omamobile-link"
+version = "0.0.1"
+dependencies = [
+ "omamobile-link",
+ "serde_json",
+ "sha2 0.11.1",
+]
+
+[[package]]
+name = "omamobile-linkd"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "nusb",
+ "omamobile-link",
+ "rustix",
 ]
 
 [[package]]

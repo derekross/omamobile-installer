@@ -1,0 +1,159 @@
+{
+  "device": {
+    "codename": "cheetah",
+    "name": "Pixel 7 Pro"
+  },
+  "files": [
+    {
+      "path": "MANIFEST",
+      "sha256": "844ed153759a76cee014f1013660b7febdacf9e17806d49a1b410c0ab773a09d",
+      "size": 194
+    },
+    {
+      "path": "device.conf",
+      "sha256": "d0d81efd9c0b395d41d77403dcb0f3d81467aa5060cc2524ce6bfb4b52f8746c",
+      "size": 389
+    },
+    {
+      "path": "images/boot.img",
+      "sha256": "de7f913bd32e101b8c79cedcb009427d58dd3801c31a4cc324bbf15c20bd0191",
+      "size": 16384
+    },
+    {
+      "path": "images/init_boot.img",
+      "sha256": "25daeef7cbe87de76f45f7d160723ca73407c1375473bbffb78fc8b438cc4881",
+      "size": 8192
+    },
+    {
+      "path": "images/vendor_boot.img",
+      "sha256": "2fa14f4e4819e5eeefa2f614ba5cfb5a2d84414177a3dfa175fa732d79ad60e2",
+      "size": 4096
+    },
+    {
+      "path": "images/vendor_kernel_boot.img",
+      "sha256": "e4aca6430cdb6bdcc2d2b8c9c78456c480c3ffa29fc9d2839623ee63903eb161",
+      "size": 12288
+    },
+    {
+      "path": "images/dtbo.img",
+      "sha256": "06f3da0c0747db3d737fe6f2ed329ccc0c4da090e4619948cb022e1cca00bf15",
+      "size": 4096
+    },
+    {
+      "path": "omamobile.gpg",
+      "sha256": "7d9e533125718f44c8e7460031255777356df69ca0ee7c3d198313328cd12809",
+      "size": 215
+    },
+    {
+      "path": "tools/nv-backup",
+      "sha256": "ce124eda210da28727c26518f3d0437902dfd6d288ffea243fa7dec4a60bb735",
+      "size": 621
+    },
+    {
+      "path": "tools/phone-provision",
+      "sha256": "fb443a7dd1b2ab92807045e7ff48a73ff2af9e1651ef66599dce7f0937bd4d7e",
+      "size": 747
+    },
+    {
+      "path": "tools/phone-smoke",
+      "sha256": "b1effec5962609f0b983714fd49bc8d5228823adbd25a4ae8146ecea0f26a230",
+      "size": 602
+    },
+    {
+      "path": "tools/phone-ssh",
+      "sha256": "eda39228207bb52d577412c6112d37f45a3bbc9d452f5f567aea5ef2d9c9aef5",
+      "size": 2883
+    },
+    {
+      "path": "factory-builds.json",
+      "sha256": "8345cb4c3a4d0abf16f489ee53078ab483a7acbd3b6b9270dd3177f782682875",
+      "size": 2545
+    }
+  ],
+  "format": 1,
+  "install": {
+    "after": [
+      "set-active b",
+      "reboot"
+    ],
+    "never": [
+      "slot A (any *_a partition)"
+    ],
+    "product": "cheetah",
+    "require_matching_bootloader_slots": true,
+    "require_unlocked_bootloader": true,
+    "storage_guard_allowlist": [
+      "boot_b",
+      "init_boot_b",
+      "vendor_boot_b",
+      "vendor_kernel_boot_b",
+      "dtbo_b",
+      "userdata"
+    ],
+    "tool": "fastboot",
+    "writes": [
+      {
+        "partition": "boot_b",
+        "partition_size": 16384,
+        "size": 16384,
+        "source": "images/boot.img"
+      },
+      {
+        "partition": "init_boot_b",
+        "partition_size": 8192,
+        "size": 8192,
+        "source": "images/init_boot.img"
+      },
+      {
+        "partition": "vendor_boot_b",
+        "partition_size": null,
+        "size": 4096,
+        "source": "images/vendor_boot.img"
+      },
+      {
+        "partition": "vendor_kernel_boot_b",
+        "partition_size": null,
+        "size": 12288,
+        "source": "images/vendor_kernel_boot.img"
+      },
+      {
+        "partition": "dtbo_b",
+        "partition_size": null,
+        "size": 4096,
+        "source": "images/dtbo.img"
+      },
+      {
+        "erases_userdata": true,
+        "partition": "userdata",
+        "source": "root_image"
+      }
+    ]
+  },
+  "kernel": {
+    "commit": "000000000000",
+    "release": "7.3.0-test"
+  },
+  "label": "test",
+  "name": "Omarchy Mobile",
+  "root_image": {
+    "compression": "zstd",
+    "name": "omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst",
+    "placeholders": [
+      {
+        "length": 4096,
+        "offset": 1228800,
+        "path": "/etc/omamobile/boot-update.conf",
+        "sha256": "737979ebb165080516b1392e2f72a246838e3811d5efc1fa70ed43c598e9b978"
+      },
+      {
+        "length": 4096,
+        "offset": 1236992,
+        "path": "/etc/omamobile/firstboot.conf",
+        "sha256": "ff50b348fd624be4aa4217370b18b9bf94b608046a424cf55d4030020484d2ff"
+      }
+    ],
+    "sha256": "00d676de0e13e6b785ca6f4ba8f1a53fd3cc469da334390ed14a1ea6a5f1c14a",
+    "size": 1597234
+  },
+  "version": "2026.01.02"
+}

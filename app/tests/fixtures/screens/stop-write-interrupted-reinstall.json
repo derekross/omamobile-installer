@@ -1,0 +1,25 @@
+{
+  "state": "stopped",
+  "stop": "write-interrupted",
+  "retry": "whenever",
+  "title": "The install stopped partway",
+  "notice": null,
+  "body": [
+    "The install did not run through (USB: the phone left the bus).",
+    "The connection to the phone was lost. Check the cable, and don't unplug the phone or press its keys while the installer writes."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The install stopped while it was writing slot B's boot images: 1 of 5 were written, and the next one may be partly written.",
+    "userdata was not written: what the phone had stored is still there.",
+    "The phone was running from slot B, which is the slot being written, so it may not start until an install has run through.",
+    "Bring the phone to Fastboot Mode and start the installer again: it checks the phone again and writes every image again, from the first."
+  ],
+  "choices": [],
+  "action": "none"
+}

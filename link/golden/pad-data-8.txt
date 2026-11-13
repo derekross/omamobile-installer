@@ -1,0 +1,13 @@
+frame: pad-data-8
+the shortest data frame with the pad byte: 56 + 8 = 64
+direction: phone to host
+kind: 2 (data)
+flags: 1
+seq: 9
+len: 8
+offset: 0
+payload sha256: 66840dda154e8a113c31dd0ad32f7f3a366a80e8136979d8f5a101d3d29d6f72
+pad byte: yes
+frame bytes: 65
+frame sha256: ee4be390c7e438947b95646c5c72d58691db4a7f127447342dfabdc7b8f9e97a
+payload: 8 bytes, hex 0102030405060708

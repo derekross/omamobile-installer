@@ -10,12 +10,26 @@
 <body>
 <main>
 <h1>Omarchy Mobile installer <small>preview</small></h1>
-<p id="banner" class="banner">This is a preview. It cannot write to a phone: it goes through the steps of an install, asks the phone what it is, and ends by listing what an install would write.</p>
+<p id="banner" class="banner">This is a preview. It cannot write to a phone: it downloads the release and checks it against the release key's signature, goes through the steps of an install, asks the phone what it is, and ends by listing what an install would write.</p>
 
 <section id="status">
 <p id="core" class="pending">loading the installer</p>
 <p id="release" class="pending">waiting for the installer</p>
 <p id="options" hidden><label id="scenario-label" hidden>A pretend phone: <select id="scenario"></select></label> <label><input id="reinstall" type="checkbox"> slot B already holds Omarchy Mobile (a reinstall)</label> <button id="restart" type="button">Start over</button></p>
+</section>
+
+<section id="release-panel" hidden>
+<h2>The release</h2>
+<p><label>The phone: <select id="device"></select></label></p>
+<p id="release-from" class="pending">No release yet.</p>
+<div class="actions">
+<button id="download-release" type="button" disabled>Download and check the release</button>
+<button id="delete-release" type="button">Delete the downloaded release</button>
+</div>
+<progress id="release-progress" max="1" value="0" hidden></progress>
+<p id="release-state"></p>
+<p id="release-note"></p>
+<p>Or a release saved on this computer, read here and not uploaded: <label>its files, or its .tar <input type="file" id="bundle-files" multiple></label> <label>its folder <input type="file" id="bundle-folder" webkitdirectory></label></p>
 </section>
 
 <ol id="progress" hidden>
@@ -24,6 +38,7 @@
 <li data-state="google-terms factory-image">Google's factory image</li>
 <li data-state="answers">About you</li>
 <li data-state="dry-run done">The dry run</li>
+<li data-state="first-start pair setup radio-backup factory-send provision restart check ready">The phone's setup</li>
 </ol>
 
 <section id="screen" hidden aria-live="polite"></section>

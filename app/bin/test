@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Builds and runs the Qt Test binary. Offscreen: no window opens on the
+# desktop. Most tests run against the stand-in in tests/. The rest run
+# against the real tool, `omamobile-install json`, built here with cargo and
+# its pretend phone (the `fake-phone` feature): no phone and no USB either
+# way, and nothing is fetched but crates for that build. Without cargo those
+# tests are skipped, and this script and the test run both say so.
+# OMAINSTALL_SHOTS=DIR also saves screenshots there.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+REPO="$(CDPATH= cd -- "$ROOT/.." && pwd)"
+
+# The real tool, with the pretend phone. A tool named from outside is used
+# as it is: it must be a `fake-phone` build, since the tests start it with
+# --fake-phone.
+if [ -n "${OMAINSTALL_REAL_TOOL:-}" ]; then
+    echo "Using the real tool at $OMAINSTALL_REAL_TOOL"
+elif command -v cargo >/dev/null 2>&1; then
+    echo "Building omamobile-install with its pretend phone (cargo)"
+    (cd "$REPO" && cargo build --locked -p omamobile-installer-cli --features fake-phone)
+    target="${CARGO_TARGET_DIR:-$REPO/target}"
+    OMAINSTALL_REAL_TOOL="$target/debug/omamobile-install"
+    [ -x "$OMAINSTALL_REAL_TOOL" ] || { echo "cargo built no $OMAINSTALL_REAL_TOOL" >&2; exit 1; }
+else
+    echo "SKIPPED: cargo was not found, so the tests against the real omamobile-install are skipped." >&2
+    echo "         Only the tests against the stand-in run." >&2
+    OMAINSTALL_REAL_TOOL=
+fi
+export OMAINSTALL_REAL_TOOL
+
+mkdir -p "$ROOT/build/tests"
+cd "$ROOT/build/tests"
+
+qmake6 "$ROOT/tests/omainstall_tests.pro"
+make -j"$(nproc)"
+# QML warnings go to the journal unless told otherwise, and a test that
+# loads the window fails on any of them.
+QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_FORCE_STDERR_LOGGING=1 \
+    ./omainstall_tests "$@"
