@@ -36,7 +36,8 @@ ApplicationWindow {
     // A step is in hand: the tool was given something and has not answered.
     readonly property bool stepRunning: backend.busy && backend.hasScreen
     readonly property bool knownAction: ["acknowledge", "read-phone", "slot-b", "accept-terms", "download", "take-file",
-                                         "answers", "dry-run", "confirm", "write", "none"].indexOf(action) >= 0
+                                         "answers", "dry-run", "confirm", "write", "none",
+                                         "link", "wait", "pair", "backup-dir", "retry"].indexOf(action) >= 0
     readonly property bool wantsFile: action === "download" || action === "take-file"
     // The keys below must not take a letter meant for a field, or Space and
     // Enter meant for the button that has the focus.
@@ -51,7 +52,9 @@ ApplicationWindow {
         { label: qsTr("Factory image"), states: ["google-terms", "factory-image"] },
         { label: qsTr("About you"), states: ["answers"] },
         { label: qsTr("Dry run"), states: ["dry-run", "done"] }
-    ].concat(backend.writes ? [{ label: qsTr("Install"), states: ["confirm", "write", "installed"] }] : [])
+    ].concat(backend.writes ? [{ label: qsTr("Install"), states: ["confirm", "write", "installed"] },
+                               { label: qsTr("Setup"), states: ["first-start", "pair", "setup", "radio-backup",
+                                                                 "factory-send", "provision", "restart", "check", "ready"] }] : [])
     readonly property int stage: {
         for (let i = 0; i < stages.length; i++)
             if (stages[i].states.indexOf(backend.state) >= 0)
@@ -75,6 +78,11 @@ ApplicationWindow {
         // answered): the app sends them itself once the codename is taken.
         case "write": return backend.busy ? "" : qsTr("Look for the phone again")
         case "none": return qsTr("Close")
+        case "pair": return qsTr("Pair with the phone")
+        case "backup-dir": return qsTr("Choose a folder…")
+        case "retry": return qsTr("Try again")
+        // The phone works by itself: there is nothing to press
+        case "link": case "wait": return ""
         }
         return ""
     }
@@ -95,13 +103,19 @@ ApplicationWindow {
     }
     readonly property string progressLabel: {
         if (!backend.hasProgress)
-            return qsTr("Waiting for the installer…")
+            return backend.phoneWorking ? qsTr("Waiting for the phone") : qsTr("Waiting for the installer…")
         switch (backend.progressWhat) {
         case "download": return qsTr("Downloading")
         case "check": return qsTr("Checking the file")
         case "dry-run": return qsTr("Running the dry run")
         case "verify": return qsTr("Checking the release's files")
         case "write": return qsTr("Writing to the phone")
+        case "link-wait": return qsTr("Waiting for the phone")
+        case "firstboot": return qsTr("The phone sets itself up")
+        case "backup": return qsTr("Copying the radio partitions")
+        case "factory-send": return qsTr("Sending the factory image")
+        case "factory-check": return qsTr("The phone checks the file")
+        case "provision": return qsTr("The phone installs its firmware")
         }
         return qsTr("Working")
     }
@@ -115,6 +129,8 @@ ApplicationWindow {
             screenView.submitAnswers()
         else if (action === "confirm")
             backend.confirmInstall(codenameField.text)
+        else if (action === "pair")
+            backend.pair(pairField.text)
         else if (action === "none")
             win.close()
         else
@@ -477,8 +493,25 @@ ApplicationWindow {
                         // Gone with the step, like the answers.
                         onVisibleChanged: text = ""
                     }
+                    // Where the core asks for the code the phone's screen
+                    // shows. Handed in as typed: the phone decides.
+                    TextField {
+                        id: pairField
+                        objectName: "pairCode"
+                        visible: win.action === "pair" && !win.toolFailed
+                        Layout.preferredWidth: 220
+                        Material.roundedScale: Math.min(4, theme.radius)
+                        placeholderText: qsTr("Six-digit code")
+                        font.family: "monospace"
+                        font.pixelSize: 16
+                        inputMethodHints: Qt.ImhDigitsOnly
+                        maximumLength: 12
+                        enabled: !backend.busy
+                        onAccepted: win.primary()
+                        onVisibleChanged: { text = ""; if (visible) forceActiveFocus() }
+                    }
                     Text {
-                        visible: primaryButton.visible && primaryButton.enabled && !codenameField.visible
+                        visible: primaryButton.visible && primaryButton.enabled && !codenameField.visible && !pairField.visible
                         text: "Space"
                         color: "#77777f"
                         font.family: "monospace"
@@ -492,7 +525,8 @@ ApplicationWindow {
                         text: win.primaryLabel
                         // The codename is typed first: an empty field is no go-ahead.
                         // And no new run while a tool that failed may still be writing.
-                        enabled: ((!backend.busy && (win.action !== "confirm" || codenameField.text !== "")) || win.toolFailed) && !backend.writing
+                        enabled: ((!backend.busy && (win.action !== "confirm" || codenameField.text !== "")
+                                   && (win.action !== "pair" || pairField.text !== "")) || win.toolFailed) && !backend.writing
                         onClicked: win.primary()
                     }
                 }

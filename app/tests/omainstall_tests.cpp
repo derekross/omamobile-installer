@@ -50,6 +50,9 @@ public:
 const QString Release = QDir(Tests + "/../../fixtures/selftest").absolutePath();
 const QString ZipName = QStringLiteral("cheetah-test.260101.001-factory-31c2322a.zip");
 const QString Zip = Release + "/factory/" + ZipName;
+// The same test release, whose root image offers the install link.
+const QString ReleaseLink = QDir(Tests + "/../../fixtures/selftest-link").absolutePath();
+const QString ZipLink = ReleaseLink + "/factory/" + ZipName;
 
 // `omamobile-install json`, the real one, as the app starts it: through a
 // small script that adds what only a test may add, the pretend phones (and
@@ -444,7 +447,7 @@ private slots:
         QCOMPARE(sent.count(), 2);
         QVERIFY(oneLine(sent.at(0).at(0).toByteArray()));
         QCOMPARE(json(sent.at(0).at(0).toByteArray()),
-                 (QJsonObject{{"type", "hello"}, {"protocol", 3}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
+                 (QJsonObject{{"type", "hello"}, {"protocol", 4}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
         QCOMPARE(json(sent.at(1).at(0).toByteArray()), (QJsonObject{{"type", "start"}, {"reinstall", false}}));
 
         Backend again;
@@ -817,7 +820,7 @@ private slots:
         QTest::newRow("a screen that lacks a field") << QByteArray("odd-screen") << "malformed" << "sent something this app cannot read" << "the screen has no \"footer\"";
         QTest::newRow("an unknown message") << QByteArray("unknown") << "malformed" << "sent something this app cannot read" << "a kind this app does not know";
         QTest::newRow("an unexpected exit") << QByteArray("exit") << "crashed" << "stopped unexpectedly (exit status 3)" << "stand-in: leaving, as the test asked";
-        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 3" << "";
+        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 4" << "";
         QTest::newRow("another kind of run") << QByteArray("other-mode") << "mode" << "started a run that can write" << "";
         QTest::newRow("a fatal message") << QByteArray("fatal") << "fatal" << "reported that it failed" << "the release could not be read";
         QTest::newRow("no hello") << QByteArray("silent") << "silent" << "did not say hello" << "";
@@ -861,7 +864,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":3,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":4,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "printf '{\"type\":\"screen\",\"screen\":%s}\\n' \"$(tr -d '\\n' < '" + Tests.toUtf8() + "/fixtures/screens/phone.json')\"\n"
                      "read action\n"
@@ -1432,7 +1435,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":3,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":4,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "cat <<'END'\n"
                      + QJsonDocument(QJsonObject{{"type", "screen"}, {"screen", screen}}).toJson(QJsonDocument::Compact) + "\nEND\n"
@@ -2527,6 +2530,75 @@ private slots:
     // saves them under docs/screens (OMAINSTALL_SCREENS); a plain test run
     // makes them in a scratch directory, so that the walk itself is tested.
     // The accent is the fallback one, and everything typed is made up.
+
+    // After the write, the install link, in the window, against the real
+    // tool's pretend phones: the first start, the code, the radio backup
+    // into a folder, the factory image, the firmware, the restart, ready.
+    // With OMAINSTALL_SCREENS set, a picture of each screen of it.
+    void theScreensOfTheInstallLink() {
+        if (!RealTool::built())
+            QSKIP("SKIPPED: no real tool (bin/test found no cargo to build omamobile-install with).");
+        QTemporaryDir scratch;
+        const QString wanted = qEnvironmentVariable("OMAINSTALL_SCREENS");
+        const QString out = wanted.isEmpty() ? scratch.path() : wanted;
+        QVERIFY(QDir().mkpath(out));
+        RealTool tool("ready");
+        QVERIFY(tool.ok);
+        Backend backend;
+        backend.setReleaseDirectory(ReleaseLink);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        QStringList shot;
+        auto shoot = [&](const QString &name) {
+            QQuickItem *view = w.find("screenView");
+            if (view)
+                view->setProperty("contentY", 0);
+            w.settle();
+            if (w.window->grabWindow().save(out + "/" + name + ".png"))
+                shot << name;
+        };
+        // Each screen the phone works through, once, as it arrives
+        QStringList states;
+        const auto seen = connect(&backend, &Backend::screenChanged, this, [&] {
+            const QString state = backend.state();
+            if (!backend.phoneWorking() || states.contains(state))
+                return;
+            states << state;
+            const QStringList order{"first-start", "pair", "setup", "radio-backup", "factory-send", "provision", "restart", "check"};
+            shoot(QStringLiteral("4%1-%2").arg(order.indexOf(state)).arg(state));
+        });
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", ZipLink));
+        QVERIFY(backend.confirmInstall("cheetah"));
+        // The write, then the link by itself, up to the code
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy() && backend.state() == "pair", 60000);
+        QCOMPARE(backend.action(), QString("pair"));
+        QVERIFY(w.shown("pairCode"));
+        QVERIFY(!backend.pretendShows().isEmpty());
+        shoot("48-pair-the-code");
+        w.find("pairCode")->setProperty("text", "000000" == backend.pretendShows() ? "111111" : "000000");
+        QVERIFY(w.click("primaryButton"));
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy() && backend.action() == "pair", 20000);
+        QVERIFY(!backend.screen().value("problem").toString().isEmpty());
+        shoot("49-pair-a-wrong-code");
+        w.find("pairCode")->setProperty("text", backend.pretendShows());
+        QVERIFY(w.click("primaryButton"));
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy() && backend.action() == "backup-dir", 20000);
+        QCOMPARE(backend.state(), QString("radio-backup"));
+        shoot("50-radio-backup-choose-a-folder");
+        QVERIFY(backend.backupDir(scratch.filePath("backup")));
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy() && backend.state() == "ready", 60000);
+        disconnect(seen);
+        shoot("51-ready");
+        QCOMPARE(backend.action(), QString("none"));
+        for (const char *state : {"first-start", "setup", "radio-backup", "factory-send", "provision", "restart", "check"})
+            QVERIFY2(states.contains(state), state);
+        QVERIFY(QFile::exists(scratch.filePath("backup/SHA256SUMS")));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        qInfo().noquote() << "saved" << shot.join(", ");
+    }
 
     void theScreensOfAPretendInstall() {
         if (!RealTool::built())
