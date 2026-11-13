@@ -13,7 +13,11 @@ default = ["openpgp"]
 openpgp = ["omamobile-installer-core/openpgp"]
 # Builds the fake phone from core/tests/support into the module so a headless
 # browser can run an install against it. Never in a release build.
-selftest = []
+selftest = ["link-preview", "omamobile-installer-core/pretend-link"]
+# The install link's screens and its WebUSB transport (web/src/link.rs,
+# web/src/link_webusb.rs): the preview build only (web/build.sh preview, and
+# the self-test's). Never in the page as it ships (tools/check-shipping).
+link-preview = ["dep:omamobile-link"]
 
 [dependencies]
 omamobile-installer-core = { path = "../core", default-features = false }
@@ -23,7 +27,8 @@ serde_json = "1"
 # A salt for the password's hash, from the browser's crypto.getRandomValues
 # (the "js" backend): the core has no source of randomness.
 getrandom = { version = "0.2", features = ["js"] }
+omamobile-link = { path = "../link", optional = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Navigator", "Window", "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions"] }
+web-sys = { version = "0.3", features = ["Navigator", "Window", "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions", "UsbConfiguration", "UsbInterface", "UsbAlternateInterface", "UsbEndpoint", "UsbEndpointType", "UsbDirection", "UsbInTransferResult", "UsbTransferStatus", "Blob"] }

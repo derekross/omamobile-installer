@@ -31,13 +31,14 @@
 //! for the maintainer's override.
 use crate::after::{self, After, Seams};
 use crate::{
-    default_work_dir, download_factory_zip, is_fastboot, parse_proxy, piece_line, take_factory_zip,
-    walk_images, Bundle, Fetcher, Res, Watch,
+    download_factory_zip, is_fastboot, parse_proxy, piece_line, take_factory_zip, walk_images,
+    Bundle, Fetcher, Res, Watch,
 };
 use omamobile_installer_core::fastboot::{PhoneId, PieceReport, Transport};
 use omamobile_installer_core::flow::{
     AnswerField, AnswerProblem, AnswersInput, Flow, FlowOptions, OwnerAnswers, SlotBHolds,
 };
+use omamobile_installer_core::link::LinkTransport;
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_core::Error;
 use omamobile_installer_usb::UsbTransport;
@@ -53,7 +54,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The protocol this tool speaks (docs/APP.md §3).
-pub const PROTOCOL: u64 = 4;
+pub const PROTOCOL: u64 = 5;
 /// A line longer than this is not a message of this protocol.
 const LONGEST_LINE: usize = 1 << 20;
 
@@ -454,6 +455,8 @@ struct Connected {
 /// Where the phones are: USB, or a pretend build's memory.
 trait Phones {
     type Link: Transport;
+    /// The install link after the write.
+    type After: LinkTransport;
     /// The phones in Fastboot Mode now.
     fn look(&mut self) -> Res<Vec<Connected>>;
     /// Open the `nth` phone of the last look.
@@ -467,6 +470,52 @@ trait Phones {
         _release: &omamobile_installer_core::bundle::VerifiedRelease,
     ) {
     }
+    /// The way to the phone's install link, and the clock the run goes by.
+    fn after(&mut self) -> (Self::After, crate::link::Clock);
+    /// What the phone's screen shows to type: a pretend phone's code, for
+    /// the tests. A real phone's code is read off its screen by the owner.
+    fn shows(_link: &Self::After) -> Option<String> {
+        None
+    }
+}
+
+/// The app's side of a run of the install link: each new screen while the
+/// phone works by itself, the steps' progress, and a quit (or the end of
+/// the input) that leaves the run where it is, with the record kept.
+struct LinkWire<'a> {
+    wire: Wire<'a>,
+}
+
+impl crate::link::LinkUi for LinkWire<'_> {
+    fn screen(&mut self, screen: &omamobile_installer_core::flow::Screen) {
+        say(json!({"type": "screen", "screen": screen}));
+    }
+    fn progress(&mut self, what: &'static str, done: u64, total: u64) {
+        self.wire.progress(what, done, total);
+    }
+    fn go_on(&mut self) -> bool {
+        if DEAF.load(Ordering::SeqCst) {
+            return false;
+        }
+        loop {
+            match self.wire.lines.front() {
+                Front::Other => return true,
+                Front::Quit => return false,
+                // Nothing to cancel in the link: ignored
+                Front::Cancel => {
+                    self.wire.lines.ahead.pop_front();
+                }
+            }
+        }
+    }
+}
+
+/// The install link, once the write ran through (or a run goes on from the
+/// record).
+struct AfterWrite<L> {
+    flow: omamobile_installer_core::link::LinkFlow,
+    transport: L,
+    shell: Option<crate::link::FileShell<()>>,
 }
 
 #[derive(Default)]
@@ -476,6 +525,11 @@ struct Usb {
 
 impl Phones for Usb {
     type Link = UsbTransport;
+    type After = omamobile_installer_usb::UsbLink;
+
+    fn after(&mut self) -> (Self::After, crate::link::Clock) {
+        (Default::default(), crate::link::Clock::Real(Instant::now()))
+    }
 
     fn look(&mut self) -> Res<Vec<Connected>> {
         self.seen = nusb::MaybeFuture::wait(nusb::list_devices())?
@@ -584,6 +638,27 @@ impl Pretend {
 #[cfg(feature = "fake-phone")]
 impl Phones for Pretend {
     type Link = crate::fake::FakePhone;
+    type After = omamobile_installer_core::link::pretend::PretendPhone;
+
+    fn after(&mut self) -> (Self::After, crate::link::Clock) {
+        use omamobile_installer_core::link::pretend::{Clock, PretendPhone};
+        // The phone the write restarted, speaking the install link: the
+        // protocol crate's stand-in for its daemon, on a clock of its own.
+        // Its serial is the pretend phone's that was written.
+        let serial = self
+            .phones
+            .iter()
+            .find(|p| p.opened > 0)
+            .map_or_else(|| "FAKESERIAL0001".to_string(), |p| p.serial.clone());
+        let clock = Clock::default();
+        let mut phone = PretendPhone::first_start(&serial, "cheetah", clock.clone(), 1);
+        crate::pretend_link_options(&mut phone);
+        (phone, crate::link::Clock::Pretend(clock))
+    }
+
+    fn shows(link: &Self::After) -> Option<String> {
+        link.shows()
+    }
 
     fn look(&mut self) -> Res<Vec<Connected>> {
         Ok(self
@@ -654,6 +729,77 @@ impl Phones for Pretend {
 
 // ---- The flow, message by message ----------------------------------------------
 
+/// Why `answers` was not taken.
+enum AnswersRefused {
+    /// The rules' problems, each under its field: said as `problems`.
+    Problems(Vec<AnswerProblem>),
+    /// Not the message the protocol says.
+    Malformed(String),
+}
+
+impl From<AnswersRefused> for Box<dyn std::error::Error> {
+    fn from(e: AnswersRefused) -> Self {
+        match e {
+            AnswersRefused::Malformed(m) => m.into(),
+            AnswersRefused::Problems(p) => p
+                .iter()
+                .map(|p| p.message.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+        }
+    }
+}
+
+/// `answers`: the seven fields, as text, and the three the install link
+/// carries besides (`ssh_key`, `full_name`, `email`), each text or left out.
+fn answers_of(
+    message: &Map<String, Value>,
+) -> Result<(OwnerAnswers, crate::Extra), AnswersRefused> {
+    let field = |name: &str| {
+        text(message, name).ok_or_else(|| {
+            AnswersRefused::Malformed(format!(
+                "answers needs all seven fields as text, and \"{name}\" is missing or is not text."
+            ))
+        })
+    };
+    let optional = |name: &str| match message.get(name) {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(AnswersRefused::Malformed(format!(
+            "\"{name}\" in answers is text, or left out."
+        ))),
+    };
+    let input = AnswersInput {
+        username: field("username")?,
+        password: field("password")?,
+        password_again: field("password_again")?,
+        hostname: field("hostname")?,
+        timezone: field("timezone")?,
+        wifi_ssid: field("wifi_ssid")?,
+        wifi_psk: field("wifi_psk")?,
+    };
+    let extra = crate::Extra {
+        ssh_key: optional("ssh_key")?,
+        full_name: optional("full_name")?,
+        email: optional("email")?,
+    };
+    let zones = Path::new("/usr/share/zoneinfo");
+    match OwnerAnswers::check(&input) {
+        // The core checks the zone's shape; this computer knows the zones
+        Ok(_) if zones.is_dir() && !zones.join(input.timezone).is_file() => {
+            Err(AnswersRefused::Problems(vec![AnswerProblem {
+                field: AnswerField::Timezone,
+                message:
+                    "That isn't a time zone this computer knows (they look like Europe/Paris)."
+                        .into(),
+            }]))
+        }
+        Ok(answers) => Ok((answers, extra)),
+        Err(problems) => Err(AnswersRefused::Problems(problems)),
+    }
+}
+
 /// The release's files and the keys that may have signed them.
 type Trust = fn(&Path) -> Res<(Bundle, TrustedKeys)>;
 
@@ -678,10 +824,17 @@ fn test_key(dir: &Path) -> Res<(Bundle, TrustedKeys)> {
 /// Why the mode ends other than by `quit`.
 struct Fatal(String);
 
-struct Started {
+struct Started<L> {
     flow: Flow,
     /// The release's directory, for the images a dry run walks.
     dir: PathBuf,
+    /// The owner's answers and what the link carries besides, in memory
+    /// only, until the install link has given them to the phone.
+    kept: Option<(OwnerAnswers, crate::Extra)>,
+    /// The owner's factory image as checked, for the link to read.
+    zip: Option<PathBuf>,
+    /// After the write: the install link. From then on the screens are its.
+    after: Option<AfterWrite<L>>,
 }
 
 struct Driver<P: Phones> {
@@ -696,7 +849,7 @@ struct Driver<P: Phones> {
     may_write: bool,
     lines: Lines,
     greeted: bool,
-    started: Option<Started>,
+    started: Option<Started<P::After>>,
     /// Every phone this run has listed. A phone's `id` on the wire is its
     /// place in this list, from 1: a name made up for this run.
     listed: Vec<String>,
@@ -707,8 +860,6 @@ struct Driver<P: Phones> {
     seams: Option<Seams>,
     /// The key the phone will take from this computer.
     key: Option<after::Key>,
-    /// The factory image this run checked, where it is on this computer.
-    factory_path: Option<PathBuf>,
     /// The steps after the write, once the write is done or a record of
     /// unfinished ones was found at `start`. While it is here, its screen
     /// is the one on show.
@@ -742,7 +893,11 @@ impl<P: Phones> Driver<P> {
         if let Some(after) = &self.after {
             say(json!({"type": "screen", "screen": after.screen()}));
         } else if let Some(started) = &self.started {
-            say(json!({"type": "screen", "screen": started.flow.screen()}));
+            let screen = match &started.after {
+                Some(after) => after.flow.screen(),
+                None => started.flow.screen(),
+            };
+            say(json!({"type": "screen", "screen": screen}));
         }
     }
 
@@ -799,6 +954,16 @@ impl<P: Phones> Driver<P> {
                 "start" if self.started.is_none() => {
                     if !self.greeted {
                         self.refuse(&format!("Say hello first: {{\"type\":\"hello\",\"protocol\":{PROTOCOL}}}, then start."));
+                        continue;
+                    }
+                    // A run that goes on with the install link, from the
+                    // record an earlier run kept in the work directory
+                    if message.get("link").and_then(Value::as_bool) == Some(true) {
+                        if let Err(e) = self.resume_link() {
+                            return Err(Fatal(e.to_string()));
+                        }
+                        self.drive_link();
+                        self.screen();
                         continue;
                     }
                     let Some(reinstall) = message.get("reinstall").and_then(Value::as_bool) else {
@@ -880,12 +1045,144 @@ impl<P: Phones> Driver<P> {
                 ));
             }
         }
-        self.started = Some(Started { flow, dir });
+        self.started = Some(Started {
+            flow,
+            dir,
+            kept: None,
+            zip: None,
+            after: None,
+        });
+        Ok(())
+    }
+
+    /// `start` with `"link": true`: the install link from the record in the
+    /// work directory. A flow with no release: the link's screens only.
+    fn resume_link(&mut self) -> Res<()> {
+        let work = self
+            .work_dir
+            .clone()
+            .or_else(crate::default_work_dir)
+            .ok_or("no work directory: start the tool with --work-dir DIR")?;
+        let (record, zip, backup_dir) = crate::link::FileShell::<()>::read_kept(&work)?;
+        if record.finished {
+            return Err("the install link of this record was finished: the phone is set up".into());
+        }
+        let start = record
+            .start(env!("CARGO_PKG_VERSION"), backup_dir.is_some())
+            .ok_or("the record is damaged")?;
+        let (transport, clock) = self.phones.after();
+        let mut shell = crate::link::FileShell::new((), clock, Some(work), zip);
+        if let Some(dir) = &backup_dir {
+            shell.backup_into(dir, true)?;
+        }
+        // The flow is only there to hold the link: it reads no release
+        let (bundle, trusted) = match &self.release {
+            Some(dir) => (self.trust)(dir)?,
+            None => {
+                return Err("going on with the link needs the release too: --release DIR".into())
+            }
+        };
+        let flow = Flow::begin(
+            &bundle.files(),
+            bundle.index.as_deref(),
+            &trusted,
+            FlowOptions::default(),
+        );
+        self.started = Some(Started {
+            flow,
+            dir: PathBuf::new(),
+            kept: None,
+            zip: None,
+            after: Some(AfterWrite {
+                flow: omamobile_installer_core::link::LinkFlow::new(start),
+                transport,
+                shell: Some(shell),
+            }),
+        });
+        Ok(())
+    }
+
+    /// Run the install link until the owner is needed, it ended, or the
+    /// app left. In a pretend build, what the pretend phone's screen shows
+    /// is said too, for the tests' pretend owner.
+    fn drive_link(&mut self) {
+        let Some(started) = self.started.as_mut() else {
+            return;
+        };
+        let Some(after) = started.after.as_mut() else {
+            return;
+        };
+        let Some(shell) = after.shell.take() else {
+            return;
+        };
+        let mut shell = shell.with_ui(LinkWire {
+            wire: Wire::new(&mut self.lines),
+        });
+        let ran = block_on(after.flow.run(&mut after.transport, &mut shell));
+        after.shell = Some(shell.with_ui(()));
+        if let Err(e) = ran {
+            say(json!({"type": "error", "message": e.to_string()}));
+        }
+        if after.flow.screen().action == "pair" {
+            if let Some(code) = P::shows(&after.transport) {
+                say(json!({"type": "pretend", "shows": code}));
+            }
+        }
+    }
+
+    /// An action on one of the install link's screens.
+    fn act_link(&mut self, kind: &str, message: &Map<String, Value>) -> Res<()> {
+        let Some(after) = self.started.as_mut().and_then(|s| s.after.as_mut()) else {
+            return Err("the install link has not started".into());
+        };
+        let asks = after.flow.screen().action;
+        if kind != asks {
+            return Err(if asks == "none" {
+                format!("The install has ended, so \"{kind}\" is not taken.")
+            } else {
+                format!("\"{kind}\" is not what this step takes: the screen asks for \"{asks}\".")
+            }
+            .into());
+        }
+        match kind {
+            "pair" => {
+                let code = text(message, "code").ok_or("pair needs \"code\", as text.")?;
+                after.flow.pair(code)?;
+            }
+            "backup-dir" => {
+                let path = Path::new(text(message, "path").ok_or("backup-dir needs \"path\".")?);
+                if !path.is_absolute() {
+                    return Err("backup-dir needs an absolute path.".into());
+                }
+                let shell = after.shell.as_mut().ok_or("the link's shell is busy")?;
+                shell.backup_into(path, false)?;
+                after.flow.backup_place_chosen()?;
+            }
+            "answers" => {
+                let (answers, extra) = answers_of(message)?;
+                let valid = omamobile_installer_core::link::link_answers(
+                    &answers,
+                    &extra.get(),
+                    &crate::new_salt(),
+                )?;
+                after.flow.answers(valid)?;
+            }
+            "retry" => after.flow.retry()?,
+            _ => {
+                return Err(format!(
+                    "This tool knows no message \"{}\" (protocol {PROTOCOL}).",
+                    word(kind)
+                )
+                .into())
+            }
+        }
+        self.drive_link();
         Ok(())
     }
 
     /// The write is done: the steps after it come next, when this run has
-    /// them (a run that writes, a release that ships the tools).
+    /// them (a run that writes, a release that ships the tools and offers
+    /// no install link: a release that offers it goes on there instead).
     fn after_the_write(&mut self) -> Res<()> {
         let (Some(started), Some(seams), Some(key)) = (&self.started, &self.seams, &self.key)
         else {
@@ -896,11 +1193,14 @@ impl<P: Phones> Driver<P> {
             flow.release(),
             flow.pinned_phone(),
             flow.factory_zip_verified(),
-            self.factory_path.clone(),
+            started.zip.clone(),
         ) else {
             return Ok(());
         };
-        if flow.screen().state != "installed" || !after::release_has_tools(&started.dir) {
+        if flow.screen().state != "installed"
+            || flow.has_install_link()
+            || !after::release_has_tools(&started.dir)
+        {
             return Ok(());
         }
         let m = release.manifest();
@@ -967,6 +1267,9 @@ impl<P: Phones> Driver<P> {
         let Some(started) = self.started.as_ref() else {
             return Err("the install has not started".into());
         };
+        if started.after.is_some() && !matches!(kind, "hello" | "start") {
+            return self.act_link(kind, message);
+        }
         let asks = match &self.after {
             Some(after) => after.screen().action,
             None => started.flow.screen().action,
@@ -983,6 +1286,7 @@ impl<P: Phones> Driver<P> {
             "dry-run" => asks == "dry-run",
             "confirm" => asks == "confirm",
             "write" => asks == "write",
+            "link" => asks == "link",
             #[cfg(feature = "fake-phone")]
             "pretend-panic" => true,
             "hello" | "start" => {
@@ -1084,10 +1388,10 @@ impl<P: Phones> Driver<P> {
                 )?;
                 if started.flow.factory_zip_verified().is_some() {
                     // Where download_factory_zip keeps a file the core verified
-                    self.factory_path = self
+                    started.zip = self
                         .work_dir
                         .clone()
-                        .or_else(default_work_dir)
+                        .or_else(crate::default_work_dir)
                         .map(|d| d.join("factory").join(&name));
                 }
             }
@@ -1103,41 +1407,61 @@ impl<P: Phones> Driver<P> {
                     return Err(format!("There is no file {}", path.display()).into());
                 }
                 if started.flow.factory_zip_verified().is_some() {
-                    self.factory_path = Some(path.to_path_buf());
+                    started.zip = Some(path.to_path_buf());
                 }
             }
             "answers" => {
-                let field = |name: &str| {
-                    text(message, name).ok_or_else(|| {
-                        format!("answers needs all seven fields as text, and \"{name}\" is missing or is not text.")
-                    })
-                };
-                let input = AnswersInput {
-                    username: field("username")?,
-                    password: field("password")?,
-                    password_again: field("password_again")?,
-                    hostname: field("hostname")?,
-                    timezone: field("timezone")?,
-                    wifi_ssid: field("wifi_ssid")?,
-                    wifi_psk: field("wifi_psk")?,
-                };
-                let zones = Path::new("/usr/share/zoneinfo");
-                let problems = match OwnerAnswers::check(&input) {
-                    // The core checks the zone's shape; this computer knows the zones
-                    Ok(_) if zones.is_dir() && !zones.join(input.timezone).is_file() => {
-                        vec![AnswerProblem {
-                            field: AnswerField::Timezone,
-                            message: "That isn't a time zone this computer knows (they look like Europe/Paris).".into(),
-                        }]
-                    }
-                    Ok(answers) => {
-                        let salt = crate::fresh_salt()?;
-                        self.flow().answers(&answers, &salt)?;
+                let (answers, extra) = match answers_of(message) {
+                    Ok(got) => got,
+                    Err(AnswersRefused::Problems(problems)) => {
+                        say(json!({"type": "problems", "problems": problems}));
                         return Ok(());
                     }
-                    Err(problems) => problems,
+                    Err(AnswersRefused::Malformed(e)) => return Err(e.into()),
                 };
-                say(json!({"type": "problems", "problems": problems}));
+                let link = self.may_write && self.flow().has_install_link();
+                if link {
+                    // The link's own rules, before anything is written
+                    omamobile_installer_core::link::link_answers(
+                        &answers,
+                        &extra.get(),
+                        &crate::new_salt(),
+                    )?;
+                }
+                self.flow().answers(&answers, &crate::fresh_salt()?)?;
+                if link {
+                    if let Some(started) = self.started.as_mut() {
+                        started.kept = Some((answers, extra));
+                    }
+                }
+            }
+            // Written, and the release's root image offers the install
+            // link: the install goes on there
+            "link" => {
+                let (after, clock) = self.phones.after();
+                let Some(started) = self.started.as_mut() else {
+                    return Ok(());
+                };
+                let (answers, extra) =
+                    started.kept.take().ok_or("the answers are not in memory")?;
+                let zip = started
+                    .zip
+                    .clone()
+                    .ok_or("the factory image's file is not known")?;
+                let flow = started.flow.link(
+                    &answers,
+                    &extra.get(),
+                    &crate::new_salt(),
+                    env!("CARGO_PKG_VERSION"),
+                    false,
+                )?;
+                let work = self.work_dir.clone().or_else(crate::default_work_dir);
+                started.after = Some(AfterWrite {
+                    flow,
+                    transport: after,
+                    shell: Some(crate::link::FileShell::new((), clock, work, zip)),
+                });
+                self.drive_link();
             }
             "dry-run" => {
                 let n = match self.find(None)? {
@@ -1260,7 +1584,6 @@ fn drive<P: Phones>(
         chosen: None,
         seams,
         key: None,
-        factory_path: None,
         after: None,
     };
     let code = match driver.run() {

@@ -1,0 +1,13 @@
+frame: phone-12-data-begin
+data-begin, answering id 11
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 11
+len: 65
+offset: 0
+payload sha256: 252baec9a835c9b0a3c87f68eb234696d9f7917b8a179a2baaee8cbbd1c9e7df
+pad byte: no
+frame bytes: 121
+frame sha256: d7c709e1a9001c85a946f055ab7ede5658615b2ee9c32929a93e68e3839ca57d
+payload: {"t":"data-begin","re":11,"name":"efs","size":3000,"offset":1024}

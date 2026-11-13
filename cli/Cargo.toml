@@ -14,7 +14,7 @@ path = "src/main.rs"
 # for `omamobile-install flow DIR --fake-phone STATE`: the whole install flow
 # with no USB device. That command trusts the test key beside a test bundle,
 # so it is not in a default build.
-fake-phone = []
+fake-phone = ["omamobile-installer-core/pretend-link"]
 
 [[test]]
 name = "flow_fake_phone"
@@ -32,6 +32,14 @@ required-features = ["fake-phone"]
 name = "after_write"
 required-features = ["fake-phone"]
 
+[[test]]
+name = "json_link"
+required-features = ["fake-phone"]
+
+[[test]]
+name = "link_fake_phone"
+required-features = ["fake-phone"]
+
 [dependencies]
 omamobile-installer-core = { path = "../core" }
 omamobile-installer-usb = { path = "../usb" }
@@ -44,8 +52,11 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # The JSON mode's messages (docs/APP.md): the core's Screen as serde
 # serialises it, and the app's lines parsed.
 serde_json = "1"
-# A salt for the password's hash (Flow::answers): the core has no source of
-# randomness, so the front end draws one from the operating system.
+serde = { version = "1", features = ["derive"] }
+# The install link's protocol (the frames and messages the core drives)
+omamobile-link = { path = "../link" }
+# The operating system's randomness: each hello's nonce, and the password's
+# salt (Flow::answers): the core has no source of randomness of its own.
 getrandom = "0.2"
 
 # The JSON mode keeps standard output for the protocol alone: file descriptor

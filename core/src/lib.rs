@@ -25,8 +25,12 @@
 //! - [`ramdisk_key`]: the owner's SSH key appended to slot B's initramfs, as
 //!   `tools/install-phone` appends it, for the initramfs's rescue SSH.
 //! - [`firstboot`]: the owner's answers as the files a first start reads,
-//!   and as the blocks of the root image's placeholders that
-//!   [`install::UserdataStream`] swaps in (docs/DESIGN.md §12).
+//!   as the blocks of the root image's placeholders that
+//!   [`install::UserdataStream`] swaps in (docs/DESIGN.md §12), and the
+//!   password's hash the install link carries.
+//! - [`link`]: after the write, the install link (the `omamobile-link`
+//!   crate's host machine) from the phone's first start to a phone that is
+//!   ready, over a transport and a shell the front end lends.
 //!
 //! Nothing here does I/O on its own: bytes come in from the caller, and the
 //! only ways out are the transport trait and, for Google's factory image, a
@@ -47,6 +51,7 @@ pub mod firstboot;
 pub mod flow;
 pub mod hash;
 pub mod install;
+pub mod link;
 pub mod manifest;
 pub mod ramdisk_key;
 pub mod signature;

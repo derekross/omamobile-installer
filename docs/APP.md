@@ -1,6 +1,6 @@
 # The desktop app: design
 
-Status (2026-11-13): **the app and the tool's side of the protocol below (`omamobile-install json`, `cli/src/json.rs`) are both built, and tested against each other with the tool's pretend phone. Neither has been run with a real phone: the tool's USB path in this mode has never listed or opened a device.** Started as it is by default, the window goes to the dry run and no further. Started with `--write` it goes on through the flow's write path (DESIGN §11), which has not run on a real phone either, and then, for a release that ships the tools for them, through the steps after the write (DESIGN §13: the USB connection, the first start, the radio backup, the firmware, a restart and a check, with the release's own tools), which have run against stand-ins only. What works, what has never run and the app's first attended run are in [app/docs/STATUS.md](../app/docs/STATUS.md).
+Status (2026-11-13): **protocol 5 holds both the steps after the write with the release's tools (DESIGN §13) and the install link after the write (§3.9), each tested against a pretend phone only. The app and the tool's side of the protocol below (`omamobile-install json`, `cli/src/json.rs`) are both built, and tested against each other with the tool's pretend phone. Neither has been run with a real phone: the tool's USB path in this mode has never listed or opened a device.** Started as it is by default, the window goes to the dry run and no further. Started with `--write` it goes on through the flow's write path (DESIGN §11), which has not run on a real phone either, and then, for a release that ships the tools for them, through the steps after the write (DESIGN §13: the USB connection, the first start, the radio backup, the firmware, a restart and a check, with the release's own tools), which have run against stand-ins only; for a release whose root image offers the install link, through the link instead (§3.9), which has run against the pretend phone that speaks it only. What works, what has never run and the app's first attended run are in [app/docs/STATUS.md](../app/docs/STATUS.md).
 
 `omainstall` (`app/`) is a Qt Quick window in the style of Omarchy's own apps. Its one job is to guide a person through installing Omarchy Mobile on a phone plugged into this computer. It is a third front end for the flow in [DESIGN.md](DESIGN.md), next to the command-line tool and the web page, and DESIGN §7 ("What a front end must do") applies to it.
 
@@ -42,7 +42,7 @@ The app starts the tool as a child process and talks to it over the child's stan
 
 ## 3. The protocol
 
-Protocol number **4**. (Number 3 was the same protocol without the steps after the write: no action `after` and no message of that type, and the last screen of a write named no action. Number 2 was the same protocol without the question of what slot B holds: no `choices` in the screen, no `slot-b` action and message; a phone on slot B in a run not said to be a reinstall stopped at `runs-from-slot-b`. Number 1 was 2 without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. Sides that speak different numbers refuse each other, §3.2.)
+Protocol number **5**. (Number 4 was two protocols, on two branches that were merged into this one: the one with the steps after the write and the one with the install link; 5 is both. Number 3 was the same protocol without either: no action `after` and no message of that type, the last screen of a write named no action; no `link` on the `installed` screen, none of the link's states, screens whose action is `wait`, the actions `link`, `pair`, `backup-dir` and `retry`, `start` with `link`, the three optional fields of `answers`, or the `pretend` message of a pretend build (§3.9). Number 2 was the same protocol without the question of what slot B holds: no `choices` in the screen, no `slot-b` action and message; a phone on slot B in a run not said to be a reinstall stopped at `runs-from-slot-b`. Number 1 was 2 without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. Sides that speak different numbers refuse each other, §3.2.)
 
 ### 3.1 Framing
 
@@ -94,6 +94,8 @@ state     text          warning, phone, slot-b, unlock, google-terms, factory-im
                         confirm, write, installed (those three only in a run that writes), stopped;
                         after the write (DESIGN §13, made by the tool): after-resume, network, first-start,
                         backup, firmware, restart, ready
+                        or, for a release with the install link: first-start, pair, setup,
+                        radio-backup, factory-send, provision, restart, check, ready (§3.9)
 stop      text | null   for `stopped`: the stop's id (DESIGN §4)
 retry     text | null   for `stopped`: whether starting the installer again can get past the stop:
                         whenever (at any time), after-fix (once what the message says is done),
@@ -114,7 +116,7 @@ choices   [{ answer: text, label: text }]
                         the owner's choices on a screen of the steps after the write. Empty on every
                         other screen
 action    text          acknowledge, read-phone, slot-b, accept-terms, download, take-file, answers,
-                        dry-run, confirm, write, after, none
+                        dry-run, confirm, write, after, none; link, wait, pair, backup-dir, retry (§3.9)
 ```
 
 The app checks that every key is there and of that type. A screen that lacks one is malformed (§6): a missing `notice` must never be read as "no notice". Keys the app does not know are carried along and ignored.
@@ -253,6 +255,39 @@ In a run started with `--write` (the hello then says `"writes":true`) the dry ru
 <- {"type":"sent","command":"reboot"}
 <- {"type":"screen","screen":{"state":"installed", ..., "action":"none"}}
 ```
+
+### 3.9 After the write: the install link (protocol 5)
+
+For a release whose `manifest.json` says `install_link` (Omarchy Mobile's INSTALL-LINK-PLAN, stage L6; DESIGN §13), a write that ran through does not end the run. The `installed` screen's action is `link`, and from `{"type":"link"}` on the screens are the install link's, made by the core's `LinkFlow` (`core/src/link.rs`) from the phone's first start to a phone that is ready. A release without `install_link` ends at `installed` (`none`), as in protocol 3.
+
+| `state` | What the phone and the installer do | `action` |
+| --- | --- | --- |
+| `first-start` | The phone starts Omarchy Mobile for the first time and grows its system; the tool looks for the link's USB interface (§4 of the plan: by class, subclass, protocol and string). After ten minutes the screen's `problem` says what to check; it goes on looking | `wait` |
+| `pair` | The phone shows a six-digit code. Or, after its own setup, it shows none until the owner taps "Setup is not finished" in its unlocked session; or too many wrong codes locked it | `pair`, or `wait` while the owner acts at the phone |
+| `setup` | The answers go to the phone (the password as its sha512-crypt hash); first-boot setup runs. In a run that went on from a record before the phone had the answers, they are asked again. When first-boot setup failed: the steps, and `retry` | `wait`, `answers`, `retry` |
+| `radio-backup` | The phone's radio partitions are copied to a folder on this computer, as `tools/nv-backup` writes one | `backup-dir` until a folder is chosen, then `wait` |
+| `factory-send` | The owner's factory image is read from its file a piece at a time and sent; the phone checks it whole | `wait` |
+| `provision` | The phone extracts and installs its firmware. When it failed, or the battery is too low: `retry` | `wait`, `retry` |
+| `restart` | The planned restart; the tool waits for the link to come back | `wait` |
+| `check` | The phone's own check report | `wait` |
+| `ready` | Done. A camera step that failed is said ("Cameras: not set up") | `none` |
+| `stopped` | One of the link's stops (`link-wrong-phone`, `link-version`, `link-protocol`, `link-computer`, `link-refused`, `backup-precondition`, `backup-mismatch`, `factory-mismatch`, `no-space`, `too-large`), with `retry` | `none` |
+
+**A screen whose action is `wait` does not end an action.** While the phone works by itself the tool sends a `screen` each time it changes, and `progress` with `what` `link-wait`, `firstboot`, `backup`, `factory-send`, `factory-check` or `provision`. The action that was sent (`link`, `pair`, `backup-dir`, `retry`, `answers`) is answered by the first screen whose action is not `wait`. So §3.5's rule holds with "a screen" read as "a screen that asks for something". The app stays busy through the `wait` screens and draws each one. A `quit`, or the end of the input, leaves the link where it is: the record in the work directory (below) lets a new run go on.
+
+| `Screen.action` | Message | The tool hands the link's flow |
+| --- | --- | --- |
+| `link` | `{"type":"link"}` | `Flow::link` with the answers it kept in memory and the factory image's path it checked; then runs the link. The app sends it by itself, as it sends `write` after `confirm` |
+| `pair` | `{"type":"pair","code":"<as typed>"}` | `LinkFlow::pair`, the text as typed; the phone decides. A wrong code is the same screen with the core's `problem` (tries left) |
+| `backup-dir` | `{"type":"backup-dir","path":"<absolute path>"}` | A new, empty folder (made mode 700, its files 600) for the radio backup. A folder that is not empty, or a path that is not absolute: `error`, and the step stays |
+| `retry` | `{"type":"retry"}` | First-boot setup again, or provisioning again |
+| `answers` | as §3.4 | Only in a run that went on from a record before the phone had the answers |
+
+**`answers` carries three more fields, each text or left out:** `ssh_key` (one OpenSSH public key's line), `full_name` and `email` (for git on the phone). In a run that writes, for a release with the link, they and the seven others are checked by the link's own rules (first boot's, the protocol crate's `Answers::validate`) before anything is written, and an objection is an `error`.
+
+**`start` with `"link": true`** goes on from the record a run before this one kept in the work directory (`--work-dir`, or the user's cache directory): `link/record.json`, mode 600, holding the serial the write pinned (for the serial proof: it never crosses the link), the session token, the factory image's path and the backup folder. It needs `--release DIR` too. The record holds no answer and no password hash; the answers are asked again if the phone has none yet.
+
+**A pretend build** (`fake-phone`) says `{"type":"pretend","shows":"<code>"}` before a screen that asks for the code: what its pretend phone's screen shows, for the tests and the recorded pictures. A build that ships never says it.
 
 ## 4. The window
 

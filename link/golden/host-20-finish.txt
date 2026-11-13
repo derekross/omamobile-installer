@@ -1,0 +1,13 @@
+frame: host-20-finish
+finish, id 20
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 19
+len: 22
+offset: 0
+payload sha256: b744e9fad3f2f44b9f6d27c0def58338c5e5cd954556619202542be3c7d820d0
+pad byte: no
+frame bytes: 78
+frame sha256: 1317b36dacb3e52358e6b12bf5cc38eddb55721098bc9e23c9d95957f8a289bd
+payload: {"t":"finish","id":20}

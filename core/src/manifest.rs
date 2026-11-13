@@ -64,6 +64,15 @@ struct Raw {
     files: Vec<RawFile>,
     #[serde(default)]
     base_url: Option<String>,
+    /// `{"protocol": N}`: the release's root image offers the install link
+    /// at its first start (INSTALL-LINK-PLAN §3.3). Closed, like the plan.
+    #[serde(default)]
+    install_link: Option<RawInstallLink>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallLink {
+    protocol: u32,
 }
 #[derive(Debug, Deserialize)]
 struct RawDevice {
@@ -206,6 +215,10 @@ pub struct Manifest {
     /// `install.bootloader_slot_probe`, when the manifest states it. It must
     /// agree with the descriptor's `BOOTLOADER_SLOT_PROBE`.
     pub bootloader_slot_probe: Option<bool>,
+    /// `install_link.protocol`: the release's root image offers the install
+    /// link at its first start, speaking this protocol. `None`: it does not,
+    /// and an install ends at the restart, as before the link existed.
+    pub install_link: Option<u32>,
 }
 
 fn err<T>(why: impl Into<String>) -> Result<T> {
@@ -463,6 +476,19 @@ impl Manifest {
                 PLACEHOLDER_PATHS[0]
             ));
         }
+        // A link this installer can't speak would leave the phone waiting
+        // for an installer that never comes: refused before anything is done
+        let install_link = match raw.install_link {
+            None => None,
+            Some(l) if l.protocol == omamobile_link::PROTOCOL => Some(l.protocol),
+            Some(l) => {
+                return err(format!(
+                "install_link.protocol is {}; this installer speaks the install link's protocol {}",
+                l.protocol,
+                omamobile_link::PROTOCOL
+            ))
+            }
+        };
 
         Ok(Manifest {
             version: raw.version,
@@ -475,6 +501,7 @@ impl Manifest {
             allowlist: allow,
             boot_writes,
             bootloader_slot_probe: i.bootloader_slot_probe,
+            install_link,
             root_image: RootImage {
                 name: r.name,
                 sha256: r.sha256,

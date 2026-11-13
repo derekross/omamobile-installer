@@ -1,0 +1,13 @@
+frame: phone-38-error-no-space
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 37
+len: 135
+offset: 0
+payload sha256: 2e053f60f3745867eda5bba1023c12c5b02e82ea949017ef7479b828509f4b64
+pad byte: no
+frame bytes: 191
+frame sha256: 66313f0d573ff260ce2744aa047388e87ce2251dda43ebe39065669045925b2c
+payload: {"t":"error","re":21,"code":"no-space","message":"not enough free space","stage":"firstboot-done","need":30000000000,"free":1000000000}

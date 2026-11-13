@@ -86,6 +86,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod after;
 mod json;
+mod link;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -1117,6 +1118,66 @@ struct FactoryImage {
     fetcher: Fetcher,
     /// The owner named a proxy for the download (`--proxy`).
     proxied: bool,
+    /// Where the install link's radio backup goes (`--backup-dir`).
+    backup_dir: Option<PathBuf>,
+}
+
+/// A salt for the password's hash: 16 characters from the operating
+/// system's randomness.
+fn new_salt() -> String {
+    let mut random = [0u8; 12];
+    getrandom::getrandom(&mut random).expect("the operating system's random source");
+    omamobile_installer_core::firstboot::salt_from(&random)
+}
+
+/// How the flow ended on this computer.
+enum Ran {
+    /// `true`: at the dry run's end or with the phone written.
+    Ended(bool),
+    /// Written, and the release's root image offers the install link: the
+    /// link's flow, the owner's factory image's path, and the typed input.
+    Link(
+        Box<omamobile_installer_core::link::LinkFlow>,
+        PathBuf,
+        Typed,
+    ),
+}
+
+/// What the owner gives beside the flow's answers, for the install link:
+/// an SSH public key, and a name and email for git. Each may be left out.
+struct Extra {
+    ssh_key: String,
+    full_name: String,
+    email: String,
+}
+
+fn ask_extras(typed: &mut Typed) -> Res<Extra> {
+    let key = typed.ask(
+        "An SSH public key for the phone, as a file's path or the key's line (Enter to skip): ",
+    )?;
+    let ssh_key = if !key.is_empty() && Path::new(&key).is_file() {
+        fs::read_to_string(&key)?.trim().to_string()
+    } else {
+        key
+    };
+    Ok(Extra {
+        ssh_key,
+        full_name: typed.ask("Your full name, for git on the phone (Enter to skip): ")?,
+        email: typed.ask("Your email address, for git on the phone (Enter to skip): ")?,
+    })
+}
+
+impl Extra {
+    fn get(&self) -> omamobile_installer_core::firstboot::Extras<'_> {
+        fn some(s: &str) -> Option<&str> {
+            (!s.is_empty()).then_some(s)
+        }
+        omamobile_installer_core::firstboot::Extras {
+            ssh_key: some(&self.ssh_key),
+            full_name: some(&self.full_name),
+            email: some(&self.email),
+        }
+    }
 }
 
 /// Drive the core's flow to its end. `connect` finds the phone and opens
@@ -1127,10 +1188,14 @@ fn run_flow<T: Transport>(
     mut options: FlowOptions,
     mut factory: FactoryImage,
     mut connect: impl FnMut() -> Res<Option<(T, PhoneId)>>,
-) -> Res<bool> {
+) -> Res<Ran> {
     let mut typed = Typed::new();
+    // In memory only, until the install link has given them to the phone
+    let mut kept: Option<(OwnerAnswers, Extra)> = None;
+    let mut zip_path: Option<PathBuf> = None;
     // A file handed in up front: the installer downloads nothing
     options.owner_has_factory_zip = factory.own_file.is_some();
+    let writes = options.write;
     let mut flow = Flow::begin(&bundle.files(), bundle.index.as_deref(), trusted, options);
     let (mut looked, mut downloaded) = (false, false);
     loop {
@@ -1182,14 +1247,22 @@ fn run_flow<T: Transport>(
                 }
                 downloaded = true;
                 let name = screen.file.as_ref().map(|f| f.name.as_str());
+                let name = name.ok_or("the flow names no file to download")?;
                 download_factory_zip(
                     &mut flow,
                     &factory.fetcher,
                     factory.proxied,
                     factory.work_dir.as_deref(),
-                    name.ok_or("the flow names no file to download")?,
+                    name,
                     &mut Terminal::default(),
                 )?;
+                if flow.factory_zip_verified().is_some() {
+                    zip_path = factory
+                        .work_dir
+                        .clone()
+                        .or_else(default_work_dir)
+                        .map(|d| d.join("factory").join(name));
+                }
             }
             "take-file" => {
                 let path = match factory.own_file.take() {
@@ -1197,8 +1270,31 @@ fn run_flow<T: Transport>(
                     None => PathBuf::from(typed.ask("Where did you save the file? ")?),
                 };
                 take_typed_zip(&mut flow, &path)?;
+                if flow.factory_zip_verified().is_some() {
+                    zip_path = Some(path);
+                }
             }
-            "answers" => flow.answers(&ask_answers(&mut typed)?, &fresh_salt()?)?,
+            "answers" => {
+                let answers = ask_answers(&mut typed)?;
+                if flow.has_install_link() && writes {
+                    let extra = loop {
+                        let extra = ask_extras(&mut typed)?;
+                        // The link's own rules, before anything is written
+                        match omamobile_installer_core::link::link_answers(
+                            &answers,
+                            &extra.get(),
+                            &new_salt(),
+                        ) {
+                            Ok(_) => break extra,
+                            Err(e) => println!("    {e}"),
+                        }
+                    };
+                    flow.answers(&answers, &fresh_salt()?)?;
+                    kept = Some((answers, extra));
+                } else {
+                    flow.answers(&answers, &fresh_salt()?)?;
+                }
+            }
             "dry-run" => {
                 let Some((transport, _)) = connect()? else {
                     println!("    No phone in Fastboot Mode answered.");
@@ -1257,15 +1353,80 @@ fn run_flow<T: Transport>(
                     }
                 }
             }
-            _ => return Ok(matches!(screen.state, "done" | "installed")),
+            // Written: the release's root image offers the install link,
+            // and the install goes on there
+            "link" => {
+                let (answers, extra) = kept.take().ok_or("the answers are not in memory")?;
+                let path = zip_path
+                    .clone()
+                    .ok_or("the factory image's file is not known")?;
+                let link = flow.link(
+                    &answers,
+                    &extra.get(),
+                    &new_salt(),
+                    env!("CARGO_PKG_VERSION"),
+                    factory.backup_dir.is_some(),
+                )?;
+                return Ok(Ran::Link(Box::new(link), path, typed));
+            }
+            _ => return Ok(Ran::Ended(matches!(screen.state, "done" | "installed"))),
         }
     }
 }
 
 fn cmd_install(dir: &Path, serial: &str, options: FlowOptions, factory: FactoryImage) -> Res<bool> {
     let bundle = Bundle::load(dir, "omamobile.gpg")?;
-    run_flow(&bundle, &TrustedKeys::omamobile(), options, factory, || {
+    let (backup_dir, work_dir) = (factory.backup_dir.clone(), factory.work_dir.clone());
+    let ran = run_flow(&bundle, &TrustedKeys::omamobile(), options, factory, || {
         block_on(open_usb(serial))
+    })?;
+    match ran {
+        Ran::Ended(done) => Ok(done),
+        Ran::Link(mut link, zip, mut typed) => {
+            let mut shell = link::FileShell::new(
+                link::TextUi::default(),
+                link::Clock::Real(Instant::now()),
+                work_dir.or_else(default_work_dir),
+                zip,
+            );
+            if let Some(dir) = &backup_dir {
+                shell.backup_into(dir, false)?;
+            }
+            let mut usb = omamobile_installer_usb::UsbLink::default();
+            link::drive_text(&mut link, &mut usb, &mut shell, &mut typed, &|_| None)
+        }
+    }
+}
+
+/// `link`: a run that goes on with the install link from the record a run
+/// before this one kept in the work directory (the window was closed, the
+/// computer restarted), on the phone over USB.
+fn cmd_link(work_dir: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Res<bool> {
+    let work = work_dir
+        .or_else(default_work_dir)
+        .ok_or("no work directory: name it with --work-dir DIR")?;
+    let (record, zip, kept_dir) = link::FileShell::<link::TextUi>::read_kept(&work)?;
+    if record.finished {
+        println!("The install link of this record was finished: the phone is set up.");
+        return Ok(true);
+    }
+    let dir = backup_dir.or(kept_dir);
+    let start = record
+        .start(env!("CARGO_PKG_VERSION"), dir.is_some())
+        .ok_or("the record is damaged")?;
+    let mut flow = omamobile_installer_core::link::LinkFlow::new(start);
+    let mut shell = link::FileShell::new(
+        link::TextUi::default(),
+        link::Clock::Real(Instant::now()),
+        Some(work),
+        zip,
+    );
+    if let Some(dir) = &dir {
+        shell.backup_into(dir, true)?;
+    }
+    let mut usb = omamobile_installer_usb::UsbLink::default();
+    link::drive_text(&mut flow, &mut usb, &mut shell, &mut Typed::new(), &|_| {
+        None
     })
 }
 
@@ -1294,8 +1455,9 @@ fn cmd_fake(
     let trusted = TrustedKeys::new(&[fingerprint.trim()])?;
     println!("A pretend phone ({scenario}), held in memory. No USB device is opened.");
     let mut looks = 0;
+    let (backup_dir, work_dir) = (factory.backup_dir.clone(), factory.work_dir.clone());
     // The record is printed however the run ended
-    let done = run_flow(&bundle, &trusted, options, factory, || {
+    let ran = run_flow(&bundle, &trusted, options, factory, || {
         looks += 1;
         // A locked pretend phone is unlocked by its pretend owner after the
         // unlock steps were shown once
@@ -1307,6 +1469,44 @@ fn cmd_fake(
         }
         Ok(Some((phone.clone(), PhoneId::of_serial(SERIAL).unwrap())))
     });
+    let done = match ran {
+        Err(e) => Err(e),
+        Ok(Ran::Ended(done)) => Ok(done),
+        Ok(Ran::Link(mut link, zip, mut typed)) => {
+            use omamobile_installer_core::link::pretend::{Clock, PretendPhone};
+            // The phone the write restarted, speaking the install link: the
+            // protocol crate's stand-in for its daemon, on a clock of its own
+            let clock = Clock::default();
+            let mut pretend = PretendPhone::first_start(SERIAL, "cheetah", clock.clone(), 1);
+            pretend_link_options(&mut pretend);
+            println!("    (a pretend phone speaks the install link, held in memory)");
+            let mut shell = link::FileShell::new(
+                link::TextUi::default(),
+                link::Clock::Pretend(clock),
+                work_dir,
+                zip,
+            );
+            let done = match &backup_dir {
+                Some(dir) => shell.backup_into(dir, false),
+                None => Ok(()),
+            }
+            .and_then(|()| {
+                link::drive_text(&mut link, &mut pretend, &mut shell, &mut typed, &|p| {
+                    p.shows()
+                })
+            });
+            println!(
+                "\nThe pretend phone's link: {} frames received, cable pulled {} times, first boot run {} times, provisioning {}, restarts {}, ended as {}",
+                pretend.frames_in,
+                pretend.pulls,
+                pretend.sim.firstboot_starts,
+                pretend.sim.provision_starts,
+                pretend.sim.restarts,
+                pretend.sim.done.as_deref().unwrap_or("not ended")
+            );
+            done
+        }
+    };
     let log = phone.log();
     let (asked, other) = (phone.unlock_questions(), phone.not_reads().len());
     println!(
@@ -1327,6 +1527,22 @@ fn cmd_fake(
     done
 }
 
+/// What the tests ask of the pretend phone's link, from the environment of
+/// a pretend build: `OMAMOBILE_PRETEND_LINK` as comma-separated words
+/// (`camera-fails`, `firstboot-fails`, `unplug-at=N`).
+#[cfg(feature = "fake-phone")]
+fn pretend_link_options(p: &mut omamobile_installer_core::link::pretend::PretendPhone) {
+    let words = std::env::var("OMAMOBILE_PRETEND_LINK").unwrap_or_default();
+    for w in words.split(',').filter(|w| !w.is_empty()) {
+        match w.split_once('=') {
+            None if w == "camera-fails" => p.camera_fails = true,
+            None if w == "firstboot-fails" => p.firstboot_fails = Some("wifi".into()),
+            Some(("unplug-at", n)) => p.unplug_after = n.parse().ok(),
+            _ => eprintln!("OMAMOBILE_PRETEND_LINK: no such word {w}"),
+        }
+    }
+}
+
 #[cfg(not(feature = "fake-phone"))]
 fn cmd_fake(
     _: &Path,
@@ -1339,7 +1555,7 @@ fn cmd_fake(
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] | link [--work-dir DIR] [--backup-dir DIR] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
 
 /// What `help` says about [`SLOTS_MATCH`].
 const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written. A reinstall from slot B does not need it (--reinstall).";
@@ -1417,10 +1633,23 @@ fn run() -> Res<bool> {
         ["bench-zstd", file, rounds] => bench_zstd(file, rounds)?,
         ["devices"] => block_on(cmd_devices())?,
         ["help" | "--help" | "-h"] => cmd_help(),
+        ["link", rest @ ..] => {
+            let (mut work_dir, mut backup_dir) = (None, None);
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                match *arg {
+                    "--work-dir" => work_dir = it.next().map(PathBuf::from),
+                    "--backup-dir" => backup_dir = it.next().map(PathBuf::from),
+                    other => return Err(format!("unknown argument {other}").into()),
+                }
+            }
+            return cmd_link(work_dir, backup_dir);
+        }
         [command @ ("install" | "flow"), dir, rest @ ..] => {
             let (mut serial, mut fake, mut dry_run, mut write) = (None, None, false, false);
             let (mut options, mut fake_google) = (FlowOptions::default(), None);
             let (mut own_file, mut work_dir, mut proxy) = (None, None, None);
+            let mut backup_dir = None;
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 match *arg {
@@ -1445,6 +1674,7 @@ fn run() -> Res<bool> {
                     }
                     "--factory-zip" => own_file = it.next().map(PathBuf::from),
                     "--work-dir" => work_dir = it.next().map(PathBuf::from),
+                    "--backup-dir" => backup_dir = it.next().map(PathBuf::from),
                     // The one way a proxy is used: named here, by the owner
                     "--proxy" => proxy = Some(parse_proxy(it.next().copied())?),
                     "--fake-google" => fake_google = it.next().copied(),
@@ -1456,6 +1686,7 @@ fn run() -> Res<bool> {
                 work_dir,
                 proxied: proxy.is_some(),
                 fetcher: Fetcher::google(proxy.clone()),
+                backup_dir,
             };
             let dir = Path::new(dir);
             // `flow` is always a dry run on a pretend phone. `install` is

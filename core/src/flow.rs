@@ -77,7 +77,7 @@ use crate::signature::TrustedKeys;
 use crate::{Error, Result};
 use serde::Serialize;
 
-const ISSUES: &str = "https://github.com/derekross/omarchy-mobile/issues";
+pub(crate) const ISSUES: &str = "https://github.com/derekross/omarchy-mobile/issues";
 const DOWNLOAD: &str = "https://omamobile.org/download";
 /// What Google's factory images page asks a person to accept before it hands
 /// out a file. Google's words, shown as Google's on the terms step.
@@ -123,6 +123,10 @@ pub const ANSWERS_AT_FIRST_START: &str = "At its first start the phone sets up y
 /// image kept a place for the answers.
 pub const NO_PLACE_FOR_ANSWERS: &str = "This release's system image keeps no place for your answers, so a phone installed from it by this installer would start with no account and nothing to unlock it with. This installer does not install such a release.";
 /// Said on the unlock screen, before its steps, by a flow that may write
+/// What the confirmation says instead of [`ANSWERS_AT_FIRST_START`] for a
+/// release whose root image offers the install link: the answers go over
+/// the link, and the image is written as the release signed it.
+const LINK_ANSWERS: &str = "Your answers are not written into the images: what is flashed is the release as it was signed. After the restart the phone offers the install link on this cable, and the installer gives it your answers there, saves its radio backup on this computer and sends it the factory image you have from Google.";
 /// ([`FlowOptions::write`]): the steps there erase the phone, and this
 /// version's writes have run against the tests' pretend phone only.
 pub const NO_USABLE_PHONE_YET: &str = "Unlocking the bootloader erases the phone. This version of the installer has written only to a pretend phone in its tests, not yet to a real one: unlock the phone for this version only if it is one you can do without.";
@@ -1184,6 +1188,10 @@ pub struct Flow {
     /// How far the writes got when they stopped, and whether the phone ran
     /// from slot B.
     write_reach: Option<(WriteReach, bool)>,
+    /// The serial number the writing session pinned, kept from the end of
+    /// a write that ran through for the install link's serial proof
+    /// ([`Self::link`]), and nowhere else.
+    link_serial: Option<String>,
 }
 
 fn step(text: impl Into<String>) -> ScreenStep {
@@ -1191,6 +1199,11 @@ fn step(text: impl Into<String>) -> ScreenStep {
         text: text.into(),
         command: None,
     }
+}
+
+/// [`about`], for the install link's screens.
+pub(crate) fn about_size(size: u64) -> String {
+    about(size)
 }
 
 /// A file's size for a person: `3.9 GB`, or megabytes below one.
@@ -1234,6 +1247,7 @@ impl Flow {
             confirmed: false,
             write_open: false,
             write_reach: None,
+            link_serial: None,
         };
         // The override exists for dry runs: a flow that could write refuses
         // it whole, before a release is read or a phone is asked anything
@@ -1288,8 +1302,12 @@ impl Flow {
         }
         // A phone written from an image with no place for the answers
         // starts with no account: a flow that writes stops here, before
-        // the owner erases a phone for it
-        if flow.options.write && release.manifest().root_image.placeholders.is_empty() {
+        // the owner erases a phone for it. A release whose root image
+        // offers the install link takes the answers there instead
+        if flow.options.write
+            && release.manifest().root_image.placeholders.is_empty()
+            && release.manifest().install_link.is_none()
+        {
             flow.stop(
                 StopKind::NoPlaceForAnswers,
                 Retry::StopsAgain,
@@ -2192,7 +2210,12 @@ impl Flow {
             .release
             .as_ref()
             .expect("a flow past the warning has a release");
-        self.root_answers = if release.manifest().root_image.placeholders.is_empty() {
+        // A release whose root image offers the install link gets the
+        // answers there, after the write: its image is written as signed,
+        // placeholders and all (docs/DESIGN.md §12, decision 19)
+        self.root_answers = if release.manifest().root_image.placeholders.is_empty()
+            || release.manifest().install_link.is_some()
+        {
             None
         } else {
             Some(root_answers(
@@ -2566,6 +2589,12 @@ impl Flow {
                             .map(|()| session),
                         Err(e) => Err(e),
                     },
+                    // The install link gives the phone its answers after
+                    // the write, so the image goes as the release signed it
+                    None if self.has_install_link() => session
+                        .preflight_userdata(image_len)
+                        .await
+                        .map(|()| session),
                     None => Err(Error::Refused(
                         "this run has no answers for the system image: nothing is written".into(),
                     )),
@@ -2654,8 +2683,87 @@ impl Flow {
         };
         self.write_open = false;
         self.write_reach = None;
+        self.link_serial = Some(session.serial().to_string());
         self.step = Step::Installed(plan.clone());
         Ok(session.into_transport())
+    }
+
+    /// The release's root image offers the install link at its first start
+    /// (`manifest.json`'s `install_link`): after the write the install goes
+    /// on through [`Self::link`], and `installed` is not the end.
+    pub fn has_install_link(&self) -> bool {
+        self.release
+            .as_ref()
+            .is_some_and(|r| r.manifest().install_link.is_some())
+    }
+
+    /// After a write that ran through, for a release with the install link:
+    /// the install's next part, from the phone's first start to a phone that
+    /// is ready ([`crate::link::LinkFlow`]). It takes what this run pinned
+    /// and checked (the serial number the writing session read before every
+    /// write, for the serial proof; the owner's factory image as the signed
+    /// build index describes it) and the owner's answers, which must be the
+    /// ones handed to [`Self::answers`] (the flow kept their summary), with
+    /// what the link carries besides (`extras`) and a salt for the
+    /// password's hash ([`crate::firstboot::salt_from`]). `backup_place`:
+    /// the front end already knows where the radio backup goes.
+    pub fn link(
+        &mut self,
+        answers: &OwnerAnswers,
+        extras: &crate::firstboot::Extras<'_>,
+        salt: &str,
+        version: &str,
+        backup_place: bool,
+    ) -> Result<crate::link::LinkFlow> {
+        if !matches!(self.step, Step::Installed(_)) {
+            return self.out_of_order("the install link");
+        }
+        if !self.has_install_link() {
+            return Err(Error::Refused(
+                "this release's root image offers no install link".into(),
+            ));
+        }
+        if self.answers.as_ref() != Some(&answers.summary()) {
+            return Err(Error::Refused(
+                "those are not the answers this install was given".into(),
+            ));
+        }
+        let (Some(serial), Some(zip), Some(index), Some(release)) = (
+            self.link_serial.clone(),
+            self.zip.clone(),
+            self.index.as_ref(),
+            self.release.as_ref(),
+        ) else {
+            return Err(Error::Refused(
+                "the install has nothing to hand the link".into(),
+            ));
+        };
+        let build = index
+            .data()
+            .builds
+            .iter()
+            .find(|b| b.build == zip.build && b.zip == zip.name)
+            .ok_or_else(|| Error::Refused("the factory image is not in the index".into()))?;
+        let sha256 = omamobile_link::digest::from_hex32(&build.sha256)
+            .ok_or_else(|| Error::Refused("the index's SHA-256 is not one".into()))?;
+        let valid = crate::link::link_answers(answers, extras, salt)?;
+        let (name, codename) = self.names();
+        Ok(crate::link::LinkFlow::new(crate::link::LinkStart {
+            serial,
+            device: codename,
+            device_name: name,
+            release: release.manifest().version.clone(),
+            factory: omamobile_link::msg::FactoryBegin {
+                size: zip.size,
+                sha256,
+                build: zip.build,
+                name: zip.name,
+            },
+            answers: Some(valid),
+            token: None,
+            backup_place,
+            version: version.to_string(),
+        }))
     }
 
     /// The current step as text. See [`Screen`].
@@ -2746,6 +2854,8 @@ impl Flow {
                 // The steps below erase the phone. A flow that installs
                 // nothing afterwards says so first, where it can't be missed
                 let no_install = self.ends_at_dry_run();
+                // An install through the install link has run against the
+                // tests' pretend phone only too: the same notice
                 let first = if no_install {
                     NO_INSTALL_YET
                 } else {
@@ -2913,10 +3023,16 @@ impl Flow {
                 s.body = vec![
                     "A user name, a PIN or password to unlock the phone (digits only gives a PIN pad), the phone's name, the time zone and, if you like, a Wi-Fi network.".into(),
                 ];
-                s.body.push(match (self.has_place_for_answers(), self.options.write) {
+                s.body.push(if self.options.write && self.has_install_link() {
+                    "They are kept in this computer's memory only, and given to the phone over the install link at its first start, after the write.".into()
+                } else if self.has_install_link() {
+                    "An install gives these to the phone over the install link, after the write. This dry run checks them, and keeps them nowhere.".into()
+                } else {
+                    match (self.has_place_for_answers(), self.options.write) {
                     (true, true) => "The phone sets up your account from these at its first start: the installer puts them into the system image as it writes it. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you type it, since the phone needs it to connect. The installer keeps them nowhere else and sends them nowhere but to the phone.".into(),
                     (true, false) => "An install puts these into the system image, for the phone's first start. This dry run checks them, and checks where in the system image they would go; it writes nothing.".into(),
                     (false, _) => format!("{NO_PLACE_FOR_ANSWERS} This dry run checks your answers all the same, and keeps them nowhere."),
+                    }
                 });
             }
             Step::DryRun => {
@@ -2972,7 +3088,9 @@ impl Flow {
                         a.timezone,
                         if a.wifi { "set" } else { "not set" }
                     ),
-                    if !self.has_place_for_answers() {
+                    if self.has_install_link() {
+                        "An install would give these answers to the phone over the install link, after the write; the system image is written as the release signed it.".into()
+                    } else if !self.has_place_for_answers() {
                         NO_PLACE_FOR_ANSWERS.into()
                     } else if plan.images_walked {
                         "An install would put these answers into the place the system image keeps for them, so the phone sets up your account at its first start. The dry run found that place where the release's signed manifest says.".into()
@@ -3057,7 +3175,11 @@ impl Flow {
                         "Slot B's boot partitions, listed above, are overwritten.".into()
                     },
                     "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.".into(),
-                    ANSWERS_AT_FIRST_START.into(),
+                    if self.has_install_link() {
+                        LINK_ANSWERS.into()
+                    } else {
+                        ANSWERS_AT_FIRST_START.into()
+                    },
                 ];
                 if self
                     .root_answers
@@ -3103,6 +3225,12 @@ impl Flow {
                         "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone: this version of the installer does nothing after the restart. So Wi-Fi does not connect yet; the network you gave is kept for when it does.".into()
                     },
                 ];
+                if self.has_install_link() {
+                    s.action = "link";
+                    s.body.truncate(1);
+                    s.body.push("Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B. At its first start the system grows to fill the phone's storage, which can take a few minutes.".into());
+                    s.body.push("This release finishes its setup over the same cable: at its first start the phone offers the install link, and the installer gives it your answers, saves its radio backup on this computer and sends it the factory image you have from Google, from which the phone installs its own firmware. Keep the phone connected.".into());
+                }
                 s.footer = vec![
                     "Android is still on slot A, unused. Its data was erased with userdata, so it needs a factory reset if it is ever started again.".into(),
                     "The install guide's \"Going back to Android\" has the steps to put the phone back as it was sold.".into(),

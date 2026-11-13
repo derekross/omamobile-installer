@@ -16,6 +16,12 @@ public:
 
     // Asks for one existing file. Exactly one of the three signals follows.
     virtual void open(const QString &title) = 0;
+    // Asks for one folder (the install link's radio backup). The same three
+    // signals follow. A picker that has no folder chooser says so.
+    virtual void openFolder(const QString &title) {
+        Q_UNUSED(title);
+        emit failed(QStringLiteral("this chooser picks no folders"));
+    }
 
 signals:
     void picked(const QString &path);

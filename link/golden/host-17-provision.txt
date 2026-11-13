@@ -1,0 +1,13 @@
+frame: host-17-provision
+provision, id 17
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 16
+len: 25
+offset: 0
+payload sha256: 49ff01b16f8fa80eece22261134a21b3859a0b18f1b7009b2b26f2cad324fa52
+pad byte: no
+frame bytes: 81
+frame sha256: 43a1516233867a00f97872ec05daaa2f7ccb41c0c9d0c3ac6568d504f1f60639
+payload: {"t":"provision","id":17}

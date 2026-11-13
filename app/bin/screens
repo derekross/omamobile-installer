@@ -16,5 +16,5 @@ mkdir -p "$OUT"
 OUT="$(CDPATH= cd -- "$OUT" && pwd)"
 # The pictures of an earlier walk, whose names may have changed since
 rm -f "${OUT:?}"/*.png
-OMAINSTALL_SCREENS="$OUT" "$ROOT/bin/test" theScreensOfAPretendInstall
+OMAINSTALL_SCREENS="$OUT" "$ROOT/bin/test" theScreensOfAPretendInstall theScreensOfTheInstallLink
 ls "$OUT"

@@ -6,6 +6,11 @@
 //! on the web), and that is the front end's part.
 //!
 //! Nothing here decides what is sent: it moves the core's bytes.
+#[cfg(not(target_arch = "wasm32"))]
+mod link;
+#[cfg(not(target_arch = "wasm32"))]
+pub use link::UsbLink;
+
 use nusb::transfer::{Bulk, Direction, In, Out};
 use nusb::{Device, Endpoint, Interface};
 use omamobile_installer_core::fastboot::{Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS};

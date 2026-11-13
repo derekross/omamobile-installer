@@ -20,11 +20,13 @@ public:
     explicit PortalFilePicker(QObject *parent = nullptr);
 
     void open(const QString &title) override;
+    void openFolder(const QString &title) override;
 
 private slots:
     void response(uint code, const QVariantMap &results);
 
 private:
+    void ask(const QString &title, bool folder);
     void called(QDBusPendingCallWatcher *watcher);
     void listen(const QString &path);
     void done();

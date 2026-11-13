@@ -31,7 +31,10 @@ ColumnLayout {
             hostname: hostname.text,
             timezone: timezone.text,
             wifi_ssid: wifiSsid.text,
-            wifi_psk: wifiPsk.text
+            wifi_psk: wifiPsk.text,
+            ssh_key: sshKey.text,
+            full_name: fullName.text,
+            email: email.text
         })
     }
 
@@ -78,4 +81,8 @@ ColumnLayout {
     Field { id: timezone; name: "timezone"; label: qsTr("Time zone"); text: backend.systemTimeZone }
     Field { id: wifiSsid; name: "wifi_ssid"; label: qsTr("Wi-Fi network (optional)") }
     Field { id: wifiPsk; name: "wifi_psk"; secret: true; label: qsTr("Wi-Fi password") }
+    // What the install link carries besides, in a run that writes
+    Field { id: sshKey; name: "ssh_key"; visible: backend.writes; label: qsTr("An SSH public key for the phone (optional)") }
+    Field { id: fullName; name: "full_name"; visible: backend.writes; label: qsTr("Your full name, for git (optional)") }
+    Field { id: email; name: "email"; visible: backend.writes; label: qsTr("Your email address, for git (optional)") }
 }

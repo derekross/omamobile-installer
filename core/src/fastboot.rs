@@ -874,10 +874,21 @@ impl<T: Transport> Session<T> {
     /// A phone written without the answers starts with no account and
     /// nothing to unlock it with: a session that writes takes the root
     /// image only with them, and only from a release whose image has a
-    /// place for them.
+    /// place for them. A release whose root image offers the install link
+    /// is the exception: the link gives the phone its answers after the
+    /// write, and its image is written as the release signed it, with no
+    /// answers in it (docs/DESIGN.md §12).
     fn answers_ready(&self) -> Result<()> {
         if self.is_dry_run() {
             return Ok(());
+        }
+        if self.release.manifest().install_link.is_some() {
+            return match self.answers {
+                None => Ok(()),
+                Some(_) => Err(Error::Refused(
+                    "this release takes the owner's answers over the install link, not in its image: nothing is written".into(),
+                )),
+            };
         }
         if self.release.manifest().root_image.placeholders.is_empty() {
             return Err(Error::Refused(
@@ -938,6 +949,13 @@ impl<T: Transport> Session<T> {
         &self.client.flashable
     }
     /// How far this session's writes got. In a dry run: nothing, always.
+    /// The serial number the session pinned and read again before each
+    /// write. For the flow alone: the install link's serial proof is
+    /// compared against it after the restart (INSTALL-LINK-PLAN §2.5).
+    pub(crate) fn serial(&self) -> &str {
+        &self.serial
+    }
+
     pub fn reach(&self) -> WriteReach {
         self.reach
     }

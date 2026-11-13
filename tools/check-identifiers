@@ -56,6 +56,9 @@ ALLOWED=(
   "fixtures/published/manifest.json|71b47a6a4a19"
   # A run of counted digits in the test image the zstd tool compressed
   "fixtures/zstd/pattern.img.zst|123456789601234"
+  # The install link's golden frames as hex text: these twelve digits are
+  # the bytes of 'ist"]}', the end of a JSON payload, not an address
+  "link/golden/phone-36-error-backup-precondition.hex|697374225d7d"
   # A key ID, in the test that a key ID is not taken for a fingerprint
   "core/tests/published_release.rs|7F1041BF47291504"
 )

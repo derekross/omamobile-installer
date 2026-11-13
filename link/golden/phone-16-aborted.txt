@@ -1,0 +1,13 @@
+frame: phone-16-aborted
+aborted, answering id 14
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 15
+len: 23
+offset: 0
+payload sha256: 7c0a1a9ee2194fdbafe6a786d701b123aac49e2dcc14eba35269b653f05a6bd4
+pad byte: no
+frame bytes: 79
+frame sha256: de4bafe0ecd1cfb5bef340ddd41731b521506d66c34ca95479309b7b546f38aa
+payload: {"t":"aborted","re":14}

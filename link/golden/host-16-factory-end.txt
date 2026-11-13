@@ -1,0 +1,13 @@
+frame: host-16-factory-end
+factory-end, id 16
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 15
+len: 27
+offset: 0
+payload sha256: 72f06d8b74fdcc2594e4cd511dff420bf2530f1636be4982b9296928ef0668fd
+pad byte: no
+frame bytes: 83
+frame sha256: 7484e423542b682719e5f0a54e894326cd3562e21184745ca4aa5f09dceef237
+payload: {"t":"factory-end","id":16}
