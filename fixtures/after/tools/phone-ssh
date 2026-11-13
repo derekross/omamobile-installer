@@ -1,0 +1,27 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Stand-in for tools/phone-ssh (fixtures/after-stand-ins/README.md): answers
+# as the pretend phone in $OMAINSTALL_PRETEND_PHONE, and reaches nothing.
+set -u
+P=${OMAINSTALL_PRETEND_PHONE:?the stand-ins run only in a test}
+[[ ${1:-} == --fresh ]] && shift
+cmd=$*
+echo "ssh $cmd" | tr '\n' ' ' >> "$P/log"; echo >> "$P/log"
+if [[ -f $P/up_after ]]; then
+  n=$(cat "$P/up_after")
+  if ((n > 0)); then echo $((n - 1)) > "$P/up_after"; else rm -f "$P/up_after"; touch "$P/up"; fi
+fi
+if [[ ! -f $P/up ]]; then echo "ssh: connect to host 172.16.42.1 port 22: No route to host" >&2; exit 255; fi
+if [[ -f $P/refuse_key ]]; then echo "root@172.16.42.1: Permission denied (publickey)." >&2; exit 255; fi
+case $cmd in
+  *serialno*) cat "$P/id" ;;
+  *firstboot/done*) [[ -f $P/firstboot_done ]] ;;
+  *random/boot_id*) cat "$P/boot_id" ;;
+  *reboot-to*)
+    rm -f "$P/up"
+    echo "$(cat "$P/boot_id")-next" > "$P/boot_id"
+    echo 1 > "$P/up_after" ;;
+  *is-system-running*) cat "$P/system" 2>/dev/null || echo running ;;
+  true) ;;
+  *) ;;
+esac
