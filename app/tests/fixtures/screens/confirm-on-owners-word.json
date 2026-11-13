@@ -33,5 +33,6 @@
     "To go ahead, type the phone's codename: cheetah",
     "Anything else stops the install here, with nothing written."
   ],
+  "choices": [],
   "action": "confirm"
 }

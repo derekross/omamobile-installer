@@ -18,7 +18,8 @@
     "Every image was written, the phone confirmed each one, and slot B is the active slot. Only the restart was not confirmed.",
     "Restart the phone from its Fastboot Mode screen (Start): it then starts Omarchy Mobile from slot B.",
     "Or start the installer again, with the phone in Fastboot Mode: it writes every image again, from the first.",
-    "If the installer then says that the phone runs from slot B, that is this install: start it again and say that this is a reinstall."
+    "If the installer then says that the phone runs from slot B, or asks what is on slot B, that is this install. Start the phone once from its Fastboot Mode screen, so that it runs slot B's own bootloader, bring it back to Fastboot Mode, and start the installer again as a reinstall: slot B holds Omarchy Mobile."
   ],
+  "choices": [],
   "action": "none"
 }

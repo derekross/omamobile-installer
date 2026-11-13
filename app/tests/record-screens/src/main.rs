@@ -13,7 +13,7 @@
 mod support;
 use omamobile_installer_core::download::{FactoryDownload, FetchFailure, FetchNext, FetchResponse};
 use omamobile_installer_core::fastboot::PhoneId;
-use omamobile_installer_core::flow::{AnswersInput, Flow, FlowOptions, OwnerAnswers};
+use omamobile_installer_core::flow::{AnswersInput, Flow, FlowOptions, OwnerAnswers, SlotBHolds};
 use pollster::block_on;
 use serde_json::Value;
 use std::path::Path;
@@ -172,6 +172,38 @@ fn main() {
         dump(dir, name, &f);
     }
 
+    // A phone that runs from slot B, in a front end that asks what slot B
+    // holds (the app's): the question, the stop for each answer that is not
+    // Omarchy Mobile, and a reinstall's dry run on a phone that tells one
+    // bootloader copy's version (the Pixel 7 Pro's)
+    let asking = || FlowOptions {
+        asks_what_slot_b_holds: true,
+        ..Default::default()
+    };
+    let phone = scen("slot-b-one-slot");
+    let mut f = to(&b, &phone, asking(), "phone");
+    look(&mut f, &phone);
+    dump(dir, "slot-b", &f);
+    for (name, answer) in [
+        ("stop-runs-from-slot-b-android", SlotBHolds::Android),
+        ("stop-runs-from-slot-b-not-sure", SlotBHolds::NotSure),
+    ] {
+        let mut f = to(&b, &phone, asking(), "phone");
+        look(&mut f, &phone);
+        f.answer_slot_b(answer).unwrap();
+        dump(dir, name, &f);
+    }
+    let mut f = to(&b, &phone, asking(), "phone");
+    look(&mut f, &phone);
+    f.answer_slot_b(SlotBHolds::OmarchyMobile).unwrap();
+    assert_eq!(f.screen().state, "google-terms");
+    f.decline_google_terms().unwrap();
+    give(&mut f, &b.factory_zip_name, &b.factory_zip);
+    f.answers(&answers()).unwrap();
+    let session = block_on(f.dry_run(phone.clone())).unwrap().unwrap();
+    f.dry_run_done(session).unwrap();
+    dump(dir, "done-reinstall-one-slot", &f);
+
     // The maintainer's override: the notice
     let over = || FlowOptions {
         maintainer_skip_bootloader_slot_check: true,
@@ -314,6 +346,20 @@ fn main() {
     );
     drive(&mut f, &b, &phone, "cheetah", "confirm");
     dump(dir, "confirm-reinstall", &f);
+    // The Pixel 7 Pro's reinstall, asked about in the app: the confirmation
+    // says which bootloader copy the check rests on
+    let phone = scen("slot-b-one-slot");
+    let mut f = begin(
+        &b,
+        FlowOptions {
+            asks_what_slot_b_holds: true,
+            ..w()
+        },
+    );
+    drive(&mut f, &b, &phone, "cheetah", "slot-b");
+    f.answer_slot_b(SlotBHolds::OmarchyMobile).unwrap();
+    drive(&mut f, &b, &phone, "cheetah", "confirm");
+    dump(dir, "confirm-reinstall-one-slot", &f);
     // A locked phone, in a flow that installs: the notice is another
     let phone = scen("locked");
     let mut f = begin(&b, w());

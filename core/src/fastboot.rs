@@ -505,7 +505,9 @@ fn parse_size(text: &str) -> Option<u64> {
 pub struct PhoneOptions {
     /// Slot B is the current slot and holds Omarchy Mobile. Without it a
     /// phone running from slot B is refused: stock Android runs there after
-    /// a system update.
+    /// a system update. With it, on a phone that runs from slot B and
+    /// reports one bootloader copy's version only, that version is slot
+    /// B's, and it passes the bootloader-slot check.
     pub reinstall: bool,
     /// When the bootloader reports no per-slot versions: the version the
     /// owner checked on the other slot. It must equal the current slot's.
@@ -708,8 +710,15 @@ impl<T: Transport> Session<T> {
         match (per_slot('a'), per_slot('b'), &options.bootloader_slots_confirmed) {
             (Some(a), Some(b), _) if a == b => {}
             (Some(a), Some(b), _) => return Err(Error::Phone(format!("the bootloader slots differ (a: {a}, b: {b})"))),
-            (_, _, Some(confirmed)) if *confirmed == bootloader => {}
-            (_, _, Some(confirmed)) => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
+            (_, _, Some(confirmed)) if *confirmed != bootloader => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
+            // A reinstall on a phone that runs from slot B: the version it
+            // tells is slot B's own, the bootloader an install that stays on
+            // slot B starts with. Slot A's is not needed (the maintainer's
+            // decision of 2026-11-13)
+            _ if current_slot == "b" && options.reinstall => {
+                client.log.push("bootloader: slot b's, which the phone runs (a reinstall); no slot is switched".into());
+            }
+            (_, _, Some(_)) => {}
             // Only the unknown case, and only in a dry run (checked above too)
             _ if options.maintainer_skip_bootloader_slot_check && dry_run => {
                 slot_check_skipped = true;

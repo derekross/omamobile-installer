@@ -17,5 +17,6 @@
   "footer": [
     "Before the first write the installer asks the phone once more what it is, and checks each image against its partition again."
   ],
+  "choices": [],
   "action": "write"
 }

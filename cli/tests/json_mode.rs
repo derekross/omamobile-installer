@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! `omamobile-install json` (docs/APP.md §3, protocol 2), the built tool
+//! `omamobile-install json` (docs/APP.md §3, protocol 3), the built tool
 //! driven over its standard input and output as the desktop app, an agent or
 //! a script drives it. The phones are the pretend ones (feature
 //! `fake-phone`) and Google's server is a socket on 127.0.0.1 in this file:
@@ -220,7 +220,7 @@ impl Tool {
         let hello = tool.hear();
         assert_eq!(
             hello,
-            json!({"type": "hello", "protocol": 2, "tool": "omamobile-install",
+            json!({"type": "hello", "protocol": 3, "tool": "omamobile-install",
                    "version": env!("CARGO_PKG_VERSION"), "writes": tool.writes})
         );
         tool
@@ -229,7 +229,7 @@ impl Tool {
     /// As [`Tool::pretend`], through the handshake to the first screen.
     fn started(states: &str, extra: &[&str]) -> (Tool, Reply) {
         let mut tool = Tool::pretend(states, extra);
-        tool.say(json!({"type": "hello", "protocol": 2, "app": "the tests", "version": "0"}));
+        tool.say(json!({"type": "hello", "protocol": 3, "app": "the tests", "version": "0"}));
         let first = tool.act(json!({"type": "start", "reinstall": false}));
         (tool, first)
     }
@@ -507,7 +507,7 @@ fn the_tool_says_hello_first_and_asks_nothing_of_a_phone_before_start() {
     // Nothing follows the hello by itself: no screen before start
     assert!(tool.hear_within(Duration::from_millis(300)).is_none());
     // The app's hello is not answered
-    tool.say(json!({"type": "hello", "protocol": 2, "app": "the tests", "version": "0"}));
+    tool.say(json!({"type": "hello", "protocol": 3, "app": "the tests", "version": "0"}));
     assert!(tool.hear_within(Duration::from_millis(300)).is_none());
     let ended = tool.quit();
     assert_eq!(ended.kinds(), ["hello", "bye"]);
@@ -520,7 +520,7 @@ fn the_tool_says_hello_first_and_asks_nothing_of_a_phone_before_start() {
     // What `omainstall check` does: read the hello, send quit. It needs no
     // release, and none is read
     let mut tool = Tool::with_args(&["--fake-phone", "ready"]);
-    assert_eq!(tool.hear()["protocol"], 2);
+    assert_eq!(tool.hear()["protocol"], 3);
     assert_eq!(tool.quit().kinds(), ["hello", "bye"]);
 
     // The first screen comes with start, and is the warning
@@ -544,10 +544,10 @@ fn the_tool_says_hello_first_and_asks_nothing_of_a_phone_before_start() {
 #[test]
 fn another_protocol_number_is_fatal() {
     for hello in [
-        json!({"type": "hello", "protocol": 1, "app": "the tests", "version": "0"}),
-        json!({"type": "hello", "protocol": 3, "app": "the tests", "version": "0"}),
+        json!({"type": "hello", "protocol": 2, "app": "the tests", "version": "0"}),
+        json!({"type": "hello", "protocol": 4, "app": "the tests", "version": "0"}),
         json!({"type": "hello", "protocol": 0}),
-        json!({"type": "hello", "protocol": "2"}),
+        json!({"type": "hello", "protocol": "3"}),
         json!({"type": "hello"}),
     ] {
         let mut tool = Tool::pretend("ready", &[]);
@@ -556,7 +556,7 @@ fn another_protocol_number_is_fatal() {
         assert_eq!(ended.code, 1, "{hello}");
         assert_eq!(ended.kinds(), ["hello", "fatal"], "{hello}");
         let said = ended.said[1]["message"].as_str().unwrap();
-        assert!(said.contains("this tool speaks protocol 2"), "{said}");
+        assert!(said.contains("this tool speaks protocol 3"), "{said}");
         assert!(ended.stderr.contains("received 0 commands"));
     }
 }
@@ -625,7 +625,7 @@ fn what_the_tool_cannot_start_with_is_fatal() {
     ] {
         let mut tool = Tool::with_args(&args);
         tool.hear();
-        tool.say(json!({"type": "hello", "protocol": 2}));
+        tool.say(json!({"type": "hello", "protocol": 3}));
         tool.say(json!({"type": "start", "reinstall": false}));
         let ended = tool.finish();
         assert_eq!((ended.code, ended.kinds()), (1, vec!["hello", "fatal"]));
@@ -673,8 +673,8 @@ fn the_whole_flow_to_the_dry_run_as_a_transcript() {
     assert_eq!(
         keys,
         [
-            "action", "body", "file", "footer", "link", "notice", "plan", "problem", "quote",
-            "retry", "state", "steps", "stop", "title"
+            "action", "body", "choices", "file", "footer", "link", "notice", "plan", "problem",
+            "quote", "retry", "state", "steps", "stop", "title"
         ]
     );
 
@@ -810,7 +810,7 @@ fn a_script_can_write_every_line_at_once() {
     // lines waits its turn
     let zip = zip_file();
     let script: String = [
-        json!({"type": "hello", "protocol": 2, "app": "a script", "version": "0"}),
+        json!({"type": "hello", "protocol": 3, "app": "a script", "version": "0"}),
         json!({"type": "start", "reinstall": false}),
         json!({"type": "acknowledge"}),
         json!({"type": "read-phone"}),
@@ -971,19 +971,20 @@ fn no_phone_and_more_than_one_phone() {
         ended.stderr
     );
 
-    // The other one, chosen: the flow's stop for it
+    // The other one, chosen: the flow's question for it, which runs from
+    // slot B
     let (mut tool, _) = Tool::started("ready,slot-b", &[]);
     tool.act(json!({"type": "acknowledge"}));
     tool.act(json!({"type": "read-phone"}));
-    let stopped = tool.act(json!({"type": "read-phone", "phone": "2"}));
-    assert_eq!(stopped.screen["stop"], "runs-from-slot-b");
+    let asked = tool.act(json!({"type": "read-phone", "phone": "2"}));
+    assert_eq!(asked.state(), "slot-b");
     tool.quit();
 }
 
 /// Run to the first look at a phone in `state` and return the stop.
 fn stop_at_the_first_look(state: &str, reinstall: bool) -> (Tool, Reply) {
     let mut tool = Tool::pretend(state, &[]);
-    tool.say(json!({"type": "hello", "protocol": 2}));
+    tool.say(json!({"type": "hello", "protocol": 3}));
     tool.act(json!({"type": "start", "reinstall": reinstall}));
     tool.act(json!({"type": "acknowledge"}));
     let reply = tool.act(json!({"type": "read-phone"}));
@@ -998,12 +999,6 @@ fn each_kind_of_stop_is_the_cores_screen_and_says_whether_starting_again_helps()
             "wrong-model",
             "after-fix",
             "once that is done",
-        ),
-        (
-            "slot-b",
-            "runs-from-slot-b",
-            "stops-again",
-            "will stop here again",
         ),
         (
             "one-slot",
@@ -1108,7 +1103,7 @@ fn each_kind_of_stop_is_the_cores_screen_and_says_whether_starting_again_helps()
         let mut tool =
             Tool::with_args(&["--release", dir.to_str().unwrap(), "--fake-phone", "ready"]);
         tool.hear();
-        tool.say(json!({"type": "hello", "protocol": 2}));
+        tool.say(json!({"type": "hello", "protocol": 3}));
         let first = tool.act(json!({"type": "start", "reinstall": false}));
         assert_eq!((first.state(), first.action()), ("stopped", "none"));
         assert_eq!(
@@ -1192,7 +1187,7 @@ fn malformed_lines_get_an_error_and_never_move_the_flow() {
     // An empty line is skipped
     tool.write(b"\n   \n");
     assert!(tool.hear_within(Duration::from_millis(200)).is_none());
-    tool.say(json!({"type": "hello", "protocol": 2}));
+    tool.say(json!({"type": "hello", "protocol": 3}));
     // start says whether this is a reinstall, as true or false
     for start in [
         json!({"type": "start"}),
@@ -1223,7 +1218,7 @@ fn malformed_lines_get_an_error_and_never_move_the_flow() {
         b"\xff\xfe\x00\n".to_vec(),
         long.into_bytes(),
         // said once, before the install
-        b"{\"type\": \"hello\", \"protocol\": 2}\n".to_vec(),
+        b"{\"type\": \"hello\", \"protocol\": 3}\n".to_vec(),
         b"{\"type\": \"start\", \"reinstall\": true}\n".to_vec(),
     ] {
         let reply = tool.act_raw(&line);
@@ -1255,7 +1250,7 @@ fn malformed_lines_get_an_error_and_never_move_the_flow() {
     // A last line without its line feed still counts
     let mut tool = Tool::pretend("ready", &[]);
     tool.write(
-        b"{\"type\": \"hello\", \"protocol\": 2}\n{\"type\": \"start\", \"reinstall\": false}",
+        b"{\"type\": \"hello\", \"protocol\": 3}\n{\"type\": \"start\", \"reinstall\": false}",
     );
     tool.owed = 1;
     assert_eq!(tool.finish().kinds(), ["hello", "screen", "bye"]);
@@ -1802,7 +1797,7 @@ fn a_quit_written_behind_a_write_waits_for_the_write() {
     // cut off, its screen comes, and then the tool leaves
     let mut tool = Tool::pretend("ready", &["--write"]);
     let lines = [
-        json!({"type": "hello", "protocol": 2, "app": "a script", "version": "0"}),
+        json!({"type": "hello", "protocol": 3, "app": "a script", "version": "0"}),
         json!({"type": "start", "reinstall": false}),
         json!({"type": "acknowledge"}),
         json!({"type": "read-phone"}),
@@ -1892,7 +1887,7 @@ fn a_write_is_finished_when_nobody_reads_the_tool_any_more() {
             return message["screen"]["state"].as_str().unwrap().to_string();
         }
     };
-    send(json!({"type": "hello", "protocol": 2}));
+    send(json!({"type": "hello", "protocol": 3}));
     for (message, then) in [
         (json!({"type": "start", "reinstall": false}), "warning"),
         (json!({"type": "acknowledge"}), "phone"),
@@ -1932,4 +1927,107 @@ fn a_write_is_finished_when_nobody_reads_the_tool_any_more() {
     assert_eq!(received.last(), Some(&"reboot"), "{stderr}");
     assert!(received.contains(&"set_active:b") && received.contains(&"flash:userdata"));
     assert!(stderr.contains("partitions written: 6"), "{stderr}");
+}
+
+#[test]
+fn a_phone_on_slot_b_is_asked_about_and_a_reinstall_reaches_the_write() {
+    // The Pixel 7 Pro on a reinstall: it runs from slot B and tells one
+    // bootloader copy's version. This mode asks what slot B holds, in the
+    // core's words, and takes the answer as a message
+    let (mut tool, _) = Tool::started("slot-b-one-slot", &["--write"]);
+    assert_eq!(tool.act(json!({"type": "acknowledge"})).state(), "phone");
+    let asked = tool.act(json!({"type": "read-phone"}));
+    assert_eq!((asked.state(), asked.action()), ("slot-b", "slot-b"));
+    assert_eq!(asked.screen["stop"], Value::Null);
+    let choices: Vec<&str> = asked.screen["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["answer"].as_str().unwrap())
+        .collect();
+    assert_eq!(choices, ["omarchy-mobile", "android", "not-sure"]);
+    assert!(asked.screen["choices"][0]["label"]
+        .as_str()
+        .unwrap()
+        .contains("Omarchy Mobile"));
+    // Every other screen has no choices
+    let (other, warning) = Tool::started("ready", &[]);
+    assert_eq!(warning.screen["choices"], json!([]));
+    other.quit();
+    // An answer that is not one of them, or none: an error, and the
+    // question stays
+    for wrong in [
+        json!({"type": "slot-b"}),
+        json!({"type": "slot-b", "answer": "yes"}),
+        json!({"type": "slot-b", "answer": true}),
+    ] {
+        let refused = tool.act(wrong);
+        assert!(
+            refused
+                .error()
+                .contains("omarchy-mobile, android, not-sure"),
+            "{}",
+            refused.error()
+        );
+        assert_eq!(refused.state(), "slot-b");
+    }
+    // Another step's message is out of turn here
+    let early = tool.act(json!({"type": "decline-terms"}));
+    assert!(early.error().contains("the screen asks for \"slot-b\""));
+    // Omarchy Mobile: the flow goes on to Google's terms
+    let on = tool.act(json!({"type": "slot-b", "answer": "omarchy-mobile"}));
+    assert_eq!(on.state(), "google-terms");
+    let image = tool.act(json!({"type": "decline-terms"}));
+    assert_eq!(image.state(), "factory-image");
+    assert_eq!(
+        tool.act(json!({"type": "take-file", "path": zip_file()}))
+            .state(),
+        "answers"
+    );
+    assert_eq!(tool.act(answers("alex")).state(), "dry-run");
+    let confirm = tool.act(json!({"type": "dry-run"}));
+    assert_eq!(confirm.state(), "confirm");
+    let body = confirm.screen["body"].to_string();
+    assert!(
+        body.contains(
+            "slot B's bootloader, which the phone already runs; the install switches no slot"
+        ),
+        "{body}"
+    );
+    assert_eq!(confirm.screen["notice"], Value::Null);
+    assert_eq!(
+        tool.act(json!({"type": "confirm", "typed": "cheetah"}))
+            .state(),
+        "write"
+    );
+    let written = tool.act(json!({"type": "write"}));
+    assert_eq!(written.state(), "installed", "{}", written.screen);
+    let ended = tool.quit();
+    assert!(
+        ended.stderr.contains("partitions written: 6"),
+        "{}",
+        ended.stderr
+    );
+    assert!(!ended
+        .commands()
+        .iter()
+        .any(|c| c.starts_with("set_active:a")));
+
+    // Android, and not sure: the core's stops, with only questions sent
+    for (answer, retry) in [("android", "stops-again"), ("not-sure", "after-fix")] {
+        let (mut tool, _) = Tool::started("slot-b-one-slot", &["--write"]);
+        tool.act(json!({"type": "acknowledge"}));
+        assert_eq!(tool.act(json!({"type": "read-phone"})).state(), "slot-b");
+        let stopped = tool.act(json!({"type": "slot-b", "answer": answer}));
+        assert_eq!(stopped.state(), "stopped", "{answer}");
+        assert_eq!(stopped.screen["stop"], "runs-from-slot-b");
+        assert_eq!(stopped.screen["retry"], retry);
+        let ended = tool.quit();
+        assert!(writes_of(&ended.commands()).is_empty());
+        assert!(ended.stderr.contains("0 others; partitions written: 0"));
+    }
+    // Said to be a reinstall at start: not asked
+    let (tool, reply) = stop_at_the_first_look("slot-b-one-slot", true);
+    assert_eq!(reply.state(), "google-terms");
+    tool.quit();
 }

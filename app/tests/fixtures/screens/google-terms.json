@@ -38,5 +38,6 @@
     "If you do not accept here, the installer downloads nothing, and you can still go on: you download the file from Google's page yourself and hand the saved file to the installer.",
     "Your answer stays in this run of the installer. It is sent nowhere."
   ],
+  "choices": [],
   "action": "accept-terms"
 }

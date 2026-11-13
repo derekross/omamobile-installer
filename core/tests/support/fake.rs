@@ -160,6 +160,15 @@ impl FakePhone {
                 phone.edit(|s| s.unlock_ability = Some("get_unlock_ability: 0".into()));
             }
             "slot-b" => set(&[("current-slot", "b")]),
+            // The Pixel 7 Pro's bootloader on a reinstall: it runs from slot
+            // B and tells the version of the copy in use only
+            "slot-b-one-slot" => {
+                set(&[("current-slot", "b")]);
+                phone.edit(|s| {
+                    s.vars.remove("version-bootloader-a");
+                    s.vars.remove("version-bootloader-b");
+                });
+            }
             "one-slot" => {
                 phone.edit(|s| {
                     s.vars.remove("version-bootloader-a");
@@ -190,12 +199,13 @@ impl FakePhone {
     }
 
     /// The names [`Self::scenario`] knows.
-    pub const SCENARIOS: [&'static str; 10] = [
+    pub const SCENARIOS: [&'static str; 11] = [
         "ready",
         "locked",
         "locked-oem-off",
         "other-model",
         "slot-b",
+        "slot-b-one-slot",
         "one-slot",
         "slots-differ",
         "unknown-build",

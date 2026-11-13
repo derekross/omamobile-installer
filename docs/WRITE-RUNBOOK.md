@@ -56,7 +56,7 @@ So the session does not end with a phone to use. **It ends by installing again w
 
 ### The statement about slot A's bootloader
 
-The Pixel 7 Pro's bootloader tells the version of the slot in use only. `tools/install-phone` goes on past that with `--bootloader-slots-match VERSION`: the owner's statement that the other slot's version was read from the phone and is VERSION, which must equal the version the phone reports. `omamobile-install` applies the same rule with the same option, on the command line only (DESIGN §6).
+The Pixel 7 Pro's bootloader tells the version of the slot in use only. `tools/install-phone` goes on past that with `--bootloader-slots-match VERSION`: the owner's statement that the other slot's version was read from the phone and is VERSION, which must equal the version the phone reports. `omamobile-install` applies the same rule with the same option, on the command line only (DESIGN §6). Since the maintainer's decision of 2026-11-13 a reinstall from slot B does not need the statement: the version the phone reports is then slot B's, the bootloader the install keeps it on (DESIGN §6, "A reinstall from slot B"). This runbook still gives it with `--reinstall`; it is compared with the phone and stops the run if it is another version, so the commands below hold either way.
 
 The installer cannot check the statement. `<BOOTLOADER>` here is therefore a version the maintainer **has read from slot A of this phone** (`fastboot getvar version-bootloader` while slot A was the current slot, as `install-phone`'s own message says), and that equals what the phone reports from slot B today. If nobody has read slot A's version on this phone, **stop: this runbook does not go on without it,** and it does not switch slots to find out.
 

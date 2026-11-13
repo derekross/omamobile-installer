@@ -36,5 +36,6 @@
   "footer": [
     "The file stays on this computer. Nothing of it is sent anywhere."
   ],
+  "choices": [],
   "action": "take-file"
 }

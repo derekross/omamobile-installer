@@ -221,7 +221,7 @@ void standIn(const QByteArray &mode) {
 
 // The straight path of a run to the step in `until`, as the backend takes
 // it: for a stand-in or the real tool with a file handed in.
-bool goTo(Backend &backend, const char *until, const QString &zip) {
+bool goTo(Backend &backend, const char *until, const QString &zip, const QString &slotB = {}) {
     for (int step = 0; step < 12; ++step) {
         if (!QTest::qWaitFor([&] { return !backend.busy() && backend.hasScreen(); }, 20000))
             return false;
@@ -232,6 +232,8 @@ bool goTo(Backend &backend, const char *until, const QString &zip) {
             backend.acknowledge();
         else if (action == "read-phone")
             backend.readPhone();
+        else if (action == "slot-b" && !slotB.isEmpty())
+            backend.answerSlotB(slotB);
         else if (action == "accept-terms")
             backend.declineTerms();
         else if (action == "take-file")
@@ -390,8 +392,8 @@ private slots:
                 stops << screen.value("stop").toString();
         }
         // core/src/flow.rs: Screen::state, and Stop::id
-        for (const char *state : {"warning", "phone", "unlock", "google-terms", "factory-image", "answers", "dry-run", "done",
-                                  "confirm", "write", "installed", "stopped"})
+        for (const char *state : {"warning", "phone", "slot-b", "unlock", "google-terms", "factory-image", "answers", "dry-run",
+                                  "done", "confirm", "write", "installed", "stopped"})
             QVERIFY2(states.contains(state), state);
         // Every id of docs/DESIGN.md §4
         const QStringList ids{"release-not-verified", "no-build-index", "build-index-refused", "warning-declined",
@@ -442,7 +444,7 @@ private slots:
         QCOMPARE(sent.count(), 2);
         QVERIFY(oneLine(sent.at(0).at(0).toByteArray()));
         QCOMPARE(json(sent.at(0).at(0).toByteArray()),
-                 (QJsonObject{{"type", "hello"}, {"protocol", 2}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
+                 (QJsonObject{{"type", "hello"}, {"protocol", 3}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
         QCOMPARE(json(sent.at(1).at(0).toByteArray()), (QJsonObject{{"type", "start"}, {"reinstall", false}}));
 
         Backend again;
@@ -469,6 +471,10 @@ private slots:
             {"phone", [](Backend &b) { return b.primaryAction(); }, {{"type", "read-phone"}}},
             {"phone-not-found", [](Backend &b) { return b.readPhone("2"); }, {{"type", "read-phone"}, {"phone", "2"}}},
             {"unlock", [](Backend &b) { return b.primaryAction(); }, {{"type", "read-phone"}}},
+            // Each of the core's answers, by its name.
+            {"slot-b", [](Backend &b) { return b.answerSlotB("omarchy-mobile"); }, {{"type", "slot-b"}, {"answer", "omarchy-mobile"}}},
+            {"slot-b", [](Backend &b) { return b.answerSlotB("android"); }, {{"type", "slot-b"}, {"answer", "android"}}},
+            {"slot-b", [](Backend &b) { return b.answerSlotB("not-sure"); }, {{"type", "slot-b"}, {"answer", "not-sure"}}},
             {"google-terms", [](Backend &b) { return b.acceptTerms(); }, {{"type", "accept-terms"}}},
             {"google-terms", [](Backend &b) { return b.primaryAction(); }, {{"type", "accept-terms"}}},
             {"google-terms", [](Backend &b) { return b.declineTerms(); }, {{"type", "decline-terms"}}},
@@ -517,6 +523,7 @@ private slots:
             {"acknowledge", [](Backend &b) { return b.acknowledge(); }},
             {"acknowledge", [](Backend &b) { return b.decline(); }},
             {"read-phone", [](Backend &b) { return b.readPhone(); }},
+            {"slot-b", [](Backend &b) { return b.answerSlotB("omarchy-mobile"); }},
             {"accept-terms", [](Backend &b) { return b.acceptTerms(); }},
             {"accept-terms", [](Backend &b) { return b.declineTerms(); }},
             {"download", [](Backend &b) { return b.download(); }},
@@ -527,8 +534,8 @@ private slots:
             {"confirm", [](Backend &b) { return b.declineInstall(); }},
             {"write", [](Backend &b) { return b.write(); }},
         };
-        for (const char *screen : {"warning", "phone", "google-terms", "factory-image-take-file", "answers", "dry-run", "done",
-                                   "confirm", "write", "installed", "stop-not-confirmed", "stop-write-interrupted-userdata",
+        for (const char *screen : {"warning", "phone", "slot-b", "google-terms", "factory-image-take-file", "answers", "dry-run",
+                                   "done", "confirm", "write", "installed", "stop-not-confirmed", "stop-write-interrupted-userdata",
                                    "stop-bootloader-slots-unknown"}) {
             standIn(QByteArray("screen:") + screen);
             Backend backend;
@@ -545,6 +552,13 @@ private slots:
             // action alone sends nothing: the codename is typed first.
             if (backend.action() == "confirm") {
                 QVERIFY(!backend.confirmInstall(""));
+                QVERIFY(!backend.primaryAction());
+            }
+            // The question takes the core's answers and nothing else, and
+            // has no main action: each answer is its own button.
+            if (backend.action() == "slot-b") {
+                for (const char *other : {"", "yes", "Omarchy Mobile", "omarchy"})
+                    QVERIFY2(!backend.answerSlotB(other), other);
                 QVERIFY(!backend.primaryAction());
             }
             // A stop and the last screen take nothing at all.
@@ -803,7 +817,7 @@ private slots:
         QTest::newRow("a screen that lacks a field") << QByteArray("odd-screen") << "malformed" << "sent something this app cannot read" << "the screen has no \"footer\"";
         QTest::newRow("an unknown message") << QByteArray("unknown") << "malformed" << "sent something this app cannot read" << "a kind this app does not know";
         QTest::newRow("an unexpected exit") << QByteArray("exit") << "crashed" << "stopped unexpectedly (exit status 3)" << "stand-in: leaving, as the test asked";
-        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 2" << "";
+        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 3" << "";
         QTest::newRow("another kind of run") << QByteArray("other-mode") << "mode" << "started a run that can write" << "";
         QTest::newRow("a fatal message") << QByteArray("fatal") << "fatal" << "reported that it failed" << "the release could not be read";
         QTest::newRow("no hello") << QByteArray("silent") << "silent" << "did not say hello" << "";
@@ -847,7 +861,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":2,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":3,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "printf '{\"type\":\"screen\",\"screen\":%s}\\n' \"$(tr -d '\\n' < '" + Tests.toUtf8() + "/fixtures/screens/phone.json')\"\n"
                      "read action\n"
@@ -998,10 +1012,18 @@ private slots:
         QCOMPARE(w.texts("quoteLine"), quoted);
         QCOMPARE(w.items("quoteLink").size(), screen.value("quote").toObject().value("links").toArray().size());
 
-        // One main action, labelled from the core's `action`.
+        // One main action, labelled from the core's `action`; the question
+        // of what slot B holds has none, and a button for each answer.
         const QString action = screen.value("action").toString();
         QCOMPARE(w.text("primaryButton"), primaryLabel(action));
-        QVERIFY(w.shown("primaryButton"));
+        QCOMPARE(w.shown("primaryButton"), action != "slot-b");
+        QCOMPARE(w.texts("choiceButton"), [&] {
+            QStringList labels;
+            for (const auto &choice : screen.value("choices").toArray())
+                labels << choice.toObject().value("label").toString();
+            return labels;
+        }());
+        QCOMPARE(w.shown("choices"), action == "slot-b");
         // "Start again" beside it exactly where the core says a new run can
         // get past the stop (Screen.retry), and on no other screen.
         const QString retry = screen.value("retry").toString();
@@ -1103,6 +1125,8 @@ private slots:
             {"warning", "secondaryButton", {{"type", "decline"}}},
             {"phone", "primaryButton", {{"type", "read-phone"}}},
             {"unlock", "primaryButton", {{"type", "read-phone"}}},
+            // The first of the core's answers is the first button.
+            {"slot-b", "choiceButton", {{"type", "slot-b"}, {"answer", "omarchy-mobile"}}},
             {"google-terms", "primaryButton", {{"type", "accept-terms"}}},
             {"google-terms", "secondaryButton", {{"type", "decline-terms"}}},
             {"factory-image-download", "primaryButton", {{"type", "download"}, {"do", "start"}}},
@@ -1408,7 +1432,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":2,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":3,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "cat <<'END'\n"
                      + QJsonDocument(QJsonObject{{"type", "screen"}, {"screen", screen}}).toJson(QJsonDocument::Compact) + "\nEND\n"
@@ -1884,20 +1908,24 @@ private slots:
         QTest::addColumn<bool>("declines");
         QTest::addColumn<QString>("stop");
         QTest::addColumn<QString>("retry");
-        QTest::newRow("the warning declined") << "ready" << true << "warning-declined" << "whenever";
-        QTest::newRow("another model") << "other-model" << false << "wrong-model" << "after-fix";
-        QTest::newRow("slot B") << "slot-b" << false << "runs-from-slot-b" << "stops-again";
-        QTest::newRow("one bootloader slot reported") << "one-slot" << false << "bootloader-slots-unknown" << "stops-again";
-        QTest::newRow("the bootloader slots differ") << "slots-differ" << false << "bootloader-slots-differ" << "stops-again";
-        QTest::newRow("a build that is not listed") << "unknown-build" << false << "build-not-listed" << "after-fix";
-        QTest::newRow("a build not tested yet") << "untested-build" << false << "build-not-tested" << "stops-again";
-        QTest::newRow("a build not tested, a newer one is") << "untested-old-build" << false << "build-not-tested" << "after-fix";
+        // What the person answers to the question of what slot B holds.
+        QTest::addColumn<QString>("slotB");
+        QTest::newRow("the warning declined") << "ready" << true << "warning-declined" << "whenever" << "";
+        QTest::newRow("another model") << "other-model" << false << "wrong-model" << "after-fix" << "";
+        QTest::newRow("slot B, Android on it") << "slot-b" << false << "runs-from-slot-b" << "stops-again" << "android";
+        QTest::newRow("slot B, not sure") << "slot-b-one-slot" << false << "runs-from-slot-b" << "after-fix" << "not-sure";
+        QTest::newRow("one bootloader slot reported") << "one-slot" << false << "bootloader-slots-unknown" << "stops-again" << "";
+        QTest::newRow("the bootloader slots differ") << "slots-differ" << false << "bootloader-slots-differ" << "stops-again" << "";
+        QTest::newRow("a build that is not listed") << "unknown-build" << false << "build-not-listed" << "after-fix" << "";
+        QTest::newRow("a build not tested yet") << "untested-build" << false << "build-not-tested" << "stops-again" << "";
+        QTest::newRow("a build not tested, a newer one is") << "untested-old-build" << false << "build-not-tested" << "after-fix" << "";
     }
     void theRealToolsStops() {
         QFETCH(QString, phones);
         QFETCH(bool, declines);
         QFETCH(QString, stop);
         QFETCH(QString, retry);
+        QFETCH(QString, slotB);
         RealTool tool(phones);
         REAL_TOOL(tool);
         Backend backend;
@@ -1912,6 +1940,10 @@ private slots:
             QVERIFY(backend.acknowledge());
             QVERIFY(at(backend, "phone"));
             QVERIFY(backend.readPhone());
+        }
+        if (!slotB.isEmpty()) {
+            QVERIFY(at(backend, "slot-b"));
+            QVERIFY(backend.answerSlotB(slotB));
         }
         QVERIFY(at(backend, "stopped"));
         const QVariantMap screen = backend.screen();
@@ -1996,8 +2028,8 @@ private slots:
             // The command was shown. It was never sent: reads only.
             QCOMPARE(tool.nothingButReads(), QString());
         }
-        // Slot B is a stop, unless the person said up front that this is a
-        // reinstall: `omainstall open --reinstall`, in `start`.
+        // Slot B is asked about, unless the person said up front that this
+        // is a reinstall: `omainstall open --reinstall`, in `start`.
         RealTool tool("slot-b");
         REAL_TOOL(tool);
         Backend backend;
@@ -2401,6 +2433,92 @@ private slots:
         QCOMPARE(tool.nothingButReads(), QString());
     }
 
+    void theQuestionOfWhatSlotBHoldsInTheWindow() {
+        // The stand-in replays the core's question, its stops and a
+        // reinstall's confirmation. The window draws the core's answers as
+        // buttons, sends the one clicked, and has no main action of its own
+        // on the question.
+        for (const auto &[nth, answer, next] : {std::tuple{1, "android", "stop-runs-from-slot-b-android"},
+                                                std::tuple{2, "not-sure", "stop-runs-from-slot-b-not-sure"}}) {
+            standIn("flow-slot-b");
+            Backend backend;
+            backend.setWrite(true);
+            Window w(&backend);
+            QVERIFY(w.window);
+            backend.start();
+            QVERIFY(goTo(backend, "slot-b", "/somewhere/saved.zip"));
+            w.settle();
+            QCOMPARE(w.texts("choiceButton"), (QStringList{"Omarchy Mobile is on slot B: install it again",
+                                                            "Android is on slot B, after a system update", "I am not sure"}));
+            QVERIFY(!w.shown("primaryButton"));
+            QVERIFY(!w.shown("secondaryButton"));
+            QVERIFY(!w.shown("unknownAction"));
+            QSignalSpy sent(&backend, &Backend::sent);
+            QVERIFY(QMetaObject::invokeMethod(w.items("choiceButton").at(nth), "clicked"));
+            QCOMPARE(sent.count(), 1);
+            QCOMPARE(json(sent.at(0).at(0).toByteArray()), (QJsonObject{{"type", "slot-b"}, {"answer", answer}}));
+            QVERIFY(at(backend, "stopped"));
+            QCOMPARE(QJsonObject::fromVariantMap(backend.screen()), fixture(next));
+            w.settle();
+            QCOMPARE(w.text("title"), fixture(next).value("title").toString());
+            QVERIFY(!w.shown("choices"));
+            QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        }
+        standIn("flow-slot-b");
+        Backend backend;
+        backend.setWrite(true);
+        Window w(&backend);
+        backend.start();
+        QVERIFY(goTo(backend, "slot-b", "/somewhere/saved.zip"));
+        w.settle();
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+        QCOMPARE(QJsonObject::fromVariantMap(backend.screen()), fixture("confirm-reinstall-one-slot"));
+        w.settle();
+        QVERIFY(w.texts("body").join("\n").contains("slot B's bootloader, which the phone already runs; the install switches no slot"));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void theRealToolAReinstallFromSlotBOnAPhoneThatTellsOneBootloaderCopy() {
+        // The Pixel 7 Pro on a reinstall, in a window that installs: the
+        // core asks what slot B holds, the person clicks Omarchy Mobile, and
+        // the bootloader-slot check passes with slot B's version, which the
+        // phone already runs (docs/DESIGN.md §6, decided on 2026-11-13).
+        RealTool tool("slot-b-one-slot");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        QSignalSpy sent(&backend, &Backend::sent);
+        backend.start();
+        QVERIFY(goTo(backend, "slot-b", Zip));
+        w.settle();
+        QCOMPARE(w.texts("choiceButton").size(), 3);
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(at(backend, "google-terms"));
+        QVERIFY(goTo(backend, "confirm", Zip));
+        const QStringList body = backend.screen().value("body").toStringList();
+        QVERIFY2(body.join("\n").contains("Bootloader fake-1.0: slot B's bootloader, which the phone already runs; the install switches no slot."),
+                 qPrintable(body.join("\n")));
+        QVERIFY(backend.screen().value("notice").isNull());
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QVERIFY(at(backend, "installed"));
+        backend.shutdown();
+        int partitions = 0;
+        const QStringList written = tool.notReads(&partitions);
+        QCOMPARE(partitions, 6);
+        QVERIFY(written.contains("set_active:b"));
+        QVERIFY(!written.contains("set_active:a"));
+        // What the app sent named the answer and nothing of a slot's version.
+        for (const auto &call : sent) {
+            const QByteArray line = call.at(0).toByteArray();
+            QVERIFY2(!line.contains("bootloader") && !line.contains("fake-1.0"), line.constData());
+        }
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
     // ---- The screens of a pretend install, as pictures ------------------------
     //
     // The window walked through a whole install against the real tool and
@@ -2545,13 +2663,15 @@ private slots:
             const char *extra;
             const char *typed;
             const char *stop;
+            const char *slotB = "";
         };
         const QList<Stop> stops{
             {"20-stop-one-bootloader-slot", "one-slot", "", "", "bootloader-slots-unknown"},
             {"21-stop-not-confirmed", "ready", "", "", "not-confirmed"},
             {"22-stop-write-interrupted", "ready", "--fake-unplug flash:userdata:2", "cheetah", "write-interrupted"},
-            {"23-stop-runs-from-slot-b", "slot-b", "", "", "runs-from-slot-b"},
+            {"23-stop-runs-from-slot-b", "slot-b-one-slot", "", "", "runs-from-slot-b", "android"},
             {"24-stop-build-not-tested", "untested-build", "", "", "build-not-tested"},
+            {"26-stop-slot-b-not-sure", "slot-b-one-slot", "", "", "runs-from-slot-b", "not-sure"},
         };
         for (const Stop &stop : stops) {
             RealTool tool(stop.phones, {}, stop.extra);
@@ -2561,11 +2681,29 @@ private slots:
             backend.setWrite(true);
             Window w(&backend);
             backend.start();
-            if (goTo(backend, "confirm", Zip))
+            if (goTo(backend, "confirm", Zip, stop.slotB))
                 QVERIFY(*stop.typed ? backend.confirmInstall(stop.typed) : backend.declineInstall());
             QVERIFY2(at(backend, "stopped"), stop.name);
             QCOMPARE(backend.screen().value("stop").toString(), QString(stop.stop));
             QVERIFY(shoot(w, stop.name));
+            QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        }
+        // The phone runs from slot B: the question, then a reinstall of the
+        // Pixel 7 Pro, which tells one bootloader copy's version, to its
+        // confirmation.
+        {
+            RealTool tool("slot-b-one-slot");
+            QVERIFY(tool.ok);
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(goTo(backend, "slot-b", Zip));
+            QVERIFY(shoot(w, "25-slot-b"));
+            QVERIFY(w.click("choiceButton"));
+            QVERIFY(goTo(backend, "confirm", Zip));
+            QVERIFY(shoot(w, "27-reinstall-confirm"));
             QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
         }
         // A locked phone, in a run that installs; a download that can't be
@@ -2639,7 +2777,7 @@ private slots:
             QVERIFY(shoot(w, "35-closing-while-the-phone-is-written"));
             QVERIFY(at(backend, "installed"));
         }
-        QVERIFY2(saved.size() >= 24, qPrintable(saved.join(" ")));
+        QVERIFY2(saved.size() >= 27, qPrintable(saved.join(" ")));
         // No picture is empty.
         for (const QString &name : std::as_const(saved))
             QVERIFY2(QFileInfo(out + "/" + name + ".png").size() > 4000, qPrintable(name));

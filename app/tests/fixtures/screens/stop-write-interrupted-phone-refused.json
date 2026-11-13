@@ -20,5 +20,6 @@
     "Slot A, where Android is, was not written, and it is still the slot the phone starts from.",
     "Bring the phone to Fastboot Mode and start the installer again: it checks the phone again and writes every image again, from the first."
   ],
+  "choices": [],
   "action": "none"
 }

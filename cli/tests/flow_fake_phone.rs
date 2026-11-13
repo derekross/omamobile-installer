@@ -838,3 +838,74 @@ fn install_needs_dry_run_or_write_and_the_test_key_is_for_the_pretend_phone() {
     assert_eq!(code, 1);
     assert!(err.contains("not signed by an Omarchy Mobile key"), "{err}");
 }
+
+#[test]
+fn a_reinstall_from_slot_b_is_written_with_the_version_slot_b_reports() {
+    // The Pixel 7 Pro's case on a reinstall: it runs from slot B and tells
+    // one bootloader copy's version, which is slot B's. --reinstall alone
+    // takes it to a write; no statement about slot A is asked for
+    let zip = factory_zip();
+    let zip = zip.to_str().unwrap();
+    let (code, out, err) = flow(
+        "slot-b-one-slot",
+        &["--write", "--reinstall", "--factory-zip", zip],
+        &typed_install("cheetah\n"),
+    );
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "Omarchy Mobile is written, and the phone is restarting"
+    );
+    let asked = out.find("Codename: ").unwrap();
+    let confirmation = flat(
+        &out[out
+            .find("==> This is what the installer will write")
+            .unwrap()..asked],
+    );
+    assert!(
+        confirmation.contains("Bootloader fake-1.0: slot B's bootloader, which the phone already runs; the install switches no slot."),
+        "{out}"
+    );
+    assert!(!out.contains("!!"), "no notice: {out}");
+    assert!(!out[..asked].contains("flash:") && !out[..asked].contains("download:"));
+    assert!(out.contains("(partitions written: boot_b, dtbo_b, init_boot_b, userdata, vendor_boot_b, vendor_kernel_boot_b)"));
+    assert!(!out.contains("set_active:a"));
+
+    // Without --reinstall: the slot B stop, before the bootloader is looked at
+    let (code, out, _) = flow(
+        "slot-b-one-slot",
+        &["--write", "--factory-zip", zip],
+        &typed_install("cheetah\n"),
+    );
+    assert_eq!(code, 2);
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "This phone runs from its second system copy"
+    );
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+
+    // From slot A, --reinstall changes nothing: the one-slot stop
+    let (code, out, _) = flow(
+        "one-slot",
+        &["--write", "--reinstall", "--factory-zip", zip],
+        &typed_install("cheetah\n"),
+    );
+    assert_eq!(code, 2);
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "The installer can't check the phone's second bootloader copy"
+    );
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+
+    // And help says what --reinstall asserts, and what a wrong one costs
+    let (_, out, _) = run(&["help"], "");
+    let help = flat(&out);
+    for said in [
+        "install ... --reinstall",
+        "the copy it tells is slot B's, the bootloader the phone already runs",
+        "if Android is, the install overwrites the Android the phone is using",
+        "A reinstall from slot B does not need it (--reinstall).",
+    ] {
+        assert!(help.contains(said), "help does not say: {said}\n{out}");
+    }
+}

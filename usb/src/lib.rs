@@ -54,10 +54,15 @@ impl UsbTransport {
     /// Claim the fastboot interface of an opened device.
     pub async fn open(device: &Device) -> Result<Self> {
         let (number, out, inp) = find_fastboot(device)?;
-        let interface = device
-            .claim_interface(number)
-            .await
-            .map_err(usb("claiming the fastboot interface"))?;
+        // Claiming blocks on a syscall. nusb runs that on an async runtime's
+        // blocking pool when awaited, and the tool has no runtime (the
+        // futures are driven by pollster), so on a computer it is waited
+        // for in place; the browser has no blocking call and awaits.
+        #[cfg(not(target_arch = "wasm32"))]
+        let claimed = nusb::MaybeFuture::wait(device.claim_interface(number));
+        #[cfg(target_arch = "wasm32")]
+        let claimed = device.claim_interface(number).await;
+        let interface = claimed.map_err(usb("claiming the fastboot interface"))?;
         let ep_out = interface
             .endpoint::<Bulk, Out>(out)
             .map_err(usb("opening the OUT endpoint"))?;

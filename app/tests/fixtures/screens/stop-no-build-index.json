@@ -18,5 +18,6 @@
     "Nothing was sent to a phone.",
     "Starting the installer again as things are will stop here again."
   ],
+  "choices": [],
   "action": "none"
 }

@@ -19,5 +19,6 @@
     "If you unlocked the first phone's bootloader, that erased that phone: Android starts on it as new.",
     "Start the installer again once that is done."
   ],
+  "choices": [],
   "action": "none"
 }

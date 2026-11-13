@@ -25,5 +25,6 @@
   "footer": [
     "The file comes from Google and stays on this computer. Nothing of it is sent anywhere."
   ],
+  "choices": [],
   "action": "download"
 }

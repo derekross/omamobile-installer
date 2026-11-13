@@ -67,7 +67,7 @@ class Backend : public QObject {
 
 public:
     // The protocol this app speaks (docs/APP.md).
-    static constexpr int Protocol = 2;
+    static constexpr int Protocol = 3;
     // The tool's name, beside the app's binary or on PATH.
     static constexpr const char *ToolName = "omamobile-install";
     // Names another tool, for the tests.
@@ -145,6 +145,9 @@ public:
     Q_INVOKABLE bool acknowledge();
     Q_INVOKABLE bool decline();
     Q_INVOKABLE bool readPhone(const QString &phone = {});
+    // The owner's answer to the core's question of what slot B holds: one
+    // of the screen's `choices`, by its `answer`. Anything else is not sent.
+    Q_INVOKABLE bool answerSlotB(const QString &answer);
     Q_INVOKABLE bool acceptTerms();
     Q_INVOKABLE bool declineTerms();
     Q_INVOKABLE bool download();

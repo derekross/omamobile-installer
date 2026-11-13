@@ -17,5 +17,6 @@
   "footer": [
     "Keep the phone connected, in Fastboot Mode."
   ],
+  "choices": [],
   "action": "dry-run"
 }
