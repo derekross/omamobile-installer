@@ -2,7 +2,7 @@
 pkgname=omainstall
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Guides you through installing Omarchy Mobile on a phone (preview: ends at a dry run)'
+pkgdesc='Guides you through installing Omarchy Mobile on a phone (never run against a real phone)'
 arch=('x86_64' 'aarch64')
 url='https://github.com/derekross/omamobile-installer'
 license=('MIT')

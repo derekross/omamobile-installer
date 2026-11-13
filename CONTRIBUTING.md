@@ -1,6 +1,6 @@
 # Contributing to the Omarchy Mobile installer
 
-This repository holds the installer's shared core and its two front ends, a command-line tool and a web page. It is an early prototype (see [README.md](README.md), [docs/DESIGN.md](docs/DESIGN.md) and [RECOMMENDATION.md](RECOMMENDATION.md)). It belongs to [Omarchy Mobile](https://github.com/derekross/omarchy-mobile), and that project's rules apply here: read its [CONTRIBUTING.md](https://github.com/derekross/omarchy-mobile/blob/main/CONTRIBUTING.md) and the safety rules in its [AGENTS.md](https://github.com/derekross/omarchy-mobile/blob/main/AGENTS.md) first.
+This repository holds the installer's shared core and its front ends: a command-line tool, a web page, and a desktop window that drives the tool. It is an early prototype (see [README.md](README.md), [docs/DESIGN.md](docs/DESIGN.md) and [RECOMMENDATION.md](RECOMMENDATION.md)). It belongs to [Omarchy Mobile](https://github.com/derekross/omarchy-mobile), and that project's rules apply here: read its [CONTRIBUTING.md](https://github.com/derekross/omarchy-mobile/blob/main/CONTRIBUTING.md) and the safety rules in its [AGENTS.md](https://github.com/derekross/omarchy-mobile/blob/main/AGENTS.md) first.
 
 This code will write to people's phones. The rules below exist because a phone holds calibration data that can't be replaced.
 
@@ -13,7 +13,8 @@ This code will write to people's phones. The rules below exist because a phone h
 - **The one warning comes before anything is asked of a phone,** and before the unlock steps. Don't add a path to a phone that goes round it.
 - **What a phone, a server or a file name says is printed only through the core's filter** (`core/src/text.rs`): a terminal acts on control characters. Text on a `Screen` and in the core's errors has been through it. A front end that prints such a string by itself passes it through `text::plain` first.
 - **A stop says what is true.** Its closing lines come from what was done to the phone and whether starting again can help (`PhoneFact`, `Retry`). Don't add a fixed reassurance, and don't hand out a way around a stop in its text.
-- **The write path is the flow's, and the command-line tool's alone** (DESIGN §11). It has never run against a real phone; its first real use is the maintainer's own attended run.
+- **The write path is the flow's, and the command-line tool's alone** (DESIGN §11). It has never run against a real phone; its first real use is the maintainer's own attended run. The tool has it in `install --write` and in `json --write`, which the desktop window starts only when it was itself started with `--write` (docs/APP.md §3.6). Keep it to those: no message of the `json` protocol may turn writing on, no control in the window, and the web page has none. The owner's statement about a bootloader slot (`--bootloader-slots-match`) stays `install`'s alone. `tools/check-shipping` holds each of these; change it only with the decision that changes them.
+- **A write is not cut off by a front end.** No message cancels one, a `quit` behind one waits, and the window does not close while the phone is written.
   - `Flow::begin_write` is the one place a front end gets a session that can write. Don't open one any other way in a front end, and don't take a condition out of it: the release and its build index verified, the phone past every stop in this run and judged again there, unlocked, the pinned phone, the codename typed in this run, the run begun to write, the maintainer's override not used. Each has a test in `core/tests/write_path.rs` that takes it away and reads the pretend phone's record; a new condition gets one too.
   - `--write` stays explicit and never the default, and nothing implies it. The confirmation stays the phone's codename, typed, after the list of what will be written.
   - A stop after the writes began says how far they got (`WriteReach`), from what the phone confirmed. Don't word one by hand, and don't write "nothing was written" where a write may have reached the phone.
@@ -44,12 +45,15 @@ cargo fmt --all --check
 cargo clippy
 cargo test
 cargo test -p omamobile-installer-cli --features fake-phone
-tools/check-shipping                      # the sources: no way to write, no pretend phone, in what ships
+app/bin/build && app/bin/test             # needs Qt 6; offscreen, no window opens
+tools/check-shipping                      # the sources: one way to write (the tool's --write), no pretend phone, in what ships
 web/build.sh selftest                     # needs wasm-bindgen-cli at the version in Cargo.lock
 web/selftest.sh                           # needs a Chromium; it is held to 127.0.0.1
 cargo build --release --locked -p omamobile-installer-cli && web/build.sh
 tools/check-shipping --built --control target/debug/omamobile-install   # reads the built tool, loads the page's module in node; runs neither
 ```
+
+If you changed the flow's words or a field of `Screen`, run `app/tests/record-screens/run` and commit the screens it writes; if you changed how the window draws something, run `app/bin/screens` and look at the pictures it writes into `app/docs/screens/`. A test that starts `omamobile-install json` always starts it with `--fake-phone`.
 
 `web/selftest.sh` clicks through the page in a headless Chromium against the pretend phone and a stand-in for Google's server. It is the only test of the page's script, and CI runs it. CI also runs the shipping tool on two commands that it refuses from their arguments (the pretend phone, and an install without `--dry-run`); don't run a tool built without `fake-phone` on a computer with a phone attached to see that for yourself.
 

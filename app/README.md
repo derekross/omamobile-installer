@@ -1,10 +1,10 @@
 # omainstall
 
-![The window at the end of a dry run: what an install would write](screenshot.png)
+![The window at the end of a dry run: what an install would write](docs/screens/34-dry-run-only-done.png)
 
 The desktop window of the [Omarchy Mobile installer](../README.md): it guides a person through installing Omarchy Mobile on a phone plugged into this computer. It is built the way Omarchy's own apps are: C++ and Qt Quick, one window, one job, driven from the keyboard, following the desktop's theme.
 
-**This version cannot write to a phone, and it has never been run against one.** It goes through the steps of an install up to the dry run, which lists what an install would write, and ends there.
+**It has never been run against a real phone.** Started as it is, it goes through the steps of an install up to the dry run, which lists what an install would write, and ends there: such a window cannot write to a phone. Started with `--write` it goes on: it lists what it will write and what is erased, waits for the phone's codename to be typed, and writes. That path has run against a pretend phone only, and on a Pixel 7 Pro, the one phone it is for, the window stops before it: [docs/STATUS.md](docs/STATUS.md) says what works, what has never run, what is left out on purpose, and how the app's first attended run goes. [docs/screens/](docs/screens/) has a picture of each screen of a pretend install.
 
 It is a front end and nothing more. The installer's core (Rust, `../core`) decides the order of the steps, every refusal and every sentence about the phone; the window draws what the core says and hands in what the person did. The two talk through the command-line tool, `omamobile-install`, which the app starts and exchanges JSON lines with. That protocol and the rest of the design are in [docs/APP.md](../docs/APP.md).
 
@@ -22,7 +22,7 @@ The tool's side of that protocol is `omamobile-install json` (`../cli/src/json.r
 | `↑` `↓` `PgUp` `PgDn` | Scroll |
 | `Esc` | Cancel a download, or close the shortcuts |
 | `?` | Show or hide the shortcuts |
-| `Q` | Quit (asks first while a step is running) |
+| `Q` | Quit (asks first while a step is running; not while the phone is being written) |
 
 While a field has the focus, letters go to the field. While a button has the focus, `Space` and `Enter` press that button.
 
@@ -30,9 +30,12 @@ While a field has the focus, letters go to the field. While a button has the foc
 
 ```sh
 omainstall                              # the window (the same as `open`)
-omainstall open [--reinstall] [DIR]     # --reinstall: slot B already holds Omarchy Mobile; DIR: a release's directory
+omainstall open [--reinstall] [DIR]     # a dry run. --reinstall: slot B already holds Omarchy Mobile; DIR: a release's directory
+omainstall open --write [--reinstall] DIR   # an install: ERASES the phone once its codename is typed in the window
 omainstall check [--json]               # no display: find the installer's tool, say its version and protocol number
 ```
+
+`--write` is the one switch that lets a window write, and it is never implied: nothing in the window turns it on, and the header says "Install" or "Dry run" from the first screen. The app passes it on as the tool's own `--write` and has no other way to ask for a write. While the phone is written the window does not close.
 
 `check` exits 0 when the tool is found and speaks this app's protocol, and 1 with the reason on standard error otherwise. It asks nothing of a phone.
 
@@ -47,11 +50,13 @@ bin/build       # build/omainstall
 bin/test        # the Qt Test binary, offscreen: no window opens, no phone, no USB
 bin/install     # makepkg -fsi: the app in the launcher (asks for your password)
 
-OMAINSTALL_SHOTS=/some/dir bin/test     # also saves a picture of each screen there
+bin/screens     # a pretend install walked in the window, one picture for each screen, into docs/screens/
+
+OMAINSTALL_SHOTS=/some/dir bin/test     # also saves a picture of each recorded screen there
 OMAINSTALL_TOOL=$PWD/tests/stand-in-tool build/omainstall      # try the window against the stand-in
 ```
 
-`bin/test` first builds `omamobile-install` with its pretend phone (`cargo build --features fake-phone`), and the tests whose names begin with `theRealTool` run the app against it: the straight path to the dry run with a download from a stand-in for Google's server in the test, eight stops, a locked phone, two phones, a file handed in, and a download cancelled and gone on with. Each of them starts the tool through a small script that adds `--fake-phone`, so no USB device is opened, and ends by reading the pretend phone's record: reads only. Every other test names the stand-in, or a path that does not exist.
+`bin/test` first builds `omamobile-install` with its pretend phone (`cargo build --features fake-phone`), and the tests whose names begin with `theRealTool` run the app against it: the straight path to the dry run with a download from a stand-in for Google's server in the test, eight stops, a locked phone, two phones, a file handed in, and a download cancelled and gone on with; and, in a window started to write, a complete pretend install, one the owner does not go ahead with, the pretend phone unplugged mid-write, a download that breaks off and goes on, and the stop for a phone that tells one bootloader slot. Each of them starts the tool through a small script that adds `--fake-phone`, so no USB device is opened, and ends by reading the pretend phone's record: reads only, except where the test is of the writes, and there exactly the writes of an install. Every other test names the stand-in, or a path that does not exist.
 
 `tests/fixtures/screens/` holds the core's own screens, one JSON file for each state and each kind of stop. `tests/record-screens/run` writes them again from the core as it is now (it needs the Rust toolchain; the tests do not).
 
@@ -66,6 +71,7 @@ OMAINSTALL_TOOL=$PWD/tests/stand-in-tool build/omainstall      # try the window 
 | `src/i18n/de.json` | German, as the working example of a translation |
 | `src/cli.{h,cpp}` | `omainstall check` |
 | `tests/` | The Qt tests (against the stand-in and against the real tool), the stand-in for the tool, the recorded screens and the program that records them |
+| `docs/` | `STATUS.md`: what works, what has never run, the first attended run. `screens/`: the pictures `bin/screens` writes |
 | `pkgbuild/` | The Arch package, the `.desktop` file and the icon |
 
 ## Licence
