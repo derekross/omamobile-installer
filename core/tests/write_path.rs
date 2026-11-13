@@ -9,8 +9,8 @@
 mod support;
 use omamobile_installer_core::fastboot::{Session, WriteReach};
 use omamobile_installer_core::flow::{
-    Flow, FlowOptions, PhoneFact, Step, Stop, StopKind, NO_INSTALL_YET, NO_USABLE_PHONE_YET,
-    SLOTS_ON_THE_OWNERS_WORD,
+    Flow, FlowOptions, PhoneFact, Retry, SlotBHolds, Step, Stop, StopKind, NO_INSTALL_YET,
+    NO_USABLE_PHONE_YET, SLOTS_ON_THE_OWNERS_WORD, SLOT_B_BOOTLOADER_IN_USE,
 };
 use omamobile_installer_core::install::flash_userdata_from_reader;
 use omamobile_installer_core::Error;
@@ -1547,7 +1547,13 @@ fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {
     drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
     let screen = flow.screen();
     assert!(screen.body[0].contains("runs from slot b"));
-    assert_eq!(screen.footer[1], "Slot B's boot partitions, listed above, are overwritten: the Omarchy Mobile that is on the phone now is replaced.");
+    assert_eq!(screen.footer[1], "Slot B's boot partitions, listed above, are overwritten: this is a reinstall, and the Omarchy Mobile that is on slot B now is replaced. If slot B holds Android instead, that Android is overwritten.");
+    // Its two bootloader copies were both reported: nothing rests on slot
+    // B's alone, and no line says so
+    assert!(screen
+        .body
+        .iter()
+        .all(|l| !l.contains(SLOT_B_BOOTLOADER_IN_USE)));
 
     // The screen before the writes, and the steps before the confirmation
     // that say a write follows
@@ -1594,4 +1600,299 @@ fn a_flow_that_writes_goes_through_these_states_in_this_order() {
             "installed"
         ]
     );
+}
+
+// ---- A reinstall from slot B, on a phone that tells one bootloader copy ----
+//
+// Decided by the maintainer on 2026-11-13: an install ends in `set_active:b`,
+// which makes the phone run slot B's bootloader, so slot B's version is the
+// one that must be tested. A phone that runs from slot B already runs slot
+// B's bootloader, and the version it tells is that one. So a reinstall from
+// slot B passes the bootloader-slot check with it, and a first install (from
+// slot A) still stops.
+
+fn slot_b_one_slot() -> FakePhone {
+    FakePhone::scenario("slot-b-one-slot").unwrap()
+}
+fn reinstalling() -> FlowOptions {
+    FlowOptions {
+        reinstall: true,
+        ..writing()
+    }
+}
+fn asking() -> FlowOptions {
+    FlowOptions {
+        asks_what_slot_b_holds: true,
+        ..writing()
+    }
+}
+
+#[test]
+fn a_reinstall_from_slot_b_passes_the_one_slot_check_with_slot_bs_version() {
+    let bundle = TestBundle::new();
+    let phone = slot_b_one_slot();
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        reinstalling(),
+    );
+    // No screen carries a notice: nothing rests on anyone's word about
+    // slot A, and no check was skipped
+    let mut states = Vec::new();
+    drive_with(&mut flow, &bundle, &phone, "cheetah", "confirm", |state| {
+        states.push(state.to_string())
+    });
+    assert_eq!(
+        states,
+        [
+            "warning",
+            "phone",
+            "google-terms",
+            "factory-image",
+            "answers",
+            "dry-run"
+        ]
+    );
+    let Step::Confirm(plan) = flow.step() else {
+        panic!("{:?}", flow.step())
+    };
+    // Recorded in the plan, and said on the confirmation
+    assert!(plan.slot_b_bootloader_in_use);
+    assert!(!plan.slot_check_skipped);
+    assert_eq!(plan.current_slot, "b");
+    let screen = flow.screen();
+    assert_eq!(screen.notice, None);
+    assert_eq!(
+        screen.body[2],
+        format!("Bootloader fake-1.0: {SLOT_B_BOOTLOADER_IN_USE}. The phone tells the version of that copy only; slot A's was not read, and an install that stays on slot B does not need it.")
+    );
+    assert_eq!(
+        SLOT_B_BOOTLOADER_IN_USE,
+        "slot B's bootloader, which the phone already runs; the install switches no slot"
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "");
+    assert_eq!(flow.screen().state, "installed", "{:?}", flow.step());
+    assert_eq!(flow.screen().notice, None);
+    holds_the_release(&bundle, &phone);
+    only_our_commands(&phone);
+    // The slot it switches to is the one it was on: no other slot command
+    let log = phone.log();
+    let slots: Vec<&String> = log.iter().filter(|c| c.starts_with("set_active")).collect();
+    assert_eq!(slots, ["set_active:b"]);
+    // And the session that writes checked it too: no word about slot A was
+    // passed to it
+    assert_eq!(phone.0.borrow().active_slot, "b");
+}
+
+#[test]
+fn a_phone_on_slot_b_that_tells_one_copy_is_not_reinstalled_without_the_answer() {
+    let bundle = TestBundle::new();
+    // Not said to be a reinstall, in a front end that can't ask: the stop
+    // there always was, before the bootloader is looked at
+    let phone = slot_b_one_slot();
+    let flow = run(&bundle, &phone, writing());
+    assert_eq!(stop(&flow).id(), "runs-from-slot-b");
+    assert_eq!(stop(&flow).retry, Retry::StopsAgain);
+    assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
+    nothing_written(&phone);
+    // A dry run is no different
+    let phone = slot_b_one_slot();
+    let flow = run(&bundle, &phone, FlowOptions::default());
+    assert_eq!(stop(&flow).id(), "runs-from-slot-b");
+    nothing_written(&phone);
+}
+
+#[test]
+fn a_first_install_from_slot_a_still_needs_the_other_slot() {
+    let bundle = TestBundle::new();
+    // Said to be a reinstall changes nothing on a phone that runs from slot
+    // A: the version it tells is slot A's, and the install makes slot B
+    // active
+    for options in [writing(), reinstalling(), asking()] {
+        let phone = FakePhone::scenario("one-slot").unwrap();
+        let flow = run(&bundle, &phone, options);
+        assert_eq!(stop(&flow).id(), "bootloader-slots-unknown");
+        assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
+        nothing_written(&phone);
+    }
+    // The owner's statement still passes it, on the command line
+    let phone = FakePhone::scenario("one-slot").unwrap();
+    let flow = run(
+        &bundle,
+        &phone,
+        FlowOptions {
+            reinstall: true,
+            ..stating("fake-1.0")
+        },
+    );
+    assert_eq!(flow.screen().state, "installed");
+    assert_eq!(
+        flow.screen().notice.as_deref(),
+        Some(SLOTS_ON_THE_OWNERS_WORD)
+    );
+}
+
+#[test]
+fn a_phone_that_reports_both_copies_keeps_todays_comparison_on_a_reinstall() {
+    let bundle = TestBundle::new();
+    // Two versions that differ stop, from slot B as from slot A
+    let phone = FakePhone::scenario("slots-differ").unwrap();
+    phone.edit(|s| {
+        s.vars.insert("current-slot".into(), "b".into());
+    });
+    let flow = run(&bundle, &phone, reinstalling());
+    assert_eq!(stop(&flow).id(), "bootloader-slots-differ");
+    nothing_written(&phone);
+    // Two that are equal go on, and nothing says the check rested on slot
+    // B's copy alone
+    let phone = FakePhone::scenario("slot-b").unwrap();
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        reinstalling(),
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
+    let Step::Confirm(plan) = flow.step() else {
+        panic!("{:?}", flow.step())
+    };
+    assert!(!plan.slot_b_bootloader_in_use);
+    // A statement that is not the phone's version still stops a reinstall:
+    // the stricter rule first
+    let phone = slot_b_one_slot();
+    let flow = run(
+        &bundle,
+        &phone,
+        FlowOptions {
+            reinstall: true,
+            ..stating("fake-0.9")
+        },
+    );
+    assert_eq!(stop(&flow).id(), "bootloader-slots-stated-other");
+    nothing_written(&phone);
+}
+
+#[test]
+fn the_owner_is_asked_what_slot_b_holds_and_each_answer_does_what_it_says() {
+    let bundle = TestBundle::new();
+    let at_question = |phone: &FakePhone| {
+        let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), asking());
+        drive(&mut flow, &bundle, phone, "cheetah", "slot-b");
+        assert_eq!(flow.screen().state, "slot-b", "{:?}", flow.step());
+        flow
+    };
+    // The question, in the core's words, with its three answers
+    let phone = slot_b_one_slot();
+    let mut flow = at_question(&phone);
+    let screen = flow.screen();
+    assert_eq!(screen.action, "slot-b");
+    assert_eq!(screen.title, "What is on this phone's slot B?");
+    assert_eq!(screen.notice, None);
+    let answers: Vec<&str> = screen.choices.iter().map(|c| c.answer).collect();
+    assert_eq!(answers, ["omarchy-mobile", "android", "not-sure"]);
+    assert!(screen.choices[0].label.contains("Omarchy Mobile"));
+    assert!(screen.choices[1].label.contains("Android"));
+    // What a wrong answer costs is on the screen before it is given
+    assert!(screen
+        .body
+        .iter()
+        .any(|l| l.contains("If you say Omarchy Mobile and slot B holds Android, the install overwrites the Android this phone is using")));
+    assert!(screen.footer[0].contains("has written nothing"));
+    // Only the questions: the answer is asked of the owner, not the phone
+    assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
+    // Out of order: no other step's answer is taken here
+    assert!(flow.decline_google_terms().is_err());
+    assert!(flow.answers(&support::drive::answers()).is_err());
+
+    // Omarchy Mobile: a reinstall, judged again with no new question sent
+    let sent = phone.log().len();
+    flow.answer_slot_b(SlotBHolds::OmarchyMobile).unwrap();
+    assert_eq!(phone.log().len(), sent);
+    assert_eq!(flow.screen().state, "google-terms");
+    // The question is asked once
+    assert!(flow.answer_slot_b(SlotBHolds::Android).is_err());
+    drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
+    let Step::Confirm(plan) = flow.step() else {
+        panic!("{:?}", flow.step())
+    };
+    assert!(plan.slot_b_bootloader_in_use);
+    drive(&mut flow, &bundle, &phone, "cheetah", "");
+    assert_eq!(flow.screen().state, "installed");
+    holds_the_release(&bundle, &phone);
+    only_our_commands(&phone);
+
+    // Android: the stop, with nothing written
+    let phone = slot_b_one_slot();
+    let mut flow = at_question(&phone);
+    flow.answer_slot_b(SlotBHolds::Android).unwrap();
+    let stopped = stop(&flow);
+    assert_eq!(stopped.id(), "runs-from-slot-b");
+    assert_eq!(stopped.retry, Retry::StopsAgain);
+    assert_eq!(stopped.title, "Android runs from slot B");
+    assert_eq!(stopped.phone, PhoneFact::OnlyRead);
+    assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
+    nothing_written(&phone);
+
+    // Not sure: how to find out, and a new run once that is done
+    let phone = slot_b_one_slot();
+    let mut flow = at_question(&phone);
+    flow.answer_slot_b(SlotBHolds::NotSure).unwrap();
+    let stopped = stop(&flow);
+    assert_eq!(stopped.id(), "runs-from-slot-b");
+    assert_eq!(stopped.retry, Retry::AfterFix);
+    assert!(stopped.message[1].contains("see what starts"));
+    nothing_written(&phone);
+
+    // A phone on slot A is not asked: the question is about slot B only
+    let phone = ready();
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), asking());
+    drive(&mut flow, &bundle, &phone, "cheetah", "google-terms");
+    assert_eq!(flow.screen().state, "google-terms");
+    assert!(flow.answer_slot_b(SlotBHolds::OmarchyMobile).is_err());
+
+    // A run said up front to be a reinstall is not asked either
+    let phone = slot_b_one_slot();
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        FlowOptions {
+            reinstall: true,
+            ..asking()
+        },
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "google-terms");
+    assert_eq!(flow.screen().state, "google-terms");
+
+    // A phone that moves to slot B after the first look is not asked at the
+    // dry run: it stops there, with nothing written
+    let phone = ready();
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), asking());
+    drive(&mut flow, &bundle, &phone, "cheetah", "dry-run");
+    phone.edit(|s| {
+        s.vars.insert("current-slot".into(), "b".into());
+    });
+    drive(&mut flow, &bundle, &phone, "cheetah", "");
+    assert_eq!(stop(&flow).id(), "runs-from-slot-b");
+    nothing_written(&phone);
+}
+
+#[test]
+fn a_locked_phone_on_slot_b_answered_as_a_reinstall_is_shown_the_unlock_steps() {
+    let bundle = TestBundle::new();
+    let phone = slot_b_one_slot();
+    phone.edit(|s| {
+        s.vars.insert("unlocked".into(), "no".into());
+    });
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), asking());
+    drive(&mut flow, &bundle, &phone, "cheetah", "slot-b");
+    flow.answer_slot_b(SlotBHolds::OmarchyMobile).unwrap();
+    let screen = flow.screen();
+    assert_eq!(screen.state, "unlock");
+    assert!(screen.body[1].contains(SLOT_B_BOOTLOADER_IN_USE));
+    // Not asked whether it would take the unlock command from here: the
+    // steps cover both answers
+    assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
+    nothing_written(&phone);
 }

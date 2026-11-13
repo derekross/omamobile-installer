@@ -20,5 +20,6 @@
     "Android is still on slot A, unused. Its data was erased with userdata, so it needs a factory reset if it is ever started again.",
     "The install guide's \"Going back to Android\" has the steps to put the phone back as it was sold."
   ],
+  "choices": [],
   "action": "none"
 }

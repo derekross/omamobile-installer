@@ -20,5 +20,6 @@
     "The phone was running from slot B, which is the slot being written, so it may not start until an install has run through.",
     "Bring the phone to Fastboot Mode and start the installer again: it checks the phone again and writes every image again, from the first."
   ],
+  "choices": [],
   "action": "none"
 }

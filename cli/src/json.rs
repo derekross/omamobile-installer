@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! `omamobile-install json`: the install flow as JSON lines, for the desktop
-//! app, agents and scripts. The protocol is docs/APP.md §3, number 2.
+//! app, agents and scripts. The protocol is docs/APP.md §3, number 3.
 //!
 //! One JSON object per line on standard input and on standard output.
 //! Standard output carries the protocol and nothing else: this file takes it
@@ -35,7 +35,7 @@ use crate::{
 };
 use omamobile_installer_core::fastboot::{PhoneId, PieceReport, Transport};
 use omamobile_installer_core::flow::{
-    AnswerField, AnswerProblem, AnswersInput, Flow, FlowOptions, OwnerAnswers,
+    AnswerField, AnswerProblem, AnswersInput, Flow, FlowOptions, OwnerAnswers, SlotBHolds,
 };
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_core::Error;
@@ -52,7 +52,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The protocol this tool speaks (docs/APP.md §3).
-pub const PROTOCOL: u64 = 2;
+pub const PROTOCOL: u64 = 3;
 /// A line longer than this is not a message of this protocol.
 const LONGEST_LINE: usize = 1 << 20;
 
@@ -721,7 +721,7 @@ impl<P: Phones> Driver<P> {
                 }
                 "start" if self.started.is_none() => {
                     if !self.greeted {
-                        self.refuse("Say hello first: {\"type\":\"hello\",\"protocol\":1}, then start.");
+                        self.refuse(&format!("Say hello first: {{\"type\":\"hello\",\"protocol\":{PROTOCOL}}}, then start."));
                         continue;
                     }
                     let Some(reinstall) = message.get("reinstall").and_then(Value::as_bool) else {
@@ -761,8 +761,11 @@ impl<P: Phones> Driver<P> {
             .map_err(|e| Fatal(format!("the release could not be read ({e})")))?;
         // The flow's write switch in this mode: the tool's own argument,
         // and nothing a message says
+        // The app draws the core's question of what slot B holds, so a
+        // phone on slot B is asked about rather than stopped
         let options = FlowOptions {
             reinstall,
+            asks_what_slot_b_holds: true,
             write: self.may_write,
             ..Default::default()
         };
@@ -819,6 +822,7 @@ impl<P: Phones> Driver<P> {
         let fits = match kind {
             "acknowledge" | "decline" => asks == "acknowledge",
             "read-phone" => asks == "read-phone",
+            "slot-b" => asks == "slot-b",
             "accept-terms" | "decline-terms" => asks == "accept-terms",
             "download" => asks == "download",
             "take-file" => asks == "download" || asks == "take-file",
@@ -882,6 +886,15 @@ impl<P: Phones> Driver<P> {
                         self.chosen = Some(identity);
                     }
                 }
+            }
+            "slot-b" => {
+                let holds = text(message, "answer")
+                    .and_then(SlotBHolds::from_answer)
+                    .ok_or_else(|| {
+                        let names: Vec<&str> = SlotBHolds::ALL.iter().map(|a| a.answer()).collect();
+                        format!("slot-b needs \"answer\": one of {}.", names.join(", "))
+                    })?;
+                self.flow().answer_slot_b(holds)?;
             }
             "accept-terms" => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

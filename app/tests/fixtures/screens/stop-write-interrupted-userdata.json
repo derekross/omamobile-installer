@@ -20,5 +20,6 @@
     "What Android had stored on the phone is erased. If the phone starts Android now, Android finds its data gone and asks for a factory reset.",
     "Bring the phone to Fastboot Mode and start the installer again: it checks the phone again and writes every image again, from the first."
   ],
+  "choices": [],
   "action": "none"
 }

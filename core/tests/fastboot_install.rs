@@ -775,3 +775,69 @@ fn write_the_selftest_fixture() {
     std::fs::create_dir_all(dir.join("factory")).unwrap();
     put(&format!("factory/{}", b.factory_zip_name), &b.factory_zip);
 }
+
+#[test]
+fn a_session_takes_slot_bs_version_on_a_reinstall_from_slot_b_and_nowhere_else() {
+    // The session's own check, as the flow's: a phone that tells one
+    // bootloader copy's version and runs from slot B, in a reinstall, is
+    // past it with nobody's word about slot A (the maintainer's decision of
+    // 2026-11-13)
+    let bundle = TestBundle::new();
+    let release = bundle.verify().unwrap();
+    let on = |slot: &str| {
+        let phone = FakePhone::new("cheetah");
+        phone.edit(|s| {
+            s.vars.insert("current-slot".into(), slot.into());
+        });
+        phone
+    };
+    let reinstall = PhoneOptions {
+        reinstall: true,
+        ..Default::default()
+    };
+    let phone = on("b");
+    let log = block_on(dry_install(&bundle, &release, &phone, reinstall.clone())).unwrap();
+    assert!(log
+        .iter()
+        .any(|l| l.starts_with("bootloader: slot b's, which the phone runs")));
+    assert!(phone.written().is_empty());
+    // From slot A the version it tells is slot A's: refused, reinstall or not
+    let err = refused_before_any_write(&on("a"), reinstall, SERIAL);
+    assert!(
+        matches!(&err, Error::Phone(why) if why.contains("only reports slot a")),
+        "{err}"
+    );
+    // From slot B without the reinstall: refused, as before
+    let err = refused_before_any_write(&on("b"), PhoneOptions::default(), SERIAL);
+    assert!(
+        matches!(&err, Error::Phone(why) if why.contains("only reports slot b")),
+        "{err}"
+    );
+    // A statement of another version is refused first
+    let err = refused_before_any_write(
+        &on("b"),
+        PhoneOptions {
+            reinstall: true,
+            bootloader_slots_confirmed: Some("fake-0.9".into()),
+            ..Default::default()
+        },
+        SERIAL,
+    );
+    assert!(
+        matches!(&err, Error::Phone(why) if why.contains("confirmed as fake-0.9")),
+        "{err}"
+    );
+    // And the session that writes, reached through the flow, writes it
+    let phone = on("b");
+    install(
+        &bundle,
+        &phone,
+        FlowOptions {
+            write: true,
+            reinstall: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(phone.written(), OURS);
+}

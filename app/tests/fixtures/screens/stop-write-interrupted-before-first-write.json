@@ -18,5 +18,6 @@
     "No write reached the phone: the installer sent it nothing that changes it.",
     "You can start the installer again at any time."
   ],
+  "choices": [],
   "action": "none"
 }

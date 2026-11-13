@@ -37,5 +37,6 @@
   "footer": [
     "The installer has only asked the phone what it is and whether it can be unlocked. It has written nothing to it."
   ],
+  "choices": [],
   "action": "read-phone"
 }

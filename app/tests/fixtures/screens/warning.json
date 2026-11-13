@@ -29,5 +29,6 @@
   "footer": [
     "Nothing is asked of the phone until you accept."
   ],
+  "choices": [],
   "action": "acknowledge"
 }

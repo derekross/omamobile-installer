@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // One screen of the install flow, drawn as the core sent it (core/src/flow.rs,
-// Screen): the title, the notice, the body, the quote, the steps, the link,
-// the file, the plan, the problem and the footer, in that order, as the
-// command-line tool prints them. Nothing here adds a sentence about the phone.
+// Screen): the title, the notice, the body, the quote, the steps, the
+// choices, the link, the file, the plan, the problem and the footer, in that
+// order, as the command-line tool prints them. Nothing here adds a sentence about the phone.
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
@@ -215,6 +215,27 @@ Flickable {
                         visible: !!modelData.command
                         command: modelData.command || ""
                     }
+                }
+            }
+        }
+
+        // The core's question, as its answers: one button each, in the core's
+        // words and order. None of them is the main action.
+        ColumnLayout {
+            objectName: "choices"
+            visible: (view.screen.choices || []).length > 0
+            Layout.fillWidth: true
+            Layout.topMargin: 4
+            spacing: 10
+
+            Repeater {
+                model: view.screen.choices || []
+                ActionButton {
+                    objectName: "choiceButton"
+                    Layout.fillWidth: true
+                    text: modelData.label
+                    enabled: !backend.busy
+                    onClicked: backend.answerSlotB(modelData.answer)
                 }
             }
         }

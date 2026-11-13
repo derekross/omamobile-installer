@@ -73,7 +73,7 @@ QString Backend::findTool(const QString &appDirectory) {
 
 QString Backend::checkScreen(const QJsonObject &screen) {
     static const char *const keys[] = {"state", "stop", "retry", "title", "notice", "body", "quote", "steps",
-                                       "link", "file", "problem", "plan", "footer", "action"};
+                                       "link", "file", "problem", "plan", "footer", "choices", "action"};
     for (const char *key : keys)
         if (!screen.contains(QLatin1String(key)))
             return QStringLiteral("the screen has no \"%1\"").arg(QLatin1String(key));
@@ -106,6 +106,12 @@ QString Backend::checkScreen(const QJsonObject &screen) {
         if (!isText(s.value("text")) || !s.contains("command") || !isTextOrNull(s.value("command")))
             return QStringLiteral("a step has no text or no command");
     }
+    if (!screen.value("choices").isArray())
+        return QStringLiteral("\"choices\" is not a list");
+    const QJsonArray choices = screen.value("choices").toArray();
+    for (const auto &choice : choices)
+        if (!isText(choice.toObject().value("answer")) || !isText(choice.toObject().value("label")))
+            return QStringLiteral("a choice has no answer or no label");
     const QJsonValue file = screen.value("file");
     if (!file.isNull()) {
         const QJsonObject f = file.toObject();
@@ -522,6 +528,16 @@ bool Backend::readPhone(const QString &phone) {
     if (!phone.isEmpty())
         message.insert("phone", phone);
     return sendFor({"read-phone"}, message);
+}
+
+bool Backend::answerSlotB(const QString &answer) {
+    // Only an answer the core offered on the screen on show.
+    bool offered = false;
+    for (const QVariant &choice : m_screen.value("choices").toList())
+        offered = offered || (!answer.isEmpty() && choice.toMap().value("answer").toString() == answer);
+    if (!offered)
+        return false;
+    return sendFor({"slot-b"}, {{"type", "slot-b"}, {"answer", answer}});
 }
 
 bool Backend::cancelDownload() {

@@ -1322,7 +1322,10 @@ fn cmd_fake(
 const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
 
 /// What `help` says about [`SLOTS_MATCH`].
-const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written.";
+const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written. A reinstall from slot B does not need it (--reinstall).";
+
+/// What `help` says about `--reinstall`.
+const REINSTALL_HELP: &str = "Slot B already holds Omarchy Mobile, and this installs it again. Without it a phone that runs from slot B stops: Android runs from slot B after a system update, and an install would overwrite it. On a phone that runs from slot B and tells the version of one bootloader copy only (the Pixel 7 Pro), the copy it tells is slot B's, the bootloader the phone already runs, and the install switches no slot, so --bootloader-slots-match is not needed. Say it only if Omarchy Mobile is on slot B: if Android is, the install overwrites the Android the phone is using. On a phone that runs from slot A it changes nothing.";
 
 /// `omamobile-install help`: the commands, and what `--write` does to a
 /// phone, in the core's words.
@@ -1343,6 +1346,12 @@ fn cmd_help() {
         "                       ",
     );
     println!("\n  install needs --dry-run or --write, one of them: there is no default.");
+    println!("\n  install ... --reinstall");
+    wrap(
+        REINSTALL_HELP,
+        "                       ",
+        "                       ",
+    );
     println!("\n  install ... {SLOTS_MATCH} VERSION");
     wrap(
         SLOTS_MATCH_HELP,

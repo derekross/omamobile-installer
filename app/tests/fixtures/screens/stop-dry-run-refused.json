@@ -18,5 +18,6 @@
     "The installer only asked the phone what it is. It has written nothing to it.",
     "Starting the installer again as things are will stop here again."
   ],
+  "choices": [],
   "action": "none"
 }

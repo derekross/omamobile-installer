@@ -29,5 +29,6 @@
     "The dry run only asked the phone questions. It has written nothing to it.",
     "This run was a dry run, and it ends here: a dry run has no step that writes to a phone."
   ],
+  "choices": [],
   "action": "none"
 }

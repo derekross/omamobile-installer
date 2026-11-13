@@ -69,6 +69,8 @@ pub fn drive_with(
             (_, "acknowledge") => flow.acknowledge_warning().unwrap(),
             // A locked phone stays locked here: nobody unlocks it
             ("unlock", _) => return,
+            // What slot B holds is the test's to answer
+            ("slot-b", _) => return,
             (_, "read-phone") => block_on(flow.read_phone(&mut phone.clone(), &id())).unwrap(),
             (_, "accept-terms") => flow.decline_google_terms().unwrap(),
             (_, "take-file") => {
