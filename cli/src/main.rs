@@ -84,6 +84,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod after;
 mod json;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;

@@ -302,6 +302,11 @@ pub struct FlowOptions {
     /// that writes (the tool's `json --write`); the key is checked when a
     /// session opens.
     pub owner_ssh_key: Option<String>,
+    /// The front end goes on after the write with the steps the release's
+    /// own tools carry out (the tool's `json --write`, for a release that
+    /// ships them): the last screen says that they come next rather than
+    /// that nothing does. The flow itself still ends at the write.
+    pub after_write_steps: bool,
 }
 
 /// The owner accepted Google's terms on the terms step: for which build,
@@ -2982,7 +2987,11 @@ impl Flow {
                     ),
                     "Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B. At its first start the system grows to fill the phone's storage, which can take a few minutes.".into(),
                     NO_ANSWERS.into(),
-                    "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone either: this version of the installer does nothing after the restart.".into(),
+                    if self.options.after_write_steps {
+                        "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone yet. They come next, with the release's own tools: the USB connection to the phone, its first start, the radio backup, the firmware from Google's factory image, a restart and a check.".into()
+                    } else {
+                        "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone either: this version of the installer does nothing after the restart.".into()
+                    },
                 ];
                 s.footer = vec![
                     "Android is still on slot A, unused. Its data was erased with userdata, so it needs a factory reset if it is ever started again.".into(),
@@ -3009,7 +3018,10 @@ impl Screen {
     /// were read; this is for everything else a screen is built from (the
     /// name of a file the owner picked, what an HTTP client said of a
     /// server's answer, the release's own names), and for the phone's again.
-    fn fit_to_print(&mut self) {
+    /// Public for the screens the command-line tool makes itself after a
+    /// write (the steps a release's tools carry out), which pass through
+    /// the same filter.
+    pub fn fit_to_print(&mut self) {
         use crate::text::plain;
         let each = |list: &mut Vec<String>| list.iter_mut().for_each(|s| *s = plain(s));
         self.title = plain(&self.title);

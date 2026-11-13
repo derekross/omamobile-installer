@@ -1,0 +1,17 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Stand-in for nmcli: NetworkManager's saved connections are a file.
+set -u
+P=${OMAINSTALL_PRETEND_PHONE:?the stand-ins run only in a test}
+echo "nmcli $*" >> "$P/log"
+touch "$P/nm_connections"
+case "$*" in
+  "-t -f NAME connection show") cat "$P/nm_connections" ;;
+  "-g ipv4.method connection show "*) echo manual ;;
+  "connection add "*)
+    if [[ -f $P/nm_refuse ]]; then echo "Error: Failed to add 'omamobile-phone' connection: Insufficient privileges" >&2; exit 4; fi
+    echo omamobile-phone >> "$P/nm_connections"
+    # The link comes up: the phone answers once it has started
+    echo "Connection 'omamobile-phone' successfully added." ;;
+  *) echo "nmcli stand-in: not handled: $*" >&2; exit 2 ;;
+esac

@@ -1,0 +1,10 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Stand-in for tools/phone-smoke --json.
+set -u
+P=${OMAINSTALL_PRETEND_PHONE:?the stand-ins run only in a test}
+echo "phone-smoke $*" >> "$P/log"
+if [[ -f $P/smoke.json ]]; then cat "$P/smoke.json"; else
+  echo '{"checks":[{"name":"boot","status":"ok","required":true,"detail":"slot b"},{"name":"display","status":"ok","required":false,"detail":""},{"name":"sound cards","status":"fail","required":false,"detail":"no card"},{"name":"cameras","status":"skip","required":false,"detail":"not provisioned"}]}'
+fi
+exit "$(cat "$P/smoke_rc" 2>/dev/null || echo 0)"
