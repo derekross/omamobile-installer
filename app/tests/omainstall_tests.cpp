@@ -2584,7 +2584,10 @@ private slots:
         shoot("49-pair-a-wrong-code");
         w.find("pairCode")->setProperty("text", backend.pretendShows());
         QVERIFY(w.click("primaryButton"));
-        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy() && backend.action() == "backup-dir", 20000);
+        QTRY_VERIFY2_WITH_TIMEOUT(!backend.busy() && backend.action() == "backup-dir",
+                                  qPrintable(backend.state() + " " + backend.action() + " " + backend.actionError() + " "
+                                             + backend.screen().value("problem").toString()),
+                                  20000);
         QCOMPARE(backend.state(), QString("radio-backup"));
         shoot("50-radio-backup-choose-a-folder");
         QVERIFY(backend.backupDir(scratch.filePath("backup")));

@@ -357,8 +357,10 @@ void Backend::handle(const QByteArray &raw) {
             // Another step's progress is not this one's
             if (state() != before)
                 clearProgress();
-            emit screenChanged();
+            // Busy before anyone hears of the screen: a listener that lets
+            // the event loop run may see the next screen arrive meanwhile
             setBusy(true);
+            emit screenChanged();
             return;
         }
         clearProgress();
