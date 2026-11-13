@@ -9,7 +9,8 @@
 #   tools/check-shipping --built [--control FAKE_PHONE_TOOL]
 #                                   also what was built: target/release/omamobile-install
 #                                   (cargo build --release --locked, no features) and web/dist
-#                                   (web/build.sh, no argument)
+#                                   (web/build.sh, no argument); and the desktop
+#                                   app, app/build/omainstall, if app/bin/build made one
 #
 # Neither mode runs the command-line tool or opens a USB device. The built
 # tool is read as bytes. The page's module is loaded in node, which has no
@@ -186,6 +187,30 @@ none "the page's module has no direct session for the page to drive" \
 none "the page's script calls nothing of the direct session" \
   'core\.connect\(|\.flash_boot\(|\.userdata_(start|feed|end)\(|\.finish\(|new core\.Install\b' web/static/*.js
 
+# The desktop app (app/src): it starts the tool's JSON mode and draws what
+# it is sent. It passes --write on only when it was itself started with
+# --write, has no message that carries the switch, and names neither the
+# slot statement, the override nor a pretend phone
+app_write=$(grep -n -- '--write' app/src/*.cpp app/src/*.h app/src/*.qml /dev/null | grep -vE '^[^:]+:[0-9]+: *(//|")' |
+  sed -E 's/^([^:]+):[0-9]+: */\1: /' || true)
+wanted='app/src/backend.cpp: arguments << "--write";
+app/src/main.cpp: } else if (argument == "--write") {'
+if [[ $app_write == "$wanted" ]]; then
+  ok "the app passes --write to the tool in one line, and takes it from its own command line in one"
+else
+  bad "the app names --write somewhere else than its argument and the tool's" "$app_write"
+fi
+once "the app passes --write only when it was started with it, and never for a probe" \
+  'if (m_write && !probeOnly)' app/src/backend.cpp
+once "the app's write switch is set from its own --write and nothing else" \
+  'backend.setWrite(write);' app/src/main.cpp
+none "nothing in the window sets the app's write switch" \
+  'setWrite|\.write *= *true|writes *= *true' app/src/*.qml
+none "no message the app sends carries a write switch" \
+  '\{"write", *(true|m_write)|"writes" *,' <(grep -n 'send(' app/src/backend.cpp)
+none "the app names no bootloader-slot statement, no override, no serial number and no pretend phone" \
+  'slots[-_]match|maintainer|--serial|fake[-_]phone|fake[-_]google|fake[-_]unplug' app/src/*.cpp app/src/*.h app/src/*.qml
+
 # The pretend phone: compiled in only behind its feature, in each front end
 for pair in "cli/src/main.rs|fake-phone" "web/src/lib.rs|selftest"; do
   file=${pair%%|*} feature_name=${pair#*|}
@@ -225,6 +250,17 @@ if (( built )); then
     for mark in "${marks[@]}"; do if [[ -f $control ]] && ! holds "$control" "$mark"; then missing+=("$mark"); fi; done
     if (( ${#missing[@]} )); then bad "the control, $control, is not a tool with the pretend phone, so the look above proves nothing" "${missing[@]}"
     else ok "the control, a tool built with the pretend phone, holds every one of those strings"; fi
+  fi
+
+  # The app, when it was built (app/bin/build): read as bytes like the tool
+  app=app/build/omainstall
+  if [[ -f $app ]]; then
+    found=()
+    for mark in "${marks[@]}" "--fake-phone" "--fake-unplug" "slots-match"; do if holds "$app" "$mark"; then found+=("$mark"); fi; done
+    if (( ${#found[@]} )); then bad "the built app holds a pretend phone or a slot statement" "${found[@]}"
+    else ok "the built app holds nothing of the pretend phone, the test key or the slot statement"; fi
+  else
+    ok "no built app to read (app/bin/build makes app/build/omainstall); its sources were read above"
   fi
 
   pkg=web/dist/pkg
