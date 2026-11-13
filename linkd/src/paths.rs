@@ -129,6 +129,11 @@ impl Root {
     pub fn program(&self, name: &str) -> PathBuf {
         self.at("/usr/bin").join(name)
     }
+    /// Where `omamobile-link-gadget add` mounts the link's FunctionFS: on
+    /// the tmpfs.
+    pub fn ffs_dir(&self) -> PathBuf {
+        self.run_dir().join("ffs")
+    }
     pub fn gadget(&self) -> PathBuf {
         self.at("/usr/lib/omamobile-install-link/omamobile-link-gadget")
     }

@@ -171,13 +171,40 @@ impl Programs {
         json::parse(String::from_utf8_lossy(&out.stdout).trim().as_bytes()).ok()
     }
 
-    /// `omamobile-link-gadget add|remove` (§3.3; the script is stage L3's).
-    pub fn gadget(&self, what: &str) -> io::Result<()> {
+    fn gadget_cmd(&self, what: &str) -> Command {
         let mut c = Command::new(self.root.gadget());
         c.stdin(Stdio::null()).arg(what);
         if self.root.scratch() {
             c.env("OMAMOBILE_LINK_ROOT", self.root.dir());
         }
-        Programs::run(c)
+        c
+    }
+
+    /// `omamobile-link-gadget add|remove` (§3.3), to its end.
+    pub fn gadget(&self, what: &str) -> io::Result<()> {
+        let status = self.gadget_cmd(what).stdout(Stdio::null()).status()?;
+        gadget_status(status)
+    }
+
+    /// `omamobile-link-gadget add`, started: with FunctionFS the daemon
+    /// writes the descriptors while the script waits for them.
+    pub fn gadget_spawn(&self, what: &str) -> io::Result<std::process::Child> {
+        self.gadget_cmd(what).spawn()
+    }
+}
+
+/// `omamobile-link-gadget`'s exit status for a boot it leaves alone.
+pub const GADGET_SKIPPED: i32 = 3;
+
+/// What the gadget script's exit status says.
+pub fn gadget_status(status: std::process::ExitStatus) -> io::Result<()> {
+    match status.code() {
+        Some(0) => Ok(()),
+        // Its hang marker (§3.3): an earlier boot did not finish changing
+        // the gadget, so this boot leaves it as the initramfs made it
+        Some(GADGET_SKIPPED) => Err(io::Error::other(
+            "omamobile-link-gadget: skipped for this boot: an earlier boot did not finish changing the gadget",
+        )),
+        _ => Err(io::Error::other(format!("omamobile-link-gadget: exit {status}"))),
     }
 }
