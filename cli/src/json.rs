@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! `omamobile-install json`: the install flow as JSON lines, for the desktop
-//! app, agents and scripts. The protocol is docs/APP.md §3, number 1.
+//! app, agents and scripts. The protocol is docs/APP.md §3, number 2.
 //!
 //! One JSON object per line on standard input and on standard output.
 //! Standard output carries the protocol and nothing else: this file takes it
@@ -16,17 +16,29 @@
 //! screen does not name is refused here, before the flow or a phone is
 //! touched, and everything else is the flow's answer.
 //!
-//! This mode ends at the dry run, as the flow does. It has no message and no
-//! argument that writes to a phone: the arguments are a closed list
-//! ([`Args::parse`]), and anything else is refused before `hello`.
+//! Without `--write` this mode ends at the dry run, and nothing that is
+//! sent to it can change that: whether the flow may write is said once,
+//! when the tool is started, and never by a message. With `--write` the
+//! flow goes on as `install --write` does: the dry run, the list of what
+//! will be written, the phone's codename as the owner typed it (`confirm`),
+//! and then the writes (`write`), through the one session the flow opens
+//! (`Flow::begin_write`). This file opens no session of its own.
+//!
+//! The arguments are a closed list ([`Args::parse`]), and anything else is
+//! refused before `hello`: there is none that names a phone, none for the
+//! owner's statement about a bootloader slot the phone does not report
+//! (that is `install`'s, typed by the owner on a command line), and none
+//! for the maintainer's override.
 use crate::{
-    download_factory_zip, is_fastboot, take_factory_zip, walk_images, Bundle, Fetcher, Res, Watch,
+    download_factory_zip, is_fastboot, parse_proxy, piece_line, take_factory_zip, walk_images,
+    Bundle, Fetcher, Res, Watch,
 };
-use omamobile_installer_core::fastboot::{PhoneId, Transport};
+use omamobile_installer_core::fastboot::{PhoneId, PieceReport, Transport};
 use omamobile_installer_core::flow::{
     AnswerField, AnswerProblem, AnswersInput, Flow, FlowOptions, OwnerAnswers,
 };
 use omamobile_installer_core::signature::TrustedKeys;
+use omamobile_installer_core::Error;
 use omamobile_installer_usb::UsbTransport;
 use pollster::block_on;
 use serde_json::{json, Map, Value};
@@ -39,7 +51,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The protocol this tool speaks (docs/APP.md §3).
-pub const PROTOCOL: u64 = 1;
+pub const PROTOCOL: u64 = 2;
 /// A line longer than this is not a message of this protocol.
 const LONGEST_LINE: usize = 1 << 20;
 
@@ -94,10 +106,16 @@ fn fatal(message: &str) -> ExitCode {
 // ---- Arguments ---------------------------------------------------------------
 
 /// What `json` was started with. A closed list: there is no argument for a
-/// write, for a serial number or for the maintainer's override, and an
-/// argument that is not listed here stops the mode before it says `hello`.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// serial number, for the owner's statement about a bootloader slot or for
+/// the maintainer's override, and an argument that is not listed here stops
+/// the mode before it says `hello`.
+#[derive(Debug, Default)]
 pub struct Args {
+    /// The flow may write: `--write`, said when the tool is started and by
+    /// nothing else. Without it the flow ends at the dry run.
+    write: bool,
+    /// The proxy the owner named for the download of Google's file.
+    proxy: Option<ureq::Proxy>,
     /// The release's directory. Without one the mode still says `hello`
     /// (so that a front end can ask its version), and `start` fails.
     release: Option<PathBuf>,
@@ -109,6 +127,10 @@ pub struct Args {
     /// The stand-in for Google's server, for a pretend run.
     #[cfg(feature = "fake-phone")]
     fake_google: Option<String>,
+    /// The pretend phone's cable is pulled as the Nth command that starts
+    /// with a text is sent: `flash:userdata:2`.
+    #[cfg(feature = "fake-phone")]
+    fake_unplug: Option<(String, usize)>,
 }
 
 impl Args {
@@ -124,21 +146,38 @@ impl Args {
             match *arg {
                 "--release" => out.release = Some(PathBuf::from(value()?)),
                 "--work-dir" => out.work_dir = Some(PathBuf::from(value()?)),
+                // The one way this mode's flow may write. It is never implied
+                "--write" => out.write = true,
+                // The one way a proxy is used: named here, by the owner
+                "--proxy" => {
+                    out.proxy =
+                        Some(parse_proxy(Some(&value()?)).map_err(|e| e.to_string())?)
+                }
                 #[cfg(feature = "fake-phone")]
                 "--fake-phone" => out.fake_phone = Some(value()?),
                 #[cfg(feature = "fake-phone")]
                 "--fake-google" => out.fake_google = Some(value()?),
+                #[cfg(feature = "fake-phone")]
+                "--fake-unplug" => {
+                    let value = value()?;
+                    let parsed = value
+                        .rsplit_once(':')
+                        .and_then(|(command, nth)| Some((command.to_string(), nth.parse().ok()?)));
+                    out.fake_unplug = Some(parsed.ok_or(
+                        "--fake-unplug takes the start of a command and a count, like flash:userdata:2",
+                    )?);
+                }
                 other => {
                     return Err(format!(
-                        "json takes --release DIR and --work-dir DIR, and nothing else: not {other}. This mode ends at the dry run; it has no argument that writes to a phone, names one, or skips a check"
+                        "json takes --release DIR, --work-dir DIR, --proxy http://HOST:PORT and --write, and nothing else: not {other}. This mode has no argument that names a phone, states anything about one, or skips a check"
                     ))
                 }
             }
         }
         #[cfg(feature = "fake-phone")]
-        if out.fake_google.is_some() && out.fake_phone.is_none() {
+        if (out.fake_google.is_some() || out.fake_unplug.is_some()) && out.fake_phone.is_none() {
             return Err(
-                "a stand-in for Google's server is for the pretend phone only: --fake-phone STATE"
+                "a stand-in for Google's server and a pulled cable are for the pretend phone only: --fake-phone STATE"
                     .into(),
             );
         }
@@ -299,12 +338,13 @@ impl Lines {
 /// it stays where it is, for the loop that takes the lines in turn.
 struct Wire<'a> {
     lines: &'a mut Lines,
-    sent: Option<(Instant, u64)>,
+    /// When the last `progress` went out, what it was of, and its `done`.
+    told: Option<(Instant, &'static str, u64)>,
 }
 
 impl<'a> Wire<'a> {
     fn new(lines: &'a mut Lines) -> Self {
-        Wire { lines, sent: None }
+        Wire { lines, told: None }
     }
 }
 
@@ -314,20 +354,44 @@ impl Watch for Wire<'_> {
     }
 
     fn progress(&mut self, what: &'static str, done: u64, total: u64) {
-        let due = match self.sent {
+        let due = match self.told {
             None => true,
-            Some((_, last)) if last == done => false,
-            Some((at, _)) => done == total || at.elapsed() >= Duration::from_millis(250),
+            Some((_, of, _)) if of != what => true,
+            Some((_, _, last)) if last == done => false,
+            Some((at, _, _)) => done == total || at.elapsed() >= Duration::from_millis(250),
         };
         if due {
-            self.sent = Some((Instant::now(), done));
+            self.told = Some((Instant::now(), what, done));
             say(json!({"type": "progress", "what": what, "done": done, "total": total}));
         }
     }
 
+    fn sent(&mut self, command: &str) {
+        say(json!({"type": "sent", "command": command}));
+    }
+
+    fn piece(&mut self, number: u32, piece: &PieceReport) {
+        say(json!({
+            "type": "piece",
+            "number": number,
+            "blocks": piece.blocks,
+            "bytes": piece.bytes,
+            "seconds": piece.flash.map(|took| took.as_secs_f64()),
+            // The same words the terminal prints for it
+            "line": format!("flash:userdata ({})", piece_line(number, piece)),
+        }));
+    }
+
+    fn account(&mut self, lines: &[String]) {
+        if !lines.is_empty() {
+            say(json!({"type": "account", "lines": lines}));
+        }
+    }
+
     fn go_on(&mut self, what: &'static str) -> bool {
-        // A dry run only reads and is soon over: it is finished, not cut off
-        if what == "dry-run" {
+        // A dry run only reads and is soon over: it is finished, not cut
+        // off. A write is never cut off from here: what was begun is sent
+        if what != "download" && what != "check" {
             return true;
         }
         loop {
@@ -431,7 +495,7 @@ struct PretendPhone {
 
 #[cfg(feature = "fake-phone")]
 impl Pretend {
-    fn new(states: &str) -> Res<Self> {
+    fn new(states: &str, unplug: Option<(String, usize)>) -> Res<Self> {
         use crate::fake::FakePhone;
         let mut phones = Vec::new();
         for state in states.split(',').filter(|s| *s != "none") {
@@ -445,6 +509,7 @@ impl Pretend {
             let serial = format!("FAKESERIAL{:04}", phones.len() + 1);
             phone.edit(|s| {
                 s.vars.insert("serialno".into(), serial.clone());
+                s.unplug_on = unplug.clone();
             });
             phones.push(PretendPhone {
                 state: state.to_string(),
@@ -457,8 +522,8 @@ impl Pretend {
     }
 
     /// What each pretend phone received, on standard error: every command,
-    /// then the count. A run of this mode shows `getvar` and, for a locked
-    /// phone, the one read-only question, and nothing else.
+    /// then the count. A run that was not started to write shows `getvar`
+    /// and, for a locked phone, the one read-only question, and nothing else.
     fn record(&self) {
         for (n, p) in self.phones.iter().enumerate() {
             let name = format!("pretend phone {} ({})", n + 1, p.state);
@@ -547,6 +612,10 @@ struct Driver<P: Phones> {
     release: Option<PathBuf>,
     work_dir: Option<PathBuf>,
     fetcher: Fetcher,
+    /// The owner named a proxy for the download (`--proxy`).
+    proxied: bool,
+    /// The tool was started with `--write`.
+    may_write: bool,
     lines: Lines,
     greeted: bool,
     started: Option<Started>,
@@ -671,8 +740,11 @@ impl<P: Phones> Driver<P> {
         };
         let (bundle, trusted) = (self.trust)(&dir)
             .map_err(|e| Fatal(format!("the release could not be read ({e})")))?;
+        // The flow's write switch in this mode: the tool's own argument,
+        // and nothing a message says
         let options = FlowOptions {
             reinstall,
+            write: self.may_write,
             ..Default::default()
         };
         let flow = Flow::begin(&bundle.files(), bundle.index.as_deref(), &trusted, options);
@@ -733,6 +805,8 @@ impl<P: Phones> Driver<P> {
             "take-file" => asks == "download" || asks == "take-file",
             "answers" => asks == "answers",
             "dry-run" => asks == "dry-run",
+            "confirm" => asks == "confirm",
+            "write" => asks == "write",
             #[cfg(feature = "fake-phone")]
             "pretend-panic" => true,
             "hello" | "start" => {
@@ -806,7 +880,7 @@ impl<P: Phones> Driver<P> {
                 download_factory_zip(
                     &mut started.flow,
                     &self.fetcher,
-                    false,
+                    self.proxied,
                     self.work_dir.as_deref(),
                     &name.ok_or("the flow names no file to download")?,
                     &mut Wire::new(&mut self.lines),
@@ -883,6 +957,49 @@ impl<P: Phones> Driver<P> {
                     }
                 }
             }
+            // What will be written was listed: this is what the owner typed,
+            // as typed. The core takes the phone's codename, or stops
+            "confirm" => {
+                let typed = text(message, "typed").ok_or("confirm needs \"typed\", as text.")?;
+                self.flow().confirm_install(typed)?;
+            }
+            "write" => {
+                let n = match self.find(None)? {
+                    Found::One(n, _) => n,
+                    Found::Nobody => return Err(NO_PHONE.into()),
+                    Found::Several(_) => {
+                        return Err("More than one phone in Fastboot Mode is connected, and none of them is the one this install looked at. Connect that phone only.".into())
+                    }
+                };
+                let (link, _) = self.phones.open(n)?;
+                let Some(started) = self.started.as_mut() else {
+                    return Ok(());
+                };
+                let release = started
+                    .flow
+                    .release()
+                    .ok_or("the flow has no release")?
+                    .clone();
+                // The one session that can write is the flow's
+                if let Some(mut session) = block_on(started.flow.begin_write(link))? {
+                    let mut wire = Wire::new(&mut self.lines);
+                    match block_on(walk_images(&mut session, &release, &started.dir, &mut wire)) {
+                        Ok(true) => {
+                            started.flow.write_done(session)?;
+                        }
+                        Ok(false) => {
+                            let gone = Error::Transport(
+                                "the release's files are no longer where the dry run read them"
+                                    .into(),
+                            );
+                            started.flow.write_failed(session, &gone)?;
+                        }
+                        Err(e) => {
+                            started.flow.write_failed(session, &e)?;
+                        }
+                    }
+                }
+            }
             // A build of this mode for the tests only: the way they see
             // what a failure of the tool itself looks like on the wire
             #[cfg(feature = "fake-phone")]
@@ -908,6 +1025,8 @@ fn drive<P: Phones>(phones: P, trust: Trust, fetcher: Fetcher, args: Args) -> (P
         "protocol": PROTOCOL,
         "tool": "omamobile-install",
         "version": env!("CARGO_PKG_VERSION"),
+        // Whether this run's flow may write: what the tool was started with
+        "writes": args.write,
     }));
     let mut driver = Driver {
         phones,
@@ -915,6 +1034,8 @@ fn drive<P: Phones>(phones: P, trust: Trust, fetcher: Fetcher, args: Args) -> (P
         release: args.release,
         work_dir: args.work_dir,
         fetcher,
+        proxied: args.proxy.is_some(),
+        may_write: args.write,
         lines: Lines::read(),
         greeted: false,
         started: None,
@@ -955,8 +1076,8 @@ pub fn run(args: &[&str]) -> ExitCode {
     #[cfg(feature = "fake-phone")]
     if let Some(states) = args.fake_phone.clone() {
         let (phones, fetcher) = match (
-            Pretend::new(&states),
-            Fetcher::pretend(args.fake_google.as_deref(), None),
+            Pretend::new(&states, args.fake_unplug.clone()),
+            Fetcher::pretend(args.fake_google.as_deref(), args.proxy.clone()),
         ) {
             (Ok(phones), Ok(fetcher)) => (phones, fetcher),
             (Err(e), _) | (_, Err(e)) => return fatal(&e.to_string()),
@@ -966,7 +1087,8 @@ pub fn run(args: &[&str]) -> ExitCode {
         phones.record();
         return code;
     }
-    drive(Usb::default(), release_keys, Fetcher::google(None), args).1
+    let fetcher = Fetcher::google(args.proxy.clone());
+    drive(Usb::default(), release_keys, fetcher, args).1
 }
 
 #[cfg(test)]
@@ -976,11 +1098,15 @@ mod tests {
     /// The mode's arguments are a closed list. Checked here, on the parser,
     /// in every build: nothing is started and no device is looked for.
     #[test]
-    fn json_takes_no_argument_that_writes_names_a_phone_or_skips_a_check() {
+    fn json_takes_no_argument_that_names_a_phone_states_a_slot_or_skips_a_check() {
         assert!(Args::parse(&[]).is_ok());
         assert!(Args::parse(&["--release", "DIR", "--work-dir", "DIR"]).is_ok());
+        // The flow writes only when the tool was started with --write
+        assert!(!Args::parse(&["--release", "DIR"]).unwrap().write);
+        assert!(Args::parse(&["--release", "DIR", "--write"]).unwrap().write);
+        assert!(Args::parse(&["--proxy", "http://127.0.0.1:8080"]).is_ok());
+        assert!(Args::parse(&["--proxy", "socks5://127.0.0.1:8080"]).is_err());
         for refused in [
-            "--write",
             "--flash",
             "--install",
             "--yes",
@@ -1001,7 +1127,7 @@ mod tests {
                 vec![refused, "--release", "DIR"],
             ] {
                 let why = Args::parse(&args).expect_err(refused);
-                assert!(why.contains("no argument that writes to a phone"), "{why}");
+                assert!(why.contains("no argument that names a phone"), "{why}");
             }
         }
         assert!(Args::parse(&["--release"]).is_err());
@@ -1015,6 +1141,7 @@ mod tests {
             vec!["--fake-phone", "ready"],
             vec!["--release", "DIR", "--fake-phone", "ready"],
             vec!["--fake-google", "127.0.0.1:1"],
+            vec!["--fake-unplug", "flash:userdata:1"],
         ] {
             assert!(Args::parse(&args).is_err(), "{args:?}");
         }
@@ -1024,6 +1151,13 @@ mod tests {
     #[test]
     fn the_stand_in_for_google_is_for_the_pretend_phone_only() {
         assert!(Args::parse(&["--fake-google", "127.0.0.1:1"]).is_err());
+        assert!(Args::parse(&["--fake-unplug", "flash:userdata:1"]).is_err());
+        assert!(Args::parse(&["--fake-phone", "ready", "--fake-unplug", "flash"]).is_err());
+        let args = Args::parse(&["--fake-phone", "ready", "--fake-unplug", "flash:userdata:2"]);
+        assert_eq!(
+            args.unwrap().fake_unplug,
+            Some(("flash:userdata".into(), 2))
+        );
         assert!(Args::parse(&["--fake-phone", "ready", "--fake-google", "127.0.0.1:1"]).is_ok());
     }
 }

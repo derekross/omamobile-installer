@@ -1,8 +1,9 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # What a build that ships must not hold: a way to write to a phone anywhere
-# but the command-line tool's `install --write`, and the pretend phone with
-# the test key it trusts.
+# but the command-line tool started with `--write` (`install --write`, and
+# `json --write`, which the desktop app starts when it was itself started
+# with `--write`), and the pretend phone with the test key it trusts.
 #
 #   tools/check-shipping            the sources. Builds nothing, runs nothing
 #   tools/check-shipping --built [--control FAKE_PHONE_TOOL]
@@ -22,7 +23,15 @@
 # path, `install --write`, and the checks for it here were changed with it,
 # on purpose and in the same pull request: the flow opens one writing
 # session, in the one function that checks every condition for a write, and
-# the tool sets the flow's write switch in one place, from `--write` alone.
+# the tool sets the flow's write switch from `--write` alone.
+#
+# Changed again, on purpose, with the tool's `json` mode given the same
+# path for the desktop app (protocol 2, docs/APP.md): the switch is now set
+# in two places and no third, `install`'s arguments and `json`'s, each from
+# the word `--write` on the tool's own command line and from nothing a
+# message says. The owner's statement about a bootloader slot stays
+# `install`'s alone. The app's sources are read too: it passes `--write`
+# on only when it was started with it, and holds no pretend phone.
 #
 # That a session writes only if `Flow::begin_write` opened it is held by
 # the compiler, not by this script: a writing session takes a token
@@ -126,13 +135,32 @@ else bad "a write token or a writing session outside the flow" "$elsewhere"; fi
 # opens
 none "the command-line tool opens no session of its own and names no session options" \
   'Session::connect|connect_pinned|connect_writing|PhoneOptions|WriteToken' cli/src/*.rs
-switches=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' cli/src/*.rs core/src/*.rs usb/src/*.rs web/src/*.rs /dev/null || true)
-if [[ $switches == "cli/src/main.rs:"*"options.write = write;" ]]; then
-  ok "the flow's write switch is set in one place, by the command-line tool, from --write"
+switches=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' cli/src/*.rs core/src/*.rs usb/src/*.rs web/src/*.rs /dev/null |
+  sed -E 's/^([^:]+):[0-9]+: */\1: /' || true)
+wanted='cli/src/json.rs: "--write" => out.write = true,
+cli/src/main.rs: options.write = write;'
+if [[ $switches == "$wanted" ]]; then
+  ok "the flow's write switch is set by the command-line tool alone, in install's arguments and in json's, from --write"
 else
-  bad "the flow's write switch is set somewhere else than the command-line tool's one line" "$switches"
+  bad "the flow's write switch is set somewhere else than the command-line tool's two lines" "$switches"
 fi
-once "--write is the one argument that sets it" '"--write" => write = true,' cli/src/main.rs
+once "--write is the one argument of install that sets it" '"--write" => write = true,' cli/src/main.rs
+# The JSON mode (the desktop app's and scripts' way in): its flow writes
+# only if the tool itself was started with --write. No message carries the
+# switch, and the one place the mode makes a flow's options reads the
+# argument
+once "the JSON mode begins its flow with the switch its own --write set" \
+  'write: self.may_write,' cli/src/json.rs
+once "the JSON mode's switch comes from its arguments, in one line" \
+  'may_write: args.write,' cli/src/json.rs
+none "the JSON mode sets the flow's write switch nowhere else" \
+  '^\s*write: (?!self\.may_write,|bool,)|may_write *=[^=]' cli/src/json.rs
+none "no message of the JSON mode is read for a write switch" \
+  'get\("write"\)|"write" *=> *(true|.*as_bool)|message\["write"\]' cli/src/json.rs
+# The owner's statement about the other bootloader slot, and the
+# maintainer's override, are `install`'s: the JSON mode names neither
+none "the JSON mode cannot state the other bootloader slot's version or skip its check" \
+  'bootloader_slots_match|maintainer_skip_bootloader_slot_check' cli/src/json.rs
 
 # The page: it begins every flow as a dry run and reaches none of the
 # flow's write steps

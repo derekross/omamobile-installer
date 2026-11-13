@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! `omamobile-install json` (docs/APP.md §3, protocol 1), the built tool
+//! `omamobile-install json` (docs/APP.md §3, protocol 2), the built tool
 //! driven over its standard input and output as the desktop app, an agent or
 //! a script drives it. The phones are the pretend ones (feature
 //! `fake-phone`) and Google's server is a socket on 127.0.0.1 in this file:
@@ -7,8 +7,10 @@
 //!
 //! Every test ends in [`Tool::finish`], which checks what holds for every
 //! run: standard output is JSON lines of the protocol and nothing else, each
-//! action was answered by exactly one screen, and the pretend phones
-//! received nothing but reads.
+//! action was answered by exactly one screen, and, in a run that was not
+//! started with `--write`, the pretend phones received nothing but reads.
+//! The runs that write are at the end of this file; each reads the pretend
+//! phone's record of what it received.
 //!
 //!   cargo test -p omamobile-installer-cli --features fake-phone
 use serde_json::{json, Value};
@@ -22,8 +24,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const ZIP: &str = "cheetah-test.260101.001-factory-31c2322a.zip";
-const TYPES: [&str; 8] = [
-    "hello", "screen", "progress", "phones", "problems", "error", "fatal", "bye",
+const TYPES: [&str; 11] = [
+    "hello", "screen", "progress", "phones", "problems", "error", "fatal", "bye", "sent", "piece",
+    "account",
 ];
 const PIN: &str = "481516";
 
@@ -56,16 +59,29 @@ struct Reply {
 }
 
 impl Reply {
-    /// The types of what came before the screen, a run of `progress` as one.
+    /// The types of what came before the screen, a run of `progress`, of
+    /// `sent` or of `piece` as one.
     fn kinds(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
         for m in &self.before {
             let kind = m["type"].as_str().unwrap();
-            if out.last() != Some(&kind) || kind != "progress" {
+            if out.last() != Some(&kind) || !["progress", "sent", "piece"].contains(&kind) {
                 out.push(kind);
             }
         }
         out
+    }
+    /// The commands the session that writes said it sent, in order; a piece
+    /// of userdata as `flash:userdata`.
+    fn sent(&self) -> Vec<&str> {
+        self.before
+            .iter()
+            .filter_map(|m| match m["type"].as_str() {
+                Some("sent") => m["command"].as_str(),
+                Some("piece") => Some("flash:userdata"),
+                _ => None,
+            })
+            .collect()
     }
     fn state(&self) -> &str {
         self.screen["state"].as_str().unwrap()
@@ -129,6 +145,8 @@ struct Tool {
     stray: Vec<String>,
     /// How many screens are owed: one for `start`, one for each action.
     owed: usize,
+    /// The tool was started with `--write`.
+    writes: bool,
     stderr: Arc<Mutex<String>>,
 }
 
@@ -187,6 +205,7 @@ impl Tool {
             said: Vec::new(),
             stray: Vec::new(),
             owed: 0,
+            writes: args.contains(&"--write"),
             stderr,
         }
     }
@@ -201,7 +220,8 @@ impl Tool {
         let hello = tool.hear();
         assert_eq!(
             hello,
-            json!({"type": "hello", "protocol": 1, "tool": "omamobile-install", "version": env!("CARGO_PKG_VERSION")})
+            json!({"type": "hello", "protocol": 2, "tool": "omamobile-install",
+                   "version": env!("CARGO_PKG_VERSION"), "writes": tool.writes})
         );
         tool
     }
@@ -209,7 +229,7 @@ impl Tool {
     /// As [`Tool::pretend`], through the handshake to the first screen.
     fn started(states: &str, extra: &[&str]) -> (Tool, Reply) {
         let mut tool = Tool::pretend(states, extra);
-        tool.say(json!({"type": "hello", "protocol": 1, "app": "the tests", "version": "0"}));
+        tool.say(json!({"type": "hello", "protocol": 2, "app": "the tests", "version": "0"}));
         let first = tool.act(json!({"type": "start", "reinstall": false}));
         (tool, first)
     }
@@ -257,21 +277,28 @@ impl Tool {
 
     /// Everything up to the next screen. The reply rule: any number of
     /// `progress`, at most one of `phones`, `problems` and `error`, then
-    /// the screen.
+    /// the screen. A write also says what it sent: any number of `sent`
+    /// and `piece`, and at most one `account`.
     fn reply(&mut self) -> Reply {
         let mut before = Vec::new();
         loop {
             let message = self.hear();
             match message["type"].as_str() {
                 Some("screen") => {
-                    let others = before.iter().filter(|m: &&Value| m["type"] != "progress");
-                    assert!(others.count() <= 1, "{before:?}");
+                    let count = |kinds: &[&str]| {
+                        let is = |m: &&Value| kinds.contains(&m["type"].as_str().unwrap());
+                        before.iter().filter(is).count()
+                    };
+                    assert!(count(&["phones", "problems", "error"]) <= 1, "{before:?}");
+                    assert!(count(&["account"]) <= 1, "{before:?}");
                     return Reply {
                         before,
                         screen: message["screen"].clone(),
                     };
                 }
-                Some("progress" | "phones" | "problems" | "error") => before.push(message),
+                Some(
+                    "progress" | "phones" | "problems" | "error" | "sent" | "piece" | "account",
+                ) => before.push(message),
                 _ => panic!("{message} where a screen was owed; before it: {before:?}"),
             }
         }
@@ -339,16 +366,40 @@ impl Tool {
         // Every action ended with exactly one screen
         let screens = ended.kinds().iter().filter(|k| **k == "screen").count();
         assert_eq!(screens, self.owed, "{:?}", ended.kinds());
-        // Nothing but reads reached a pretend phone: no flash, no erase, no
-        // set_active, no reboot, no download, no unlock
-        for command in ended.commands() {
-            assert!(
-                command.starts_with("getvar:") || command == "flashing get_unlock_ability",
-                "the pretend phone received {command}"
-            );
+        // Unless the tool was started to write, nothing but reads reached
+        // a pretend phone: no flash, no erase, no set_active, no reboot, no
+        // download, no unlock; and nothing the tool said names a command
+        if !self.writes {
+            for command in ended.commands() {
+                assert!(
+                    command.starts_with("getvar:") || command == "flashing get_unlock_ability",
+                    "the pretend phone received {command}"
+                );
+            }
+            for line in ended.stderr.lines().filter(|l| l.contains("received ")) {
+                assert!(line.ends_with(" 0 others; partitions written: 0"), "{line}");
+            }
+            for kind in ["sent", "piece", "account"] {
+                assert!(!ended.kinds().contains(&kind), "{:?}", ended.kinds());
+            }
         }
-        for line in ended.stderr.lines().filter(|l| l.contains("received ")) {
-            assert!(line.ends_with(" 0 others; partitions written: 0"), "{line}");
+        // Whatever the run was: only what the write path may send
+        for command in ended.commands() {
+            let allowed = command.starts_with("getvar:")
+                || command == "flashing get_unlock_ability"
+                || command.starts_with("download:")
+                || command == "set_active:b"
+                || command == "reboot"
+                || [
+                    "flash:boot_b",
+                    "flash:init_boot_b",
+                    "flash:vendor_boot_b",
+                    "flash:vendor_kernel_boot_b",
+                    "flash:dtbo_b",
+                    "flash:userdata",
+                ]
+                .contains(&command);
+            assert!(allowed, "the pretend phone received {command}");
         }
         // No serial number and nothing of the owner's secrets, anywhere
         for text in [
@@ -456,7 +507,7 @@ fn the_tool_says_hello_first_and_asks_nothing_of_a_phone_before_start() {
     // Nothing follows the hello by itself: no screen before start
     assert!(tool.hear_within(Duration::from_millis(300)).is_none());
     // The app's hello is not answered
-    tool.say(json!({"type": "hello", "protocol": 1, "app": "the tests", "version": "0"}));
+    tool.say(json!({"type": "hello", "protocol": 2, "app": "the tests", "version": "0"}));
     assert!(tool.hear_within(Duration::from_millis(300)).is_none());
     let ended = tool.quit();
     assert_eq!(ended.kinds(), ["hello", "bye"]);
@@ -469,7 +520,7 @@ fn the_tool_says_hello_first_and_asks_nothing_of_a_phone_before_start() {
     // What `omainstall check` does: read the hello, send quit. It needs no
     // release, and none is read
     let mut tool = Tool::with_args(&["--fake-phone", "ready"]);
-    assert_eq!(tool.hear()["protocol"], 1);
+    assert_eq!(tool.hear()["protocol"], 2);
     assert_eq!(tool.quit().kinds(), ["hello", "bye"]);
 
     // The first screen comes with start, and is the warning
@@ -493,9 +544,10 @@ fn the_tool_says_hello_first_and_asks_nothing_of_a_phone_before_start() {
 #[test]
 fn another_protocol_number_is_fatal() {
     for hello in [
-        json!({"type": "hello", "protocol": 2, "app": "the tests", "version": "0"}),
+        json!({"type": "hello", "protocol": 1, "app": "the tests", "version": "0"}),
+        json!({"type": "hello", "protocol": 3, "app": "the tests", "version": "0"}),
         json!({"type": "hello", "protocol": 0}),
-        json!({"type": "hello", "protocol": "1"}),
+        json!({"type": "hello", "protocol": "2"}),
         json!({"type": "hello"}),
     ] {
         let mut tool = Tool::pretend("ready", &[]);
@@ -504,20 +556,21 @@ fn another_protocol_number_is_fatal() {
         assert_eq!(ended.code, 1, "{hello}");
         assert_eq!(ended.kinds(), ["hello", "fatal"], "{hello}");
         let said = ended.said[1]["message"].as_str().unwrap();
-        assert!(said.contains("this tool speaks protocol 1"), "{said}");
+        assert!(said.contains("this tool speaks protocol 2"), "{said}");
         assert!(ended.stderr.contains("received 0 commands"));
     }
 }
 
 #[test]
-fn what_the_tool_cannot_start_with_is_fatal_and_no_argument_writes() {
+fn what_the_tool_cannot_start_with_is_fatal() {
     // An argument the mode does not have: refused before hello, and so is
-    // anything that would ask for a write, name a phone or skip a check
+    // anything that would name a phone, state something about one or skip
+    // a check. `--write` is the one word for a write, and no other is taken
     let dir = fixture();
     let dir = dir.to_str().unwrap();
     for refused in [
-        "--write",
         "--flash",
+        "--bootloader-slots-match",
         "--yes",
         "--no-dry-run",
         "--dry-run",
@@ -532,10 +585,7 @@ fn what_the_tool_cannot_start_with_is_fatal_and_no_argument_writes() {
             assert_eq!(ended.code, 1, "{args:?}");
             assert_eq!(ended.kinds(), ["fatal"], "{args:?}");
             let said = ended.said[0]["message"].as_str().unwrap();
-            assert!(
-                said.contains("no argument that writes to a phone"),
-                "{said}"
-            );
+            assert!(said.contains("no argument that names a phone"), "{said}");
             // No pretend phone was even made
             assert!(
                 !ended.stderr.contains("pretend phone 1"),
@@ -575,7 +625,7 @@ fn what_the_tool_cannot_start_with_is_fatal_and_no_argument_writes() {
     ] {
         let mut tool = Tool::with_args(&args);
         tool.hear();
-        tool.say(json!({"type": "hello", "protocol": 1}));
+        tool.say(json!({"type": "hello", "protocol": 2}));
         tool.say(json!({"type": "start", "reinstall": false}));
         let ended = tool.finish();
         assert_eq!((ended.code, ended.kinds()), (1, vec!["hello", "fatal"]));
@@ -760,7 +810,7 @@ fn a_script_can_write_every_line_at_once() {
     // lines waits its turn
     let zip = zip_file();
     let script: String = [
-        json!({"type": "hello", "protocol": 1, "app": "a script", "version": "0"}),
+        json!({"type": "hello", "protocol": 2, "app": "a script", "version": "0"}),
         json!({"type": "start", "reinstall": false}),
         json!({"type": "acknowledge"}),
         json!({"type": "read-phone"}),
@@ -933,7 +983,7 @@ fn no_phone_and_more_than_one_phone() {
 /// Run to the first look at a phone in `state` and return the stop.
 fn stop_at_the_first_look(state: &str, reinstall: bool) -> (Tool, Reply) {
     let mut tool = Tool::pretend(state, &[]);
-    tool.say(json!({"type": "hello", "protocol": 1}));
+    tool.say(json!({"type": "hello", "protocol": 2}));
     tool.act(json!({"type": "start", "reinstall": reinstall}));
     tool.act(json!({"type": "acknowledge"}));
     let reply = tool.act(json!({"type": "read-phone"}));
@@ -1058,7 +1108,7 @@ fn each_kind_of_stop_is_the_cores_screen_and_says_whether_starting_again_helps()
         let mut tool =
             Tool::with_args(&["--release", dir.to_str().unwrap(), "--fake-phone", "ready"]);
         tool.hear();
-        tool.say(json!({"type": "hello", "protocol": 1}));
+        tool.say(json!({"type": "hello", "protocol": 2}));
         let first = tool.act(json!({"type": "start", "reinstall": false}));
         assert_eq!((first.state(), first.action()), ("stopped", "none"));
         assert_eq!(
@@ -1142,7 +1192,7 @@ fn malformed_lines_get_an_error_and_never_move_the_flow() {
     // An empty line is skipped
     tool.write(b"\n   \n");
     assert!(tool.hear_within(Duration::from_millis(200)).is_none());
-    tool.say(json!({"type": "hello", "protocol": 1}));
+    tool.say(json!({"type": "hello", "protocol": 2}));
     // start says whether this is a reinstall, as true or false
     for start in [
         json!({"type": "start"}),
@@ -1173,7 +1223,7 @@ fn malformed_lines_get_an_error_and_never_move_the_flow() {
         b"\xff\xfe\x00\n".to_vec(),
         long.into_bytes(),
         // said once, before the install
-        b"{\"type\": \"hello\", \"protocol\": 1}\n".to_vec(),
+        b"{\"type\": \"hello\", \"protocol\": 2}\n".to_vec(),
         b"{\"type\": \"start\", \"reinstall\": true}\n".to_vec(),
     ] {
         let reply = tool.act_raw(&line);
@@ -1205,7 +1255,7 @@ fn malformed_lines_get_an_error_and_never_move_the_flow() {
     // A last line without its line feed still counts
     let mut tool = Tool::pretend("ready", &[]);
     tool.write(
-        b"{\"type\": \"hello\", \"protocol\": 1}\n{\"type\": \"start\", \"reinstall\": false}",
+        b"{\"type\": \"hello\", \"protocol\": 2}\n{\"type\": \"start\", \"reinstall\": false}",
     );
     tool.owed = 1;
     assert_eq!(tool.finish().kinds(), ["hello", "screen", "bye"]);
@@ -1447,6 +1497,8 @@ fn nothing_but_reads_reaches_a_phone_whatever_is_sent() {
     // what it received: getvar and nothing else, no partition changed
     let asks = [
         json!({"type": "write"}),
+        json!({"type": "confirm", "typed": "cheetah"}),
+        json!({"type": "start", "reinstall": false, "write": true}),
         json!({"type": "flash"}),
         json!({"type": "install"}),
         json!({"type": "erase", "partition": "userdata"}),
@@ -1505,4 +1557,308 @@ fn nothing_but_reads_reaches_a_phone_whatever_is_sent() {
         );
     }
     assert!(ended.stderr.contains("0 others; partitions written: 0"));
+}
+
+// ---- A run that writes (`--write`) -------------------------------------------------
+
+/// The straight path of a run started with `--write`, up to the list of
+/// what will be written and the question for the codename.
+fn to_the_confirmation(states: &str, extra: &[&str]) -> (Tool, Reply) {
+    let mut args = vec!["--write"];
+    args.extend_from_slice(extra);
+    let (mut tool, first) = Tool::started(states, &args);
+    assert_eq!(first.state(), "warning");
+    tool.go_to_take_file();
+    let taken = tool.act(json!({"type": "take-file", "path": zip_file()}));
+    assert_eq!(taken.state(), "answers");
+    assert_eq!(tool.act(answers("alex")).state(), "dry-run");
+    let confirm = tool.act(json!({"type": "dry-run"}));
+    (tool, confirm)
+}
+
+/// What the write path sends for the test release, questions left out, as
+/// the pretend phone received it: a pair for each boot image, a pair for
+/// each piece of userdata, then the slot and the restart.
+fn writes_of(commands: &[&str]) -> Vec<String> {
+    commands
+        .iter()
+        .filter(|c| {
+            !c.starts_with("getvar:")
+                && !c.starts_with("download:")
+                && **c != "flashing get_unlock_ability"
+        })
+        .map(|c| c.to_string())
+        .collect()
+}
+
+#[test]
+fn a_whole_install_as_a_transcript() {
+    let (mut tool, confirm) = to_the_confirmation("ready", &[]);
+    // The dry run of a run that writes ends at the confirmation, and it
+    // only read
+    assert_eq!(confirm.kinds(), ["progress"]);
+    assert!(confirm.before.iter().all(|p| p["what"] == "dry-run"));
+    assert_eq!((confirm.state(), confirm.action()), ("confirm", "confirm"));
+    assert_eq!(
+        confirm.screen["title"],
+        "This is what the installer will write"
+    );
+    let plan: Vec<&str> = confirm.screen["plan"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert!(plan[0].starts_with("boot_b: "), "{plan:?}");
+    assert!(plan.iter().any(|l| l.contains("ERASES userdata")));
+    let footer = confirm.screen["footer"].to_string();
+    assert!(footer.contains("userdata will be ERASED"), "{footer}");
+    assert!(footer.contains("type the phone's codename: cheetah"));
+
+    // What was typed is handed to the core as typed
+    let write = tool.act(json!({"type": "confirm", "typed": "cheetah"}));
+    assert!(write.before.is_empty(), "{:?}", write.before);
+    assert_eq!((write.state(), write.action()), ("write", "write"));
+
+    let installed = tool.act(json!({"type": "write"}));
+    // The exact interleaving of progress is the clock's; the order of
+    // everything else is the session's
+    let mut order: Vec<&str> = installed
+        .kinds()
+        .into_iter()
+        .filter(|k| *k != "progress")
+        .collect();
+    order.dedup();
+    assert_eq!(order, ["sent", "piece", "account", "sent"]);
+    // The files were all checked before the first command that writes
+    let first_sent = installed
+        .before
+        .iter()
+        .position(|m| m["type"] == "sent")
+        .unwrap();
+    let verified = installed.before[..first_sent]
+        .iter()
+        .rfind(|m| m["what"] == "verify")
+        .unwrap();
+    assert_eq!(verified["done"], verified["total"]);
+    assert!(installed.before[first_sent..]
+        .iter()
+        .all(|m| m["what"] != "verify"));
+    let last = installed
+        .before
+        .iter()
+        .rfind(|m| m["type"] == "progress")
+        .unwrap();
+    assert_eq!(
+        (&last["what"], &last["done"]),
+        (&json!("write"), &last["total"])
+    );
+    // Each piece says what its flash covered, with the terminal's words
+    let piece = installed.the("piece");
+    assert_eq!(piece["number"], 1);
+    assert!(piece["blocks"].as_u64().unwrap() > 0 && piece["seconds"].is_number());
+    assert!(piece["line"]
+        .as_str()
+        .unwrap()
+        .starts_with("flash:userdata (piece 1: "));
+    let account = installed.the("account")["lines"].as_array().unwrap();
+    assert!(account[0]
+        .as_str()
+        .unwrap()
+        .starts_with("userdata, the piece that covered the most blocks: "));
+    assert_eq!(
+        (installed.state(), installed.action()),
+        ("installed", "none")
+    );
+    assert_eq!(
+        installed.screen["title"],
+        "Omarchy Mobile is written, and the phone is restarting"
+    );
+    assert_eq!(installed.screen["retry"], Value::Null);
+
+    // What the tool said it sent is what the phone received, in order
+    let said: Vec<String> = installed
+        .sent()
+        .iter()
+        .filter(|c| !c.starts_with("download:"))
+        .map(|c| c.to_string())
+        .collect();
+    let over = tool.act(json!({"type": "write"}));
+    assert!(over.error().contains("The install has ended"));
+    let ended = tool.quit();
+    let received = writes_of(&ended.commands());
+    assert_eq!(said, received);
+    let pieces = received.iter().filter(|c| *c == "flash:userdata").count();
+    let mut expected: Vec<String> = [
+        "flash:boot_b",
+        "flash:init_boot_b",
+        "flash:vendor_boot_b",
+        "flash:vendor_kernel_boot_b",
+        "flash:dtbo_b",
+    ]
+    .map(String::from)
+    .to_vec();
+    expected.extend(vec!["flash:userdata".to_string(); pieces]);
+    expected.extend(["set_active:b".to_string(), "reboot".to_string()]);
+    assert!(pieces >= 1);
+    assert_eq!(received, expected);
+    assert!(
+        ended.stderr.contains(
+            "partitions written: boot_b, dtbo_b, init_boot_b, userdata, vendor_boot_b, vendor_kernel_boot_b"
+        ) || ended.stderr.contains("partitions written: 6"),
+        "{}",
+        ended.stderr
+    );
+    assert_eq!(
+        ended.states(),
+        [
+            "warning",
+            "phone",
+            "google-terms",
+            "factory-image",
+            "answers",
+            "dry-run",
+            "confirm",
+            "write",
+            "installed",
+            "installed"
+        ]
+    );
+}
+
+#[test]
+fn anything_but_the_codename_stops_the_install_with_nothing_written() {
+    for typed in ["", "yes", "Cheetah", "cheetah ", "panther"] {
+        let (mut tool, confirm) = to_the_confirmation("ready", &[]);
+        assert_eq!(confirm.state(), "confirm");
+        let stopped = tool.act(json!({"type": "confirm", "typed": typed}));
+        assert!(stopped.before.is_empty());
+        assert_eq!(stopped.state(), "stopped", "{typed:?}");
+        assert_eq!(stopped.screen["stop"], "not-confirmed");
+        assert_eq!(stopped.screen["retry"], "whenever");
+        // The stop is the end: a write asked for now is refused
+        let over = tool.act(json!({"type": "write"}));
+        assert!(over.error().contains("The install has ended"));
+        let ended = tool.quit();
+        assert!(writes_of(&ended.commands()).is_empty(), "{typed:?}");
+        assert!(ended.stderr.contains("0 others; partitions written: 0"));
+    }
+    // A confirm that says nothing is not an answer: the step stays open
+    let (mut tool, _) = to_the_confirmation("ready", &[]);
+    for nothing in [
+        json!({"type": "confirm"}),
+        json!({"type": "confirm", "typed": 7}),
+    ] {
+        let refused = tool.act(nothing);
+        assert!(refused.error().contains("typed"), "{}", refused.error());
+        assert_eq!(refused.state(), "confirm");
+    }
+    // And a write before the codename is out of turn
+    let early = tool.act(json!({"type": "write"}));
+    assert!(early.error().contains("the screen asks for \"confirm\""));
+    assert_eq!(early.state(), "confirm");
+    let ended = tool.quit();
+    assert!(writes_of(&ended.commands()).is_empty());
+}
+
+#[test]
+fn a_cable_pulled_mid_write_is_the_cores_stop_and_says_how_far_it_got() {
+    // Before the first write, among the boot images, and inside userdata
+    for (unplug, begun, footer) in [
+        ("download:1", 0, "No write reached the phone"),
+        ("flash:vendor_boot_b:1", 2, "userdata was not"),
+        ("flash:userdata:1", 5, "userdata"),
+    ] {
+        let (mut tool, confirm) = to_the_confirmation("ready", &["--fake-unplug", unplug]);
+        assert_eq!(confirm.state(), "confirm", "{unplug}");
+        assert_eq!(
+            tool.act(json!({"type": "confirm", "typed": "cheetah"}))
+                .state(),
+            "write"
+        );
+        let stopped = tool.act(json!({"type": "write"}));
+        assert_eq!(stopped.state(), "stopped", "{unplug}");
+        let stop = stopped.screen["stop"].as_str().unwrap();
+        assert!(
+            ["write-interrupted", "write-refused"].contains(&stop),
+            "{unplug}: {stop}"
+        );
+        let closing = stopped.screen["footer"].to_string() + &stopped.screen["body"].to_string();
+        assert!(closing.contains(footer), "{unplug}: {closing}");
+        let ended = tool.quit();
+        let received = writes_of(&ended.commands());
+        let flashed = received.iter().filter(|c| c.starts_with("flash:")).count();
+        assert_eq!(flashed, begun, "{unplug}: {received:?}");
+        // Slot B was not made active and the phone was not restarted
+        assert!(!received
+            .iter()
+            .any(|c| c == "set_active:b" || c == "reboot"));
+    }
+}
+
+#[test]
+fn a_quit_written_behind_a_write_waits_for_the_write() {
+    // Every line at once, a quit right behind the write: the write is not
+    // cut off, its screen comes, and then the tool leaves
+    let mut tool = Tool::pretend("ready", &["--write"]);
+    let lines = [
+        json!({"type": "hello", "protocol": 2, "app": "a script", "version": "0"}),
+        json!({"type": "start", "reinstall": false}),
+        json!({"type": "acknowledge"}),
+        json!({"type": "read-phone"}),
+        json!({"type": "decline-terms"}),
+        json!({"type": "take-file", "path": zip_file()}),
+        answers("alex"),
+        json!({"type": "dry-run"}),
+        json!({"type": "confirm", "typed": "cheetah"}),
+        json!({"type": "write"}),
+        json!({"type": "quit"}),
+    ];
+    tool.owed = lines.len() - 2;
+    let all: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    tool.write(all.as_bytes());
+    let ended = tool.finish();
+    assert_eq!(ended.code, 0, "{}", ended.stderr);
+    assert_eq!(ended.states().last(), Some(&"installed"));
+    assert_eq!(ended.kinds().last(), Some(&"bye"));
+    let received = writes_of(&ended.commands());
+    assert_eq!(received.last().map(String::as_str), Some("reboot"));
+}
+
+#[test]
+fn a_phone_that_tells_one_bootloader_slot_stops_in_this_mode_also_when_it_writes() {
+    // The Pixel 7 Pro's case. The owner's statement that passes this stop
+    // is the command line's (`install --bootloader-slots-match`): this mode
+    // has no argument and no message for it
+    let (mut tool, _) = Tool::started("one-slot", &["--write"]);
+    assert_eq!(tool.act(json!({"type": "acknowledge"})).state(), "phone");
+    let stopped = tool.act(json!({"type": "read-phone"}));
+    assert_eq!(stopped.state(), "stopped");
+    assert_eq!(stopped.screen["stop"], "bootloader-slots-unknown");
+    assert_eq!(stopped.screen["retry"], "stops-again");
+    let text = stopped.screen.to_string();
+    assert!(
+        !text.contains("slots-match") && !text.contains("--"),
+        "{text}"
+    );
+    let ended = tool.quit();
+    assert!(writes_of(&ended.commands()).is_empty());
+}
+
+#[test]
+fn a_run_that_writes_says_so_in_its_hello_and_a_locked_phone_is_told_what_it_gets() {
+    let (mut tool, _) = Tool::started("locked", &["--write"]);
+    assert_eq!(tool.said[0]["writes"], true);
+    assert_eq!(tool.act(json!({"type": "acknowledge"})).state(), "phone");
+    let unlock = tool.act(json!({"type": "read-phone"}));
+    assert_eq!(unlock.state(), "unlock");
+    // The flow's own notice for a version that installs a phone without an
+    // account; the dry run's notice is not shown in a run that writes
+    let notice = unlock.screen["notice"].as_str().unwrap();
+    assert!(
+        notice.contains("cannot put your answers on the phone"),
+        "{notice}"
+    );
+    let ended = tool.quit();
+    assert!(writes_of(&ended.commands()).is_empty());
 }
