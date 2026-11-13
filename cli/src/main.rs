@@ -435,8 +435,17 @@ fn show(screen: &Screen) {
 trait Watch {
     /// A line for a person at a terminal.
     fn note(&mut self, _text: &str) {}
-    /// Bytes done and bytes in all. `what`: `download`, `check` or `dry-run`.
+    /// Bytes done and bytes in all. `what`: `download`, `check`, `dry-run`,
+    /// and in a run that writes `verify` (the release's files, each checked
+    /// before the first write) and `write` (the same files, as they are sent).
     fn progress(&mut self, what: &'static str, done: u64, total: u64);
+    /// A command that is not a question was sent by the session that
+    /// writes, as the phone received it.
+    fn sent(&mut self, _command: &str) {}
+    /// A piece of `userdata` was sent by the session that writes.
+    fn piece(&mut self, _number: u32, _piece: &PieceReport) {}
+    /// What the run keeps of the pieces of `userdata` ([`userdata_account`]).
+    fn account(&mut self, _lines: &[String]) {}
     /// Asked between the pieces of a step: `false` ends it here.
     fn go_on(&mut self, _what: &'static str) -> bool {
         true
@@ -458,6 +467,17 @@ impl Watch for Terminal {
         if what == "download" && self.tenth != Some(tenth) {
             self.tenth = Some(tenth);
             println!("    {done} of {total} bytes");
+        }
+    }
+    fn sent(&mut self, command: &str) {
+        println!("    {command}");
+    }
+    fn piece(&mut self, number: u32, piece: &PieceReport) {
+        println!("    flash:userdata ({})", piece_line(number, piece));
+    }
+    fn account(&mut self, lines: &[String]) {
+        for line in lines {
+            println!("    {line}");
         }
     }
 }
@@ -521,12 +541,12 @@ fn ask_answers(typed: &mut Typed) -> Res<OwnerAnswers> {
     }
 }
 
-/// Print what the session sent since `seen` that is not a question: the
-/// commands themselves, as the phone received them.
-fn show_sent<T: Transport>(session: &Session<T>, seen: &mut usize) {
+/// Tell `watch` what the session sent since `seen` that is not a question:
+/// the commands themselves, as the phone received them.
+fn show_sent<T: Transport>(session: &Session<T>, seen: &mut usize, watch: &mut dyn Watch) {
     for command in &session.log()[*seen..] {
         if !command.starts_with("getvar:") {
-            println!("    {command}");
+            watch.sent(command);
         }
     }
     *seen = session.log().len();
@@ -582,7 +602,7 @@ fn userdata_account(pieces: &[PieceReport]) -> Vec<String> {
 /// Send the release's images through a session the flow opened, when they
 /// are on disk: each is checked against the signed manifest first. In the
 /// dry run's session every write is held back; in the one `Flow::begin_write`
-/// opened they are written, and each command is printed as it is sent.
+/// opened they are written, and `watch` is told each command as it is sent.
 /// `Ok(false)`: the files aren't here, and nothing was sent.
 async fn walk_images<T: Transport>(
     session: &mut Session<T>,
@@ -604,15 +624,21 @@ async fn walk_images<T: Transport>(
     // them: a file that is not the release's is found while the phone is
     // still as it was, not after slot B's boot partitions are written.
     // The bytes to get through: every file twice, once to check it and
-    // once to send it (or, in a dry run, to walk it through the session)
+    // once to send it (or, in a dry run, to walk it through the session).
+    // A dry run counts the two as one; a run that writes says which of
+    // the two it is at, since only the second reaches the phone
     let root_size = fs::metadata(&root_path).map_err(io)?.len();
-    let total = 2 * (m.boot_writes.iter().map(|w| w.size).sum::<u64>() + root_size);
-    let what = "dry-run";
+    let once = m.boot_writes.iter().map(|w| w.size).sum::<u64>() + root_size;
     let watch = RefCell::new(watch);
-    let done = Cell::new(0u64);
+    let (done, sending) = (Cell::new(0u64), Cell::new(false));
     let add = |bytes: u64| {
         done.set(done.get() + bytes);
-        watch.borrow_mut().progress(what, done.get(), total);
+        let (what, done, total) = match (writing, sending.get()) {
+            (false, _) => ("dry-run", done.get(), 2 * once),
+            (true, false) => ("verify", done.get(), once),
+            (true, true) => ("write", done.get().saturating_sub(once), once),
+        };
+        watch.borrow_mut().progress(what, done, total);
     };
     add(0);
     for w in &m.boot_writes {
@@ -630,6 +656,8 @@ async fn walk_images<T: Transport>(
     let root = hash_root(release, &mut Counted(&mut root_file, &add))
         .map_err(|e| Error::Checksum(e.to_string()))?;
     root_file.seek(SeekFrom::Start(0)).map_err(io)?;
+    sending.set(true);
+    add(0);
     // Each boot image is read and checked again as it is written: the
     // bytes that are sent are the bytes that were just checked
     for w in &m.boot_writes {
@@ -638,7 +666,7 @@ async fn walk_images<T: Transport>(
             .flash_boot(&release.verify_boot_image(w, &bytes)?)
             .await;
         if writing {
-            show_sent(session, &mut seen);
+            show_sent(session, &mut seen, &mut **watch.borrow_mut());
         }
         result?;
         add(bytes.len() as u64);
@@ -651,21 +679,21 @@ async fn walk_images<T: Transport>(
     }
     let mut progress = |pieces: u32, piece: &PieceReport| {
         if writing {
-            println!("    flash:userdata ({})", piece_line(pieces, piece));
+            watch.borrow_mut().piece(pieces, piece);
         }
     };
     let result =
         flash_userdata_with_progress(session, &root, reader, Some(64 << 20), &mut progress).await;
     if writing {
-        for line in userdata_account(session.pieces()) {
-            println!("    {line}");
-        }
+        watch
+            .borrow_mut()
+            .account(&userdata_account(session.pieces()));
     }
     result?;
     seen = session.log().len();
     let result = session.activate_and_reboot().await;
     if writing {
-        show_sent(session, &mut seen);
+        show_sent(session, &mut seen, &mut **watch.borrow_mut());
     }
     result?;
     Ok(true)

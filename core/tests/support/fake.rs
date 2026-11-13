@@ -43,6 +43,10 @@ pub struct FakeState {
     /// The cable is pulled while the phone works on command number N (from
     /// 0): the phone carries it out, and its answer never arrives.
     pub lose_answer_at: Option<usize>,
+    /// The cable is pulled as the Nth command (from 1) that starts with
+    /// this text is sent: it never arrives. For a front end's pretend
+    /// phone, which cannot count the questions before a write.
+    pub unplug_on: Option<(String, usize)>,
     unplugged: bool,
     // Protocol state
     staged: Option<Vec<u8>>,
@@ -110,6 +114,7 @@ impl FakePhone {
             swap_serial_after: None,
             unplug_at: None,
             lose_answer_at: None,
+            unplug_on: None,
             unplugged: false,
             staged: None,
             expecting: 0,
@@ -205,6 +210,7 @@ impl FakePhone {
         self.edit(|s| {
             s.unplug_at = None;
             s.lose_answer_at = None;
+            s.unplug_on = None;
             s.unplugged = false;
             s.staged = None;
             s.expecting = 0;
@@ -429,6 +435,13 @@ impl Transport for FakePhone {
             return Ok(take);
         }
         let lose_answer = s.lose_answer_at == Some(s.log.len());
+        if let (Some((prefix, nth)), Ok(cmd)) = (s.unplug_on.clone(), core::str::from_utf8(data)) {
+            let before = s.log.iter().filter(|c| c.starts_with(&prefix)).count();
+            if cmd.starts_with(&prefix) && before + 1 == nth {
+                s.unplugged = true;
+                return Err(Error::Transport("the phone left the bus".into()));
+            }
+        }
         match core::str::from_utf8(data) {
             Ok(cmd) if data.len() <= 64 => s.command(cmd),
             _ => s.reply("FAIL", "not a command"),
