@@ -1,12 +1,12 @@
 # omainstall: where it stands
 
-Status (2026-11-13): **the app and the tool's `json` mode it drives have run against the pretend phone only. Neither has ever listed, opened or written a real USB device.** On 2026-11-13 the app was used outside these tests to install a real Pixel 7 Pro as a reinstall (slot B and `userdata` written, the phone started); after the write it stopped, and that phone had no firmware. Since then a window started with `--write` goes on after the write with the steps `tools/install-guided` takes (DESIGN §13): those have run against stand-ins only, and their first attended run is section 7. The write path they now reach is the core's (docs/DESIGN.md §11), which has not run on a real phone either: its first attended run is laid out in [docs/WRITE-RUNBOOK.md](../../docs/WRITE-RUNBOOK.md), with the command-line tool.
+Status (2026-11-13, after the installer's branches were merged into one): **the app and the tool's `json` mode it drives have run against the pretend phone in their tests, and once against a real phone:** on 2026-11-13 the app was used outside these tests to install a real Pixel 7 Pro as a reinstall (slot B and `userdata` written, the phone started); after the write it stopped, and that phone had no firmware. Nothing that came after that reinstall has met a real phone. Since then a window started with `--write` goes on after the write: for a release whose image keeps places for the answers, with the steps `tools/install-guided` takes (DESIGN §13), and for a release that offers the install link, over the link (DESIGN §14). Both have run against stand-ins only, and their attended runs are parts B and D of section 6. The write path they now reach is the core's (docs/DESIGN.md §11), which has not run on a real phone either: its first attended run is laid out in [docs/WRITE-RUNBOOK.md](../../docs/WRITE-RUNBOOK.md), with the command-line tool.
 
 This file is the gap list for the desktop app: what works against the pretend phone, what has never met a real phone, what is left out of the app on purpose, and the first attended run of the app against a real Pixel 7 Pro. The protocol and the window's design are in [docs/APP.md](../../docs/APP.md).
 
 **Read this first: on a Pixel 7 Pro the app does reinstalls, and stops a first install before anything is written, by design.** That phone's bootloader tells the version of one of its two copies only. On a first install (the phone runs from slot A) the flow stops there (`bootloader-slots-unknown`): what passes that stop is the owner's statement on the tool's own command line (`install --bootloader-slots-match VERSION`, DESIGN §6), and the statement is the command line's alone. The app has no control for it, the `json` mode no argument and no message, and `tools/check-shipping` fails if either gains one. On a reinstall (the phone runs from slot B) the core asks what slot B holds; answered "Omarchy Mobile", the bootloader-slot check passes with the version slot B reports, the bootloader the phone already runs, and the install switches no slot (decided by the maintainer on 2026-11-13, DESIGN §6, "A reinstall from slot B"). So the app can take a real Pixel 7 Pro to a write as a reinstall; the write path's attended run (WRITE-RUNBOOK) still comes first (below, "What stands between the app and a real install").
 
-**After the write (protocol 4):** for a release with the install link, the window goes on by itself to the phone's first start and draws the link's screens: the code from the phone's screen, a folder for the radio backup (the portal's folder chooser, never tried on a desktop), the factory image sent, the firmware, the restart, ready (DESIGN §13, APP.md §3.9; pictures 40 to 51 in `app/docs/screens`). Run only against the tool's pretend phone that speaks the link (`theScreensOfTheInstallLink`); never against a phone or its daemon.
+**After the write (protocol 5):** for a release with the install link, the window goes on by itself to the phone's first start and draws the link's screens: the code from the phone's screen, a folder for the radio backup (the portal's folder chooser, never tried on a desktop), the factory image sent, the firmware, the restart, ready (DESIGN §14, APP.md §3.9; pictures 51 to 62 in `app/docs/screens`). The answers form asks for the link's three extra answers (an SSH key, a full name and an email for git) only for such a release (DESIGN §2, M5). Run only against the tool's pretend phone that speaks the link (`theScreensOfTheInstallLink`); never against a phone or its daemon.
 
 ## 1. What works, against the pretend phone
 
@@ -31,9 +31,9 @@ Each line was run on 2026-11-13 by `app/bin/test` (offscreen, Qt 6.12) or by `ca
 
 - **The steps after the write** (DESIGN §13), in a window started with `--write`, for a release that ships the tools for them (`fixtures/after`, with stand-ins for the release's tools, `nmcli` and `ssh-keygen`, and a pretend phone that answers over "USB SSH" kept in a folder): the last screen of the write with "Set up the phone"; the USB connection explained, its command shown, added on the click, or refused by NetworkManager and shown for the owner to run; the first start waited for, and run out of its bound; the radio backup into a folder the screen names, with the IMEI warning; the firmware (the window holds while it runs, as for a write); the restart and the check in plain words; a setup cut off and offered again when the window is opened again, gone on with or forgotten; another phone answering, which is asked which it is and nothing else; the phone refusing this computer's key; a tool of the release that is not the signed one, which never runs. `theRealToolSetsUpThePhoneAfterTheWrite` in the app, eleven tests in `cli/tests/after_write.rs`.
 - **One run from the write to a working phone** (DESIGN §12 and §13 together): the write puts the answers and this computer's SSH key into the placeholder `firstboot.conf`; the pretend phone's first start (a stand-in for `omamobile-firstboot`, reading that block out of the `userdata` the pretend phone received) refuses the key until it has given root the answers' key, then takes it and no other; then the backup, the firmware, the restart and the check. A key file changed after the write is refused to the end of the wait, said plainly, and the run goes on once the right one is back. The key is in nothing the tool says.
-- **The package** (`app/pkgbuild/PKGBUILD`): built once on 2026-11-13 with `makepkg --nodeps -f` (its `check()` ran the shipping tool's unit tests). It holds `/usr/bin/omainstall`, `/usr/bin/omamobile-install` (a shipping build: no pretend phone in it), the `.desktop` file and the icon; `omainstall check` from the built package found the tool beside it and read protocol 4. It was not installed (`makepkg -si` needs a password), and no dependency was installed for it.
+- **The package** (`app/pkgbuild/PKGBUILD`): built once on 2026-11-13 with `makepkg --nodeps -f` (its `check()` ran the shipping tool's unit tests). It holds `/usr/bin/omainstall`, `/usr/bin/omamobile-install` (a shipping build: no pretend phone in it), the `.desktop` file and the icon; `omainstall check` from the built package found the tool beside it and read protocol 4 (the protocol is 5 since the branches were merged; the package was not built again). It was not installed (`makepkg -si` needs a password), and no dependency was installed for it.
 
-The pictures in [screens/](screens/) are that walk: `app/bin/screens` writes them again. Pictures 39 to 50 are the run that goes on after the write: 39 its confirmation, with this computer's key among the answers, and 50 a key that is not the one in the answers.
+The pictures in [screens/](screens/) are that walk: `app/bin/screens` writes them again (last on 2026-11-13, on the merged tree). Pictures 39 to 50 are the run that goes on after the write with the release's tools: 39 its confirmation, with this computer's key among the answers, and 50 a key that is not the one in the answers. Pictures 51 to 62 are the install link's screens.
 
 - **The owner's answers into the system image** (DESIGN §12, decided on 2026-11-13). The answers form is the same; at the confirmation and after the install the core's screens now say that the phone sets up the account from them at its first start, and the unlock notice of a run that writes says that this version's writes have met only the pretend phone. The core puts the answers into the two placeholder blocks the release's root image keeps for them as it streams the image: the pretend phone's `userdata` holds the image with exactly those two blocks changed, and a test installs a real 8 MiB ext4 image that way and finds it clean with `e2fsck -fn` and the answers in the files with `debugfs` (`core/tests/answers.rs`). A release without placeholders stops a run that writes before it asks a phone anything (`stop-no-place-for-answers`, recorded and drawn). Never run against a real phone or a full root image.
 
@@ -81,28 +81,46 @@ In the order they bind:
 2. **A first install through the app.** Decided on 2026-11-13: first installs stay on the command line for now, and the app does reinstalls (a Pixel 7 Pro that runs from slot B, DESIGN §6). A first install on a Pixel 7 Pro needs the owner's statement, which the app does not take; the goal is that the installer measures the other slot itself (DESIGN §6, "Measuring the other slot: the later goal", a design with its attended test and no code yet).
 3. **A release that carries the build index.** The published 2026.11.08 has none, and the flow stops for it before it looks at a phone.
 4. **A phone one can use afterwards, on a real phone**: the owner's answers and this computer's SSH key reach the phone in the release image's placeholders (DESIGN §12, decided on 2026-11-13), but only from a release built with them: none is published yet, and a release without them stops a run that writes (`no-place-for-answers`).
-5. **The combined run's first attended run** (section 7).
+5. **The combined run's first attended run** (section 6, part B2).
 6. **`tools/phone-smoke` and `tools/camera-requirements.txt` in the release bundle** (Omarchy Mobile's `tools/make-bundle`): without them the check is `systemctl is-system-running` alone and the cameras get no data. A change on the other repository's side.
 
 ## 5. Tools this work did not have
 
-None was missing for what was run. `wasm-bindgen` is not on `PATH` on the machine this was written on; `web/build.sh` was run with the copy in the user's cargo directory first on `PATH` (the version `Cargo.lock` names). `makepkg` was run once, with `--nodeps` and without installing (section 1). `web/selftest.sh` was not run by this work: the page was not changed by it, beyond what the two branches it was built from already held.
+None was missing for what was run. `wasm-bindgen` is not on `PATH` on the machine this was written on; `web/build.sh` was run with the copy in the user's cargo directory first on `PATH` (the version `Cargo.lock` names). `makepkg` was run once, with `--nodeps` and without installing (section 1). `web/selftest.sh`, `web/preview-test.sh` and `web/fetch-test.sh` were run on the merged tree (headless Chromium from the system, WebUSB off).
 
-## 6. The first attended run of the app against a real Pixel 7 Pro: runbook
+## 6. The attended runbook, in order
+
+Status: **not run as a whole.** Written offline, with no phone; the one real run so far is the app's reinstall of 2026-11-13 (above), made before this runbook. Every part is attended: the maintainer runs or approves each step at the keyboard, Omarchy Mobile's AGENTS.md section 1 applies throughout, and no identifier goes into this file or anything committed. Each part has its own stop conditions; a part that stops holds every part after it until it is understood.
+
+The parts, in the order they bind:
+
+| Part | What | Where its steps are | Needs |
+| --- | --- | --- | --- |
+| A | **The command-line write path**: the release verified, the dry run against the real phone, the go or no-go, the write, the slot state after, what the phone shows | [docs/WRITE-RUNBOOK.md](../../docs/WRITE-RUNBOOK.md) | A signed `cheetah` release with `factory-builds.json` |
+| B1 | **The app against the real phone, read-only**: the tool found, the phone's state, the window's dry runs, a run that writes stopped at the confirmation | below | A's steps 0 to 3 passed |
+| B2 | **The app from the write to a working phone**: a reinstall with the answers and this computer's SSH key in the placeholders, the first start, the USB connection, the radio backup, the firmware, the restart and the check | below | A passed; B1 passed; a release built with the placeholders, `omamobile-firstboot` 0.1.6 and `tools/` (none published yet) |
+| C | **The web page in a real browser**: the shipping page's download and dry run, then the preview's write with the answers in the placeholders (DESIGN §2, M4) | [docs/WEB-WRITE.md](../../docs/WEB-WRITE.md) §8 | A passed; for the preview's write, the maintainer's decision that a browser may write a phone (WEB-WRITE §8 says what a Pixel 7 Pro allows) |
+| D | **The install link on the reference phone**: R0 to R10 | Omarchy Mobile's [INSTALL-LINK-PLAN.md](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-LINK-PLAN.md) §11.2 (the R runbook), with this side's notes below | L3 finished (high and full speed, `tools/l3-run-as-root`), L4 and L5: a release whose `manifest.json` has `install_link` and whose image carries the daemon and the worker (DESIGN §14, "What is owed") |
+
+### Part A. The command-line write path
+
+Run [docs/WRITE-RUNBOOK.md](../../docs/WRITE-RUNBOOK.md) as written, with this commit's tool (`cargo build --release --locked -p omamobile-installer-cli`). What the merge changed for it: a release without the placeholders is now refused by a run that writes before any phone is asked anything (`no-place-for-answers`), so the release must carry them, and the confirmation names the answers going into the image (its step 4 reads the screen whole). The terminal's `install --write` asks for no SSH key and has no steps after the write. Record the results in WRITE-RUNBOOK's own Results.
+
+### Part B1. The app against the real phone, read-only up to the confirmation
 
 Status: **not run.** Written offline, with no phone. Nothing in this section has been tried on hardware.
 
-This run is read-only from its first step to its last. Without saying it is a reinstall the window asks what slot B holds, and "I am not sure" ends it there; said to be a reinstall, it goes to the dry run's end, and in a window started with `--write` to the confirmation, where "Do not install" ends it with nothing written. Its purpose is what only a real phone and a real desktop can show: that the `json` mode finds and opens a phone over USB, that the window draws a real phone's stop, and what the app looks like under Omarchy. **It does not write, and it is not the write path's first run.** That is WRITE-RUNBOOK, and it comes first: this run should not be the first time this code talks to a real bootloader.
+This run is read-only from its first step to its last. Without saying it is a reinstall the window asks what slot B holds, and "I am not sure" ends it there; said to be a reinstall, it goes to the dry run's end, and in a window started with `--write` to the confirmation, where "Do not install" ends it with nothing written. Its purpose is what only a real phone and a real desktop can show: that the `json` mode finds and opens a phone over USB, that the window draws a real phone's stop, and what the app looks like under Omarchy. **It does not write, and it is not the write path's first run.** That is part A (WRITE-RUNBOOK), and it comes first: this run should not be the first time this code talks to a real bootloader.
 
 The maintainer runs every step, or approves it, at the keyboard. No identifier goes into this file or into anything committed: no serial number, no `getvar all` output, no picture that shows one. Placeholders are WRITE-RUNBOOK's: `<RELEASE_DIR>` (a signed release for `cheetah` that carries `factory-builds.json`), `<OMARCHY_MOBILE>` (the omarchy-mobile checkout), `<NV_BACKUP_DIR>`.
 
-### Before anything
+#### Before anything
 
 - WRITE-RUNBOOK's steps 0 to 3 have passed on this phone with this commit (the radio backup matches, the release verifies, the phone's state was recorded, and `install --dry-run` ran against it). If its step 3 stopped, this run waits for that to be understood.
 - One phone is connected. A second phone in Fastboot Mode would bring up the chooser, which is worth seeing only on purpose.
 - The phone is the maintainer's test Pixel 7 Pro, running Omarchy Mobile from slot B.
 
-### 0. What is under test (no phone)
+#### 0. What is under test (no phone)
 
 ```sh
 cargo build --release --locked -p omamobile-installer-cli
@@ -118,7 +136,7 @@ git rev-parse --short HEAD
 - **Rollback:** none needed.
 - **Risk:** none. No USB device is listed or opened: the tests name a pretend phone, and `check-shipping` reads files.
 
-### 1. The app finds the tool (no phone is asked anything)
+#### 1. The app finds the tool (no phone is asked anything)
 
 ```sh
 OMAINSTALL_TOOL=$PWD/target/release/omamobile-install app/build/omainstall check
@@ -130,7 +148,7 @@ OMAINSTALL_TOOL=$PWD/target/release/omamobile-install app/build/omainstall check
 - **Rollback:** none needed.
 - **Risk:** none. `check` reads the tool's hello and sends `quit`; before `start` the tool opens no USB device (APP §3.2).
 
-### 2. The phone in Fastboot Mode, and its state before (read-only)
+#### 2. The phone in Fastboot Mode, and its state before (read-only)
 
 As WRITE-RUNBOOK's step 2: stop the modem, restart into the bootloader, and read the same `getvar` values with Android's `fastboot`, used for `getvar` only.
 
@@ -150,7 +168,7 @@ done
 - **Rollback:** none needed. To leave: `fastboot -s "$serial" reboot` starts Omarchy Mobile again.
 - **Risk:** none (`getvar` reads). Write the values down without the serial: step 6 compares against them.
 
-### 3. The window for a dry run, without saying it is a reinstall (read-only)
+#### 3. The window for a dry run, without saying it is a reinstall (read-only)
 
 ```sh
 OMAINSTALL_TOOL=$PWD/target/release/omamobile-install app/build/omainstall open <RELEASE_DIR>
@@ -164,7 +182,7 @@ In the window: read the warning, "I have read this. Go on", then "Look at the ph
 - **Rollback:** none needed. "Close" ends the tool.
 - **Risk:** low. The tool sends `getvar` and nothing else: a run without `--write` cannot reach a write whatever is clicked (its tests send every message that could ask for one). If the phone stops answering, send it nothing more; `fastboot -s "$serial" getvar product` once, and if that is silent too, restart it into Fastboot Mode with the keys.
 
-### 4. The window for a dry run, as a reinstall (read-only)
+#### 4. The window for a dry run, as a reinstall (read-only)
 
 ```sh
 OMAINSTALL_TOOL=$PWD/target/release/omamobile-install app/build/omainstall open --reinstall <RELEASE_DIR>
@@ -178,7 +196,7 @@ The same two clicks. Then, at Google's terms, "I will download it myself", and h
 - **Rollback:** none needed.
 - **Risk:** low, as step 3: a run without `--write` reads, whatever is clicked.
 
-### 5. The window for an install (the flow's write switch is on; nothing is written)
+#### 5. The window for an install (the flow's write switch is on; nothing is written)
 
 Only after steps 3 and 4 ended at their stops.
 
@@ -196,7 +214,7 @@ The same steps as step 4, to the confirmation. **Type nothing in the codename fi
 - **Rollback:** none: nothing was written, and step 6 checks it.
 - **Risk:** medium: a tool started with `--write` talking to a real phone, one typed word from an erase. What keeps it from a write is the typed codename, and behind it the flow's checks in `begin_write` and the session's gate.
 
-### 6. The phone's state after, and leaving (read-only)
+#### 6. The phone's state after, and leaving (read-only)
 
 ```sh
 for v in product unlocked current-slot version-bootloader version-baseband \
@@ -211,33 +229,33 @@ fastboot -s "$serial" reboot
 - **Rollback:** WRITE-RUNBOOK's step 8.
 - **Risk:** none (`getvar` reads; `reboot` is the ordinary way out of Fastboot Mode).
 
-### 7. What the window looked like (no command)
+#### 7. What the window looked like (no command)
 
 - **Record, in words:** whether the accent and the corner radius were the running theme's; whether the launcher showed the icon after `app/bin/install` (optional, and it asks for a password); what `Tab`, `Space`, `?` and `Q` did; whether the text could be selected and copied into an issue.
 - A picture only if it shows no serial number and no network name: a stop's screen shows neither.
 
-### Not answered by this run
+#### Not answered by this run
 
 - **A real download, and a first install**, through the app. The download is its own attended run; a first install on a Pixel 7 Pro stops at the bootloader-slot stop (section 4, point 2).
 - **A write through the app on real hardware.** Not attempted here on purpose. When there is a phone for it, its runbook is WRITE-RUNBOOK's with the window in place of the terminal, and it adds what only the app has: that the window stays while the phone is written, and that a quit behind a write waits for it.
 - **Two phones connected**, and a phone with no serial number.
 - **A locked phone.**
 
-### Results
+#### Results
 
 Not run yet. For each run: the date, the commit, the release's version, each step's outcome in a line, the title of each stop as shown, step 2's and step 6's `getvar` values side by side (no serial), and step 7's notes.
 
-## 7. The first attended run from the write to a working phone: runbook
+### Part B2. The app from the write to a working phone, on a release with the placeholders
 
 Status: **not run.** Written offline on 2026-11-13, with no phone. Nothing in this section has been tried on hardware.
 
-What it tests: the whole run as an owner meets it, in one window started with `--write`: the write with the owner's answers and this computer's SSH key in the release image's placeholders (DESIGN §12), the phone's first start setting up the account and the key from them, then the steps after the write with the release's tools (DESIGN §13): the USB connection, the radio backup, the firmware, the restart and the check. It comes after section 6 and after WRITE-RUNBOOK, and its step 3 is a write (a reinstall from slot B): **every step that writes, restarts or changes this computer is the maintainer's to approve at the keyboard.** Omarchy Mobile's AGENTS.md section 1 applies throughout: a fresh radio-backup check before radio work, the modem stopped before a restart the installer does not make, and nothing sent to a phone that stopped answering.
+What it tests: the whole run as an owner meets it, in one window started with `--write`: the write with the owner's answers and this computer's SSH key in the release image's placeholders (DESIGN §12), the phone's first start setting up the account and the key from them, then the steps after the write with the release's tools (DESIGN §13): the USB connection, the radio backup, the firmware, the restart and the check. It comes after part B1 and after part A, and its step 3 is a write (a reinstall from slot B): **every step that writes, restarts or changes this computer is the maintainer's to approve at the keyboard.** Omarchy Mobile's AGENTS.md section 1 applies throughout: a fresh radio-backup check before radio work, the modem stopped before a restart the installer does not make, and nothing sent to a phone that stopped answering.
 
 **What it needs:** a signed release for `cheetah` built with the placeholders (Omarchy Mobile's `rootfs/placeholders`, RELEASES §6.1: `root_image.placeholders` names both files) and with `omamobile-firstboot` 0.1.6 or later in its image (it reads a placeholder and its `SSH_KEY`), with `factory-builds.json` and `tools/`. No such release is published yet; a release without placeholders stops at `start` (`no-place-for-answers`) with nothing asked of the phone, and this runbook has nothing to test with it.
 
 Placeholders: `<RELEASE_DIR>` (that release), `<OMARCHY_MOBILE>` (the omarchy-mobile checkout), `<NV_BACKUP_DIR>` (the off-repo radio backup), `<FACTORY_ZIP>` (the factory image the release's index lists for the phone), `<USER>` (the user name typed at the answers step).
 
-### 0. What is under test (no phone)
+#### 0. What is under test (no phone)
 
 ```sh
 cargo build --release --locked -p omamobile-installer-cli
@@ -251,7 +269,7 @@ ls <RELEASE_DIR>/tools/          # phone-ssh, nv-backup, phone-provision and the
 - **Stop:** anything else.
 - **Rollback:** none. **Risk:** none.
 
-### 1. This computer before (read-only)
+#### 1. This computer before (read-only)
 
 ```sh
 ls ~/.ssh/id_ed25519.pub ~/.local/share/omamobile-installer/ssh/ 2>&1
@@ -263,7 +281,7 @@ ls ~/.local/state/omamobile-installer/cheetah/ 2>&1
 - **Expect:** whether an owner key exists (then it is used; otherwise the run makes one in `~/.local/share/omamobile-installer/ssh/`), and its size well under 3539 bytes (an Ed25519 key is about 100; a longer one is refused at `start`, plainly); whether a connection `omamobile-phone` is saved (then the run adds none; note its `ipv4.method`); no `after.json` (or the run starts at `after-resume`).
 - **Pass:** recorded. **Stop:** an `after.json` nobody can explain. **Rollback:** none. **Risk:** none.
 
-### 2. The phone's radio partitions match the backup (read-only)
+#### 2. The phone's radio partitions match the backup (read-only)
 
 With the phone running Omarchy Mobile from slot B, as AGENTS.md section 1 asks before radio work:
 
@@ -276,7 +294,7 @@ tools/nv-backup --check <NV_BACKUP_DIR>
 - **Stop:** any `DIFFERENT` or unreadable partition: take no new step until it is understood.
 - **Rollback:** none. **Risk:** none (`nv-backup` reads).
 
-### 3. The write, as a reinstall (writes slot B and `userdata`: the maintainer's go)
+#### 3. The write, as a reinstall (writes slot B and `userdata`: the maintainer's go)
 
 ```sh
 tools/phone-ssh 'systemctl stop omamobile-modem'
@@ -284,13 +302,13 @@ bin/omamobile fastboot
 OMAINSTALL_TOOL=$PWD/target/release/omamobile-install app/build/omainstall open --write --reinstall <RELEASE_DIR>
 ```
 
-In the window, as section 6's step 5 to the confirmation; hand in `<FACTORY_ZIP>`; give real answers (a user name, a PIN, a phone name, a time zone, the Wi-Fi network if wanted); then type `cheetah`.
+In the window, as part B1's step 5 to the confirmation; hand in `<FACTORY_ZIP>`; give real answers (a user name, a PIN, a phone name, a time zone, the Wi-Fi network if wanted); then type `cheetah`.
 
 - **Expect:** the confirmation's body says "Your answers: user `<USER>` (PIN), …, and this computer's SSH public key", and "vendor_kernel_boot_b is written with this computer's SSH public key added to the initramfs it carries"; its footer says that the key goes with the answers, for root and the account, and only its public half. Then the writes, and **"Omarchy Mobile is written, and the phone is restarting"**, whose body says that the account comes from the answers at the first start, that the steps come next, and that the key went to the phone with the answers (it names the key's file); one button, "Set up the phone: its USB connection, radio backup and firmware".
 - **Pass:** that screen. **Stop:** any stop of the core: WRITE-RUNBOOK's steps for it. Do not click "Set up" if the write did not end at `installed`.
 - **Rollback:** WRITE-RUNBOOK step 8 (reinstall with `tools/install-guided --start-over`). **Risk:** high: it erases `userdata`, as every reinstall does.
 
-### 4. The USB connection and the first start (may add a NetworkManager connection: the maintainer's go)
+#### 4. The USB connection and the first start (may add a NetworkManager connection: the maintainer's go)
 
 Click "Set up the phone". Watch the phone's screen meanwhile: it should grow its file system, run its first-start setup and come up locked.
 
@@ -312,7 +330,7 @@ Click "Set up the phone". Watch the phone's screen meanwhile: it should grow its
 - **Risk:** low: a saved connection on this computer, and reads of the phone over SSH.
 - **Also try once here:** close the window during the wait (it asks first), open it again with the same command: **"An install on this computer is not finished"**, "Go on with this phone's setup", and the wait goes on.
 
-### 5. The radio backup (reads the phone)
+#### 5. The radio backup (reads the phone)
 
 Click "Back up the radio partitions".
 
@@ -321,7 +339,7 @@ Click "Back up the radio partitions".
 - **Stop:** a failure whose last lines name a partition (not found, writable, mounted): ask, do not work around it. Any NV checksum that differs from `<NV_BACKUP_DIR>`.
 - **Rollback:** none (it reads); the folder is the owner's, private, never committed. **Risk:** low.
 
-### 6. The firmware (puts files on the phone: the maintainer's go)
+#### 6. The firmware (puts files on the phone: the maintainer's go)
 
 Click "Add the firmware".
 
@@ -330,7 +348,7 @@ Click "Add the firmware".
 - **Stop:** a failure: read its last lines on the screen; try again once at most.
 - **Rollback:** what phone-provision puts on the phone is on `userdata`; the way back is a reinstall (step 3's rollback). **Risk:** medium.
 
-### 7. The restart and the check (restarts the phone: announce it)
+#### 7. The restart and the check (restarts the phone: announce it)
 
 Click "Restart the phone and check it". The phone's screen goes dark.
 
@@ -339,7 +357,7 @@ Click "Restart the phone and check it". The phone's screen goes dark.
 - **Stop:** the phone not back within 10 minutes (wait one more; then the phone's keys, as AGENTS.md says); "Another phone answers"; the key refused after the restart (the first start's key did not stay).
 - **Rollback:** as step 6. **Risk:** low.
 
-### 8. After (read-only)
+#### 8. After (read-only)
 
 ```sh
 cd <OMARCHY_MOBILE>
@@ -354,6 +372,14 @@ tools/nv-backup --check <NV_BACKUP_DIR>
 - **Rollback:** none. **Risk:** none.
 - **Once, if the maintainer wants the rescue path seen:** the initramfs's SSH takes the same key (it is reached only when the system does not start; not part of a normal run).
 
-### Results
+#### Results
 
 Not run yet. For each run: the date, the commit, the release's version, the kernel release (`uname -r`), each step's outcome in a line, the title of each screen where it stopped, and step 1's and step 5's notes. No serial number, no IMEI, no backup contents, no network name.
+
+### Part C. The web page in a real browser
+
+Run [docs/WEB-WRITE.md](../../docs/WEB-WRITE.md) §8 as written, with `web/build.sh` (the page that ships) and `web/build.sh web-write-preview` (the preview, in `web/dist-preview`), checked first with `tools/check-shipping --built` and `tools/check-shipping --preview`. What the merge changed for it: the preview is one build with the install link's screens (DESIGN §2, M3), which it does not reach from its write yet; and a preview write of a release with the placeholders puts the owner's answers into them as the app's write does, the PIN as a hash with a salt from `crypto.getRandomValues` (M4). So a step that compares the written `userdata` with the release's image expects exactly the two placeholder blocks to differ. A first install of a Pixel 7 Pro stops in the browser at `bootloader-slots-unknown` by design (decision 12); a write from a browser is a reinstall, and only after the maintainer has said a browser may write.
+
+### Part D. The install link on the reference phone (the R runbook)
+
+The steps are Omarchy Mobile's [INSTALL-LINK-PLAN.md](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-LINK-PLAN.md) §11.2, R0 to R10, each attended; nothing of them is repeated here. Before R0, on a computer with no phone attached: `sudo tools/l3-run-as-root --speeds "high full"` (the daemon on real FunctionFS over `dummy_hcd`; it loads modules and makes a gadget, so it is the maintainer's to run; [docs/LINKD.md](../../docs/LINKD.md) §5), and the plan's decision on E12 (`no_disconnect`). This side's part of the runbook is R6's laptop half (pair, the radio backup into a folder, the factory image with a cable pull and a killed tool) and then R7, first through the command line (`omamobile-install install --write`, then `omamobile-install link` from the record), then through the app (pictures 51 to 62 are what the window should show). What only a real phone answers is DESIGN §14, "What is owed". The release for it must offer `install_link` (protocol 1); if it also keeps the placeholders, the answers go over the link and the image is written as signed (DESIGN §2, M1): check after the write that `/etc/omamobile/firstboot.conf` on the phone is still the release's, comment lines only, until the link has given the answers.

@@ -1,6 +1,6 @@
 # The desktop app: design
 
-Status (2026-11-13): **protocol 5 holds both the steps after the write with the release's tools (DESIGN §13) and the install link after the write (§3.9), each tested against a pretend phone only. The app and the tool's side of the protocol below (`omamobile-install json`, `cli/src/json.rs`) are both built, and tested against each other with the tool's pretend phone. Neither has been run with a real phone: the tool's USB path in this mode has never listed or opened a device.** Started as it is by default, the window goes to the dry run and no further. Started with `--write` it goes on through the flow's write path (DESIGN §11), which has not run on a real phone either, and then, for a release that ships the tools for them, through the steps after the write (DESIGN §13: the USB connection, the first start, the radio backup, the firmware, a restart and a check, with the release's own tools), which have run against stand-ins only; for a release whose root image offers the install link, through the link instead (§3.9), which has run against the pretend phone that speaks it only. What works, what has never run and the app's first attended run are in [app/docs/STATUS.md](../app/docs/STATUS.md).
+Status (2026-11-13): **protocol 5 holds both the steps after the write with the release's tools (DESIGN §13) and the install link after the write (§3.9, DESIGN §14), each tested against a pretend phone only; a release with the link takes the link, any other the release's tools (DESIGN §2, M1). The app and the tool's side of the protocol below (`omamobile-install json`, `cli/src/json.rs`) are both built, and tested against each other with the tool's pretend phone. Neither has been run with a real phone: the tool's USB path in this mode has never listed or opened a device.** Started as it is by default, the window goes to the dry run and no further. Started with `--write` it goes on through the flow's write path (DESIGN §11), which has not run on a real phone either, and then, for a release that ships the tools for them, through the steps after the write (DESIGN §13: the USB connection, the first start, the radio backup, the firmware, a restart and a check, with the release's own tools), which have run against stand-ins only; for a release whose root image offers the install link, through the link instead (§3.9), which has run against the pretend phone that speaks it only. What works, what has never run and the app's first attended run are in [app/docs/STATUS.md](../app/docs/STATUS.md).
 
 `omainstall` (`app/`) is a Qt Quick window in the style of Omarchy's own apps. Its one job is to guide a person through installing Omarchy Mobile on a phone plugged into this computer. It is a third front end for the flow in [DESIGN.md](DESIGN.md), next to the command-line tool and the web page, and DESIGN §7 ("What a front end must do") applies to it.
 
@@ -115,6 +115,11 @@ choices   [{ answer: text, label: text }]
                         core's words for the button, the answer what the app sends back. For `after`:
                         the owner's choices on a screen of the steps after the write. Empty on every
                         other screen
+extras    true | left out
+                        on `answers`, in a run that writes a release with the install link (and on
+                        the link's own `answers` screen): ask for the three answers only the link
+                        carries (§3.9). Left out everywhere else, and `answers` with any of the three
+                        is then refused with an `error` (DESIGN §2, M5)
 action    text          acknowledge, read-phone, slot-b, accept-terms, download, take-file, answers,
                         dry-run, confirm, write, after, none; link, wait, pair, backup-dir, retry (§3.9)
 ```
@@ -258,7 +263,7 @@ In a run started with `--write` (the hello then says `"writes":true`) the dry ru
 
 ### 3.9 After the write: the install link (protocol 5)
 
-For a release whose `manifest.json` says `install_link` (Omarchy Mobile's INSTALL-LINK-PLAN, stage L6; DESIGN §13), a write that ran through does not end the run. The `installed` screen's action is `link`, and from `{"type":"link"}` on the screens are the install link's, made by the core's `LinkFlow` (`core/src/link.rs`) from the phone's first start to a phone that is ready. A release without `install_link` ends at `installed` (`none`), as in protocol 3.
+For a release whose `manifest.json` says `install_link` (Omarchy Mobile's INSTALL-LINK-PLAN, stage L6; DESIGN §14), a write that ran through does not end the run. The `installed` screen's action is `link`, and from `{"type":"link"}` on the screens are the install link's, made by the core's `LinkFlow` (`core/src/link.rs`) from the phone's first start to a phone that is ready. A release without `install_link` ends at `installed` (`none`), as in protocol 3.
 
 | `state` | What the phone and the installer do | `action` |
 | --- | --- | --- |
@@ -283,7 +288,7 @@ For a release whose `manifest.json` says `install_link` (Omarchy Mobile's INSTAL
 | `retry` | `{"type":"retry"}` | First-boot setup again, or provisioning again |
 | `answers` | as §3.4 | Only in a run that went on from a record before the phone had the answers |
 
-**`answers` carries three more fields, each text or left out:** `ssh_key` (one OpenSSH public key's line), `full_name` and `email` (for git on the phone). In a run that writes, for a release with the link, they and the seven others are checked by the link's own rules (first boot's, the protocol crate's `Answers::validate`) before anything is written, and an objection is an `error`.
+**`answers` carries three more fields, each text or left out, on a screen with `extras` only:** `ssh_key` (one OpenSSH public key's line), `full_name` and `email` (for git on the phone). On any other `answers` screen a non-empty one is refused with an `error` (the release takes its answers in the image, which keeps no place for them). In a run that writes, for a release with the link, they and the seven others are checked by the link's own rules (first boot's, the protocol crate's `Answers::validate`) before anything is written, and an objection is an `error`.
 
 **`start` with `"link": true`** goes on from the record a run before this one kept in the work directory (`--work-dir`, or the user's cache directory): `link/record.json`, mode 600, holding the serial the write pinned (for the serial proof: it never crosses the link), the session token, the factory image's path and the backup folder. It needs `--release DIR` too. The record holds no answer and no password hash; the answers are asked again if the phone has none yet.
 

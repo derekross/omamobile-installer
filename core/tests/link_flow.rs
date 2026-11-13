@@ -105,7 +105,7 @@ impl Rig {
 /// there, after the write, whether or not its image also keeps the answers'
 /// placeholders: its image is written exactly as signed, the confirmation
 /// says where the answers go, and the session refuses answers for its image
-/// (docs/DESIGN.md §12, decision 19).
+/// (docs/DESIGN.md §2, M1).
 #[test]
 fn a_release_with_the_link_is_written_as_signed_and_takes_its_answers_over_the_link() {
     let without_placeholders = TestBundle::build(

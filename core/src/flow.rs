@@ -2220,7 +2220,7 @@ impl Flow {
             .expect("a flow past the warning has a release");
         // A release whose root image offers the install link gets the
         // answers there, after the write: its image is written as signed,
-        // placeholders and all (docs/DESIGN.md §12, decision 19)
+        // placeholders and all (docs/DESIGN.md §2, M1)
         self.root_answers = if release.manifest().root_image.placeholders.is_empty()
             || release.manifest().install_link.is_some()
         {
