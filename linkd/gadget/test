@@ -1,0 +1,147 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# omamobile-link-gadget against a fake configfs tree in a temporary
+# directory: plain files and directories, and stand-ins for mount, umount
+# and mountpoint. Nothing here is root's, and nothing touches a real gadget.
+# What only the kernel shows (that it refuses a change while bound, the
+# endpoint files appearing at the descriptors' write, FunctionFS unbinding a
+# gadget whose daemon died) is stage L3's: tools/l3-run-as-root.
+set -uo pipefail
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+script=$here/omamobile-link-gadget
+T=$(mktemp -d "${TMPDIR:-/tmp}/link-gadget.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+pass=0 fail=0
+ok() { if eval "$2"; then pass=$((pass + 1)); echo "ok - $1"; else fail=$((fail + 1)); echo "not ok - $1"; fi; }
+
+mkdir -p "$T/bin"
+cat > "$T/bin/mount" <<'EOF'
+#!/bin/bash
+# mount [--no-canonicalize|-c] -t functionfs [-o OPTS] link DIR
+# As util-linux's mount: without --no-canonicalize a source that names an
+# existing file becomes its absolute path, and FunctionFS finds no instance
+# of that name
+opts= canon=1
+[[ $1 == --no-canonicalize || $1 == -c ]] && { canon=0; shift; }
+[[ $1 == -t && $2 == functionfs ]] || exit 32
+shift 2
+[[ $1 == -o ]] && { opts=$2; shift 2; }
+if (( canon )) && [[ -e $1 ]]; then
+  echo "mount: $2: fsconfig() failed: No such file or directory (source $(realpath "$1"))" >&2
+  exit 32
+fi
+[[ $1 == link && -d $2 ]] || exit 32
+echo "mount $opts" >> "$FAKE/log"
+: > "$2/ep0"
+EOF
+cat > "$T/bin/umount" <<'EOF'
+#!/bin/bash
+[[ $1 == -l ]] && shift
+[[ -e $1/ep0 ]] || exit 32
+rm -f "$1"/ep*
+echo umount >> "$FAKE/log"
+EOF
+cat > "$T/bin/mountpoint" <<'EOF'
+#!/bin/bash
+[[ $1 == -q ]] && shift
+[[ -e $1/ep0 ]]
+EOF
+chmod +x "$T/bin/"*
+
+# A gadget as the initramfs makes it: NCM, then ACM, bound
+fresh() {
+  rm -rf "$T/cfs" "$T/run" "$T/var" "$T/log"
+  G=$T/cfs/usb_gadget/g1
+  mkdir -p "$G/configs/c.1" "$G/functions/ncm.usb0" "$G/functions/acm.GS0" "$G/os_desc" "$T/run" "$T/var"
+  echo 0x0100 > "$G/bcdDevice"
+  echo 0 > "$G/os_desc/use"; echo 0x00 > "$G/os_desc/b_vendor_code"; echo > "$G/os_desc/qw_sign"
+  ln -s "$G/functions/ncm.usb0" "$G/configs/c.1/ncm.usb0"
+  ln -s "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0"
+  echo fake.udc > "$G/UDC"
+  echo "boot-1" > "$T/boot_id"
+  : > "$T/log"
+}
+export FAKE=$T PATH="$T/bin:$PATH"
+# Run where a directory is named as the FunctionFS instance, as the first
+# root run of L3 did (the checkout has link/): the source must stay "link"
+mkdir -p "$T/cwd/link"
+cd "$T/cwd"
+export LINK_CONFIGFS=$T/cfs LINK_FFS_DIR=$T/run/ffs LINK_RUN_DIR=$T/run \
+  LINK_MARKER=$T/var/link-gadget-started LINK_BOOT_ID=$T/boot_id LINK_WAIT_S=2 \
+  LINK_FFS_OPTS=uid=1000,gid=1000
+
+# The daemon's part: the endpoint files once ep0 is there
+daemon() { ( for _ in $(seq 100); do [[ -e $T/run/ffs/ep0 ]] && { : > "$T/run/ffs/ep1"; : > "$T/run/ffs/ep2"; exit 0; }; sleep 0.05; done ) & }
+gadget() { "$script" "$@" 2> "$T/err"; }
+udc() { cat "$G/UDC"; }
+links() { (cd "$G/configs/c.1" && for l in *; do [[ -L $l ]] && printf '%s ' "$l"; done); }
+as_initramfs_made_it() {
+  [[ $(udc) == fake.udc && $(links) == "acm.GS0 ncm.usb0 " && ! -e $G/functions/ffs.link &&
+     $(cat "$G/bcdDevice") == 0x0100 && $(cat "$G/os_desc/use") == 0 && ! -L $G/os_desc/c.1 ]]
+}
+
+fresh
+gadget; ok "usage: no verb" '(( $? == 2 ))'
+gadget frob; ok "usage: an unknown verb" '(( $? == 2 ))'
+
+fresh; daemon
+gadget add; rc=$?; wait
+ok "add: done" '(( rc == 0 ))'
+ok "add: the link beside NCM and ACM, bound again" '[[ $(links) == "acm.GS0 ffs.link ncm.usb0 " && $(udc) == fake.udc ]]'
+ok "add: FunctionFS mounted with the given options" 'grep -qx "mount uid=1000,gid=1000" "$T/log"'
+ok "add: the source is the instance's name, even beside a directory of that name" 'grep -c "^mount " "$T/log" >/dev/null && ! grep -q "fsconfig" "$T/err"'
+ok "add: bcdDevice 0x0200 and the OS descriptors" '[[ $(cat "$G/bcdDevice") == 0x0200 && $(cat "$G/os_desc/use") == 1 && $(cat "$G/os_desc/b_vendor_code") == 0xcd && $(cat "$G/os_desc/qw_sign") == MSFT100 && -L $G/os_desc/c.1 ]]'
+ok "add: no marker left; the state recorded for remove" '[[ ! -e $LINK_MARKER && -s $T/run/gadget.state ]]'
+gadget add; ok "add twice: refused, nothing changed" '(( $? == 1 )) && [[ $(links) == "acm.GS0 ffs.link ncm.usb0 " ]]'
+gadget remove; rc=$?
+ok "remove: done" '(( rc == 0 ))'
+ok "remove: the gadget as the initramfs made it" 'as_initramfs_made_it'
+ok "remove: unmounted, no state, no marker" '! [[ -e $T/run/ffs/ep0 || -e $T/run/gadget.state || -e $LINK_MARKER ]]'
+gadget remove; ok "remove again: nothing to do" '(( $? == 0 )) && as_initramfs_made_it'
+
+# A daemon that died: FunctionFS unbinds the whole gadget when its files close
+fresh; daemon; gadget add; wait
+echo "" > "$G/UDC"
+gadget remove; rc=$?
+ok "a dead daemon's gadget (unbound by the kernel): remove binds it again as it was" '(( rc == 0 )) && as_initramfs_made_it'
+
+# No descriptors: the gadget is put back, and a failure is not a hang
+fresh
+gadget add; rc=$?
+ok "no descriptors in time: add fails" '(( rc == 1 ))'
+ok "no descriptors in time: the gadget put back, unmounted" 'as_initramfs_made_it && [[ ! -e $T/run/ffs/ep0 ]]'
+ok "no descriptors in time: no marker (a failure, not a hang)" '[[ ! -e $LINK_MARKER ]]'
+
+# A signal (a start timeout) puts the gadget back and keeps the marker
+fresh
+"$script" add 2> "$T/err" & pid=$!
+for _ in $(seq 100); do [[ -e $T/run/ffs/ep0 ]] && break; sleep 0.02; done
+kill -TERM "$pid"; wait "$pid"; rc=$?
+ok "SIGTERM inside add: the gadget put back" '(( rc != 0 )) && as_initramfs_made_it'
+ok "SIGTERM inside add: the marker kept" '[[ -e $LINK_MARKER ]]'
+daemon; gadget add; rc=$?; wait
+ok "the marker of this boot: the next add goes on" '(( rc == 0 )) && [[ $(links) == "acm.GS0 ffs.link ncm.usb0 " ]]'
+
+# A marker from an earlier boot: a hang. Nothing this boot; again at the next
+fresh
+echo "add boot-0 2026-01-01T00:00:00+00:00" > "$LINK_MARKER"
+gadget add; rc=$?
+ok "a marker of an earlier boot: add skips this boot" '(( rc == 3 )) && as_initramfs_made_it'
+ok "a marker of an earlier boot: it is removed, the skip is on the tmpfs" '[[ ! -e $LINK_MARKER && -e $T/run/gadget-skipped ]]'
+gadget add; ok "skipped: a second add in that boot skips too" '(( $? == 3 )) && as_initramfs_made_it'
+rm -rf "$T/run"; mkdir -p "$T/run"; echo boot-2 > "$T/boot_id"
+daemon; gadget add; rc=$?; wait
+ok "the next boot: add goes on" '(( rc == 0 )) && [[ $(links) == "acm.GS0 ffs.link ncm.usb0 " ]]'
+
+# Only the UDC the caller allows
+fresh
+LINK_UDC_ALLOW='dummy_udc.*' gadget add; rc=$?
+ok "a UDC that is not allowed: refused, untouched, no marker" '(( rc == 1 )) && as_initramfs_made_it && [[ ! -e $LINK_MARKER ]]'
+# No gadget, an unbound gadget, no boot id
+fresh
+LINK_GADGET_NAME=g9 gadget add; ok "no such gadget: refused" '(( $? == 1 )) && as_initramfs_made_it'
+echo "" > "$G/UDC"; gadget add; ok "an unbound gadget: refused" '(( $? == 1 )) && [[ ! -e $G/functions/ffs.link ]]'
+fresh; : > "$T/boot_id"; gadget add; ok "no boot id: refused, untouched" '(( $? == 1 )) && as_initramfs_made_it'
+
+echo "1..$((pass + fail)): $pass passed, $fail failed"
+(( fail == 0 ))

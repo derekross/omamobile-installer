@@ -54,6 +54,8 @@ jobs:
         run: cargo check --locked -p omamobile-installer-web --target wasm32-unknown-unknown --features link-preview
       - name: The page's preview (its write path with the install link's screens) builds
         run: cargo check --locked -p omamobile-installer-web --target wasm32-unknown-unknown --features web-write-preview
+      - name: The install link's daemon builds for the phone (aarch64 Linux)
+        run: cargo check --locked -p omamobile-linkd --target aarch64-unknown-linux-gnu
       - name: Tests (the command-line tool driving the flow against the pretend phone, as text and as JSON lines)
         run: cargo test --locked -p omamobile-installer-cli --features fake-phone
       # web/build.sh needs wasm-bindgen-cli at exactly the wasm-bindgen

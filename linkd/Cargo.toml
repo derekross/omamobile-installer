@@ -1,0 +1,33 @@
+[package]
+name = "omamobile-linkd"
+description = "The install link's daemon on the phone: the shell around the protocol crate's phone machine (Omarchy Mobile's INSTALL-LINK-PLAN, stages L2 and L3: a socket pair, and FunctionFS)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "omamobile-linkd"
+path = "src/main.rs"
+
+[[bin]]
+name = "omamobile-install-link"
+path = "src/bin/omamobile-install-link.rs"
+
+[dependencies]
+omamobile-link = { path = "../link" }
+# The system calls std has no safe name for: the peer of a local socket
+# (SO_PEERCRED), free space, the kernel's random numbers, a signal to
+# itself for the kill test. The workspace already has this version.
+rustix = { version = "1", features = ["event", "fs", "net", "process", "rand", "time"] }
+# The raw system calls of native asynchronous I/O (src/aio.rs): FunctionFS's
+# `io_cancel`. The workspace already has this version.
+libc = "0.2"
+
+[dev-dependencies]
+# The installer's side of the tests is the crate's own host machine and its
+# stand-in shell.
+omamobile-link = { path = "../link", features = ["sim"] }
+# Stage L3's host (tests/l3.rs): the USB library the installer uses, on the
+# kernel's virtual bus only. The workspace already has this version.
+nusb = "0.2"
