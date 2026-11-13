@@ -6,6 +6,7 @@
 // OMAINSTALL_REAL_TOOL (without it those tests are skipped, and say so).
 // No phone, no USB, nothing from the internet, and no window on the
 // desktop: bin/test runs this offscreen.
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -57,7 +58,10 @@ const QString Zip = Release + "/factory/" + ZipName;
 // release, and nothing else. No USB device is opened: a tool built with the
 // pretend phone and started with --fake-phone has no way to one.
 struct RealTool {
-    explicit RealTool(const QString &phones, const QString &google = {}, const QString &extra = {}) {
+    // `environment`: shell lines run before the tool (the steps after a
+    // write read their folders and the pretend phone's from it).
+    explicit RealTool(const QString &phones, const QString &google = {}, const QString &extra = {},
+                      const QString &environment = {}) {
         const QString tool = qEnvironmentVariable("OMAINSTALL_REAL_TOOL");
         QFile script(directory.filePath("omamobile-install"));
         if (tool.isEmpty() || !script.open(QIODevice::WriteOnly))
@@ -69,7 +73,7 @@ struct RealTool {
         if (!extra.isEmpty())
             line += " " + extra;
         // The tool's standard error holds the pretend phones' record.
-        script.write(("#!/bin/sh\n" + line + " 2>>'" + directory.filePath("stderr") + "'\n").toUtf8());
+        script.write(("#!/bin/sh\n" + environment + line + " 2>>'" + directory.filePath("stderr") + "'\n").toUtf8());
         script.close();
         script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
         qputenv("OMAINSTALL_TOOL", script.fileName().toUtf8());
@@ -128,6 +132,57 @@ struct RealTool {
 
     QTemporaryDir directory;
     bool ok = false;
+};
+
+// The steps after a write, against the real tool: the test bundle with
+// stand-ins for the tools a release ships (fixtures/after), stand-ins for
+// nmcli and ssh-keygen, and a pretend phone that answers over "USB SSH",
+// which is a folder the stand-ins read and write. The owner's home and the
+// XDG folders are in a scratch folder. Nothing reaches a phone, a network
+// or this computer's settings (fixtures/after-stand-ins/README.md).
+const QString AfterRelease = QDir(Tests + "/../../fixtures/after").absolutePath();
+const QString AfterZip = AfterRelease + "/factory/" + ZipName;
+struct AfterWorld {
+    AfterWorld() {
+        const QString standIns = QDir(Tests + "/../../fixtures/after-stand-ins/bin").absolutePath();
+        for (const char *dir : {"home", "state", "data", "cache", "phone", "bin"})
+            QDir().mkpath(root.filePath(dir));
+        for (const char *program : {"nmcli", "ssh-keygen"})
+            QFile::copy(standIns + "/" + program, root.filePath(QStringLiteral("bin/") + program));
+        put("../bin/waits", "first_start=6 restart=6 settle=1 poll_ms=20\n");
+        // The digest of the json mode's first pretend phone's serial
+        put("id", QCryptographicHash::hash("FAKESERIAL0001", QCryptographicHash::Sha256).toHex());
+        put("boot_id", "boot-1");
+        put("up_after", "3");
+        put("firstboot_done", "");
+    }
+    void put(const QString &name, const QByteArray &text) const {
+        QFile file(root.filePath("phone/" + name));
+        if (file.open(QIODevice::WriteOnly))
+            file.write(text);
+    }
+    QStringList log() const {
+        QFile file(root.filePath("phone/log"));
+        return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList();
+    }
+    QString extra() const { return QStringLiteral("--fake-after '%1'").arg(root.filePath("bin")); }
+    // The stand-in factory image, as an owner would have saved it: in this
+    // scratch home, so that no picture shows where the repository is.
+    QString zip() const {
+        const QString saved = root.filePath("home/Downloads/" + ZipName);
+        QDir().mkpath(root.filePath("home/Downloads"));
+        QFile::copy(AfterZip, saved);
+        return saved;
+    }
+    QString environment() const {
+        QString lines;
+        for (const auto &[name, dir] : QList<std::pair<const char *, const char *>>{
+                 {"HOME", "home"}, {"XDG_STATE_HOME", "state"}, {"XDG_DATA_HOME", "data"},
+                 {"XDG_CACHE_HOME", "cache"}, {"OMAINSTALL_PRETEND_PHONE", "phone"}})
+            lines += QStringLiteral("export %1='%2'\n").arg(QLatin1String(name), root.filePath(QLatin1String(dir)));
+        return lines;
+    }
+    QTemporaryDir root;
 };
 
 // A stand-in for Google's server, for the real tool's downloads: a socket on
@@ -444,7 +499,7 @@ private slots:
         QCOMPARE(sent.count(), 2);
         QVERIFY(oneLine(sent.at(0).at(0).toByteArray()));
         QCOMPARE(json(sent.at(0).at(0).toByteArray()),
-                 (QJsonObject{{"type", "hello"}, {"protocol", 3}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
+                 (QJsonObject{{"type", "hello"}, {"protocol", 4}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
         QCOMPARE(json(sent.at(1).at(0).toByteArray()), (QJsonObject{{"type", "start"}, {"reinstall", false}}));
 
         Backend again;
@@ -817,7 +872,7 @@ private slots:
         QTest::newRow("a screen that lacks a field") << QByteArray("odd-screen") << "malformed" << "sent something this app cannot read" << "the screen has no \"footer\"";
         QTest::newRow("an unknown message") << QByteArray("unknown") << "malformed" << "sent something this app cannot read" << "a kind this app does not know";
         QTest::newRow("an unexpected exit") << QByteArray("exit") << "crashed" << "stopped unexpectedly (exit status 3)" << "stand-in: leaving, as the test asked";
-        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 3" << "";
+        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 4" << "";
         QTest::newRow("another kind of run") << QByteArray("other-mode") << "mode" << "started a run that can write" << "";
         QTest::newRow("a fatal message") << QByteArray("fatal") << "fatal" << "reported that it failed" << "the release could not be read";
         QTest::newRow("no hello") << QByteArray("silent") << "silent" << "did not say hello" << "";
@@ -861,7 +916,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":3,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":4,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "printf '{\"type\":\"screen\",\"screen\":%s}\\n' \"$(tr -d '\\n' < '" + Tests.toUtf8() + "/fixtures/screens/phone.json')\"\n"
                      "read action\n"
@@ -1432,7 +1487,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":3,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":4,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "cat <<'END'\n"
                      + QJsonDocument(QJsonObject{{"type", "screen"}, {"screen", screen}}).toJson(QJsonDocument::Compact) + "\nEND\n"
@@ -2247,6 +2302,66 @@ private slots:
         QCOMPARE(said.mid(said.size() - 2), (QStringList{"set_active:b", "reboot"}));
     }
 
+    void theRealToolSetsUpThePhoneAfterTheWrite() {
+        AfterWorld world;
+        RealTool tool("ready", {}, world.extra(), world.environment());
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(AfterRelease);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        QStringList whats;
+        connect(&backend, &Backend::progressChanged, this, [&] {
+            if (backend.hasProgress() && !whats.contains(backend.progressWhat()))
+                whats << backend.progressWhat();
+        });
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", AfterZip));
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QVERIFY(at(backend, "installed"));
+        w.settle();
+        // The core's last screen, and the way on as one of the screen's
+        // choices: no main button
+        QCOMPARE(backend.action(), QString("after"));
+        QCOMPARE(w.texts("choiceButton"), QStringList{"Set up the phone: its USB connection, radio backup and firmware"});
+        QVERIFY(!w.shown("primaryButton"));
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(at(backend, "network"));
+        w.settle();
+        QCOMPARE(w.texts("choiceButton"), (QStringList{"Add the connection", "I will set it up myself"}));
+        QVERIFY((w.texts("body") + w.texts("command") + w.texts("footerLine")).join("\n").contains("nmcli connection add type ethernet con-name omamobile-phone"));
+        QVERIFY(world.log().filter("nmcli connection add").isEmpty());
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(at(backend, "backup"));
+        QVERIFY(whats.contains("first-start"));
+        QCOMPARE(world.log().filter("nmcli connection add").size(), 1);
+        w.settle();
+        QVERIFY(w.shown("notice") && backend.screen().value("notice").toString().contains("IMEI"));
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(at(backend, "firmware"));
+        QCOMPARE(world.log().filter(QRegularExpression("^nv-backup ")).size(), 1);
+        // The firmware holds the window, as a write does
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(backend.writing());
+        QVERIFY(at(backend, "restart"));
+        QVERIFY(!backend.writing());
+        QCOMPARE(world.log().filter(QRegularExpression("^phone-provision --first-install --nv-backup ")).size(), 1);
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(at(backend, "ready"));
+        w.settle();
+        QCOMPARE(backend.action(), QString("none"));
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        QVERIFY((w.texts("body") + w.texts("command") + w.texts("footerLine")).join("\n").contains("Works: Starts its own system (slot B), Display."));
+        QCOMPARE(world.log().filter("ssh systemctl stop omamobile-modem").size(), 1);
+        QCOMPARE(backend.toolError(), QString());
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        int partitions = 0;
+        tool.notReads(&partitions);
+        QCOMPARE(partitions, 6);
+    }
+
     void theRealToolAnInstallTheOwnerDoesNotGoAheadWith() {
         // Cancelled at the last question, by the button and by a wrong word.
         for (const QString &typed : {QString(), QString("Cheetah")}) {
@@ -2777,7 +2892,77 @@ private slots:
             QVERIFY(shoot(w, "35-closing-while-the-phone-is-written"));
             QVERIFY(at(backend, "installed"));
         }
-        QVERIFY2(saved.size() >= 27, qPrintable(saved.join(" ")));
+        // The steps after the write, with the release's own tools: every
+        // one of their screens, a refusal of NetworkManager's among them
+        {
+            AfterWorld world;
+            world.put("nm_refuse", "");
+            RealTool tool("ready", {}, world.extra(), world.environment());
+            QVERIFY(tool.ok);
+            Backend backend;
+            backend.setReleaseDirectory(AfterRelease);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(goTo(backend, "confirm", world.zip()));
+            QVERIFY(backend.confirmInstall("cheetah"));
+            QVERIFY(at(backend, "installed"));
+            QVERIFY(shoot(w, "40-installed-set-up-next"));
+            QVERIFY(backend.answerChoice("begin"));
+            QVERIFY(at(backend, "network"));
+            QVERIFY(shoot(w, "41-network"));
+            QVERIFY(backend.answerChoice("add"));
+            QVERIFY(at(backend, "network"));
+            QVERIFY(shoot(w, "42-network-refused"));
+            QVERIFY(backend.answerChoice("myself"));
+            QVERIFY(at(backend, "backup"));
+            QVERIFY(shoot(w, "43-backup"));
+            QVERIFY(backend.answerChoice("backup"));
+            QVERIFY(at(backend, "firmware"));
+            QVERIFY(shoot(w, "44-firmware"));
+            QVERIFY(backend.answerChoice("firmware"));
+            QTRY_VERIFY(backend.hasProgress() && backend.progressWhat() == "firmware");
+            QVERIFY(shoot(w, "45-firmware-running", true));
+            QVERIFY(at(backend, "restart"));
+            QVERIFY(shoot(w, "46-restart"));
+            QVERIFY(backend.answerChoice("restart"));
+            QVERIFY(at(backend, "ready"));
+            QVERIFY(shoot(w, "47-ready"));
+            backend.shutdown();
+        }
+        {
+            // A run cut off after the backup, opened again
+            AfterWorld world;
+            RealTool tool("ready", {}, world.extra(), world.environment());
+            QVERIFY(tool.ok);
+            {
+                Backend backend;
+                backend.setReleaseDirectory(AfterRelease);
+                backend.setWrite(true);
+                backend.start();
+                QVERIFY(goTo(backend, "confirm", world.zip()));
+                QVERIFY(backend.confirmInstall("cheetah"));
+                QVERIFY(at(backend, "installed"));
+                QVERIFY(backend.answerChoice("begin"));
+                QVERIFY(at(backend, "network"));
+                world.put("up_after", "100");
+                QVERIFY(backend.answerChoice("add"));
+                QVERIFY(at(backend, "first-start"));
+                backend.shutdown();
+            }
+            Backend backend;
+            backend.setReleaseDirectory(AfterRelease);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(at(backend, "after-resume"));
+            QVERIFY(shoot(w, "48-after-resume"));
+            QVERIFY(backend.answerChoice("go-on"));
+            QVERIFY(at(backend, "first-start"));
+            QVERIFY(shoot(w, "49-first-start"));
+            backend.shutdown();
+        }
+        QVERIFY2(saved.size() >= 37, qPrintable(saved.join(" ")));
         // No picture is empty.
         for (const QString &name : std::as_const(saved))
             QVERIFY2(QFileInfo(out + "/" + name + ".png").size() > 4000, qPrintable(name));

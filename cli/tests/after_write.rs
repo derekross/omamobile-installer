@@ -601,7 +601,7 @@ fn a_first_start_that_does_not_finish_is_waited_for_within_its_bound() {
     assert!(waiting.screen["problem"]
         .as_str()
         .unwrap()
-        .contains("hasn't finished its first start after 1 minutes"));
+        .contains("hasn't finished its first start after 1 minute."));
     world.put("firstboot_done", "");
     assert_eq!(tool.after("wait").state(), "backup");
     tool.finish();

@@ -452,7 +452,7 @@ fn now_utc() -> (String, String) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     let date = format!("{y:04}-{m:02}-{d:02}");
-    let time = format!("{:02}{:02}", (secs % 86400) / 3600, (secs % 3600) / 60);
+    let time = format!("{:02}:{:02}", (secs % 86400) / 3600, (secs % 3600) / 60);
     (date, time)
 }
 
@@ -691,9 +691,10 @@ impl After {
             None => {
                 let (date, time) = now_utc();
                 self.seams.home.join("omamobile-backup").join(format!(
-                    "{}-radio-backup-{}-{time}",
+                    "{}-radio-backup-{}-{}",
                     self.codename,
-                    date.replace('-', "")
+                    date.replace('-', ""),
+                    time.replace(':', "")
                 ))
             }
         }
@@ -807,8 +808,8 @@ impl After {
                 s.body = vec![
                     "The phone is starting Omarchy Mobile for the first time. It makes the system fill the phone's storage, which takes a few minutes. Leave the phone connected and alone.".into(),
                     format!(
-                        "The installer waits for it over the USB connection, for up to {} minutes.",
-                        self.seams.waits.first_start.div_ceil(60)
+                        "The installer waits for it over the USB connection, for up to {}.",
+                        minutes(self.seams.waits.first_start)
                     ),
                 ];
                 s.choices = vec![choice(WAIT, "Wait for the first start")];
@@ -1124,8 +1125,8 @@ impl After {
             }
             if waited >= limit {
                 self.problem = Some(format!(
-                    "The phone hasn't finished its first start after {} minutes. If it shows the lock screen, unplug the cable, plug it back in, wait ten seconds and wait again. If it still doesn't answer, another of this computer's saved connections may have taken the phone's USB link: \"nmcli device\" shows which connection each link uses. If the phone's screen is dark or stuck, hold its power key to restart it.",
-                    limit.div_ceil(60)
+                    "The phone hasn't finished its first start after {}. If it shows the lock screen, unplug the cable, plug it back in, wait ten seconds and wait again. If it still doesn't answer, another of this computer's saved connections may have taken the phone's USB link: \"nmcli device\" shows which connection each link uses. If the phone's screen is dark or stuck, hold its power key to restart it.",
+                    minutes(limit)
                 ));
                 return Ok(());
             }
@@ -1297,7 +1298,7 @@ impl After {
             let waited = began.elapsed().as_secs();
             watch.progress("restart", waited.min(limit), limit);
             if waited >= limit {
-                self.problem = Some(format!("The phone hasn't come back {} minutes after its restart. Wait a minute more: a stuck restart resets itself. If it is still stuck, hold its power key to restart it, then wait again.", limit.div_ceil(60)));
+                self.problem = Some(format!("The phone hasn't come back {} after its restart. Wait a minute more: a stuck restart resets itself. If it is still stuck, hold its power key to restart it, then wait again.", minutes(limit)));
                 return Ok(());
             }
             if !watch.go_on("restart") {
@@ -1405,6 +1406,14 @@ impl After {
     }
 }
 
+/// Seconds as whole minutes, in words.
+fn minutes(seconds: u64) -> String {
+    match seconds.div_ceil(60) {
+        1 => "1 minute".into(),
+        n => format!("{n} minutes"),
+    }
+}
+
 /// phone-smoke's names for its checks, in install-guided's plain words.
 fn plain_name(name: &str) -> String {
     match name {
@@ -1454,6 +1463,6 @@ mod tests {
     fn a_date_is_the_calendars() {
         let (date, time) = now_utc();
         assert_eq!(date.len(), 10);
-        assert_eq!(time.len(), 4);
+        assert_eq!(time.len(), 5);
     }
 }

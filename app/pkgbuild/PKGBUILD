@@ -1,28 +1,57 @@
 # SPDX-License-Identifier: MIT
+# The desktop installer and the tool it drives, built from this checkout:
+#   cd app/pkgbuild && makepkg -si
+# (app/bin/install does the same). Both binaries go to /usr/bin, where the
+# app finds the tool (docs/APP.md §2: beside the app's own binary, then on
+# PATH). The tool is built as it ships: no `fake-phone` feature, so it has
+# no pretend phone and trusts only Omarchy Mobile's release key.
 pkgname=omainstall
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Guides you through installing Omarchy Mobile on a phone (never run against a real phone)'
+pkgdesc='Guides you through installing Omarchy Mobile on a phone (not yet run against a real phone through this app)'
 arch=('x86_64' 'aarch64')
 url='https://github.com/derekross/omamobile-installer'
 license=('MIT')
-depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'xdg-desktop-portal')
-makedepends=('gcc' 'make')
-# The installer's command-line tool, which the app drives. It is not packaged
-# yet; until it is, the app says in its window that the tool was not found.
-optdepends=('omamobile-install: the installer itself')
+# The window; then what the steps after the write run: the release's own
+# tools are bash and Python, and talk to the phone over USB SSH
+# (tools/phone-ssh), and tools/phone-provision unpacks Google's factory
+# image with lpunpack and simg2img (android-tools), fsck.erofs
+# (erofs-utils), debugfs (e2fsprogs), readelf (binutils), unzip, lz4 and
+# zstd. ssh-keygen makes the installer's key when this computer has none.
+depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'xdg-desktop-portal'
+         'bash' 'python' 'openssh' 'unzip' 'android-tools' 'erofs-utils' 'e2fsprogs'
+         'binutils' 'lz4' 'zstd' 'cpio' 'gcc-libs' 'glibc')
+optdepends=('networkmanager: the USB connection to the phone, added on your click (without it you set 172.16.42.2/24 yourself)')
+makedepends=('cargo' 'gcc' 'make')
+provides=('omamobile-install')
+conflicts=('omamobile-install')
 source=()
 sha256sums=()
+# ring's C and assembly do not link under makepkg's LTO flags
+options=('!lto')
+
+_root() { cd "$startdir/../.."; }
 
 build() {
-  cd "$startdir/.."
+  _root
+  # The versions Cargo.lock names, and nothing fetched but those crates
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked -p omamobile-installer-cli
+  cd app
   ./bin/build
 }
 
+check() {
+  _root
+  # The shipping tool's own unit tests (no pretend phone in this build)
+  CARGO_TARGET_DIR="$srcdir/target" cargo test --release --locked -p omamobile-installer-cli --bin omamobile-install
+}
+
 package() {
-  cd "$startdir/.."
-  install -Dm755 build/omainstall "$pkgdir/usr/bin/omainstall"
-  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-  install -Dm644 "$startdir/omainstall.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/omainstall.svg"
-  install -Dm644 "$startdir/omainstall.desktop" "$pkgdir/usr/share/applications/omainstall.desktop"
+  _root
+  install -Dm755 "$srcdir/target/release/omamobile-install" "$pkgdir/usr/bin/omamobile-install"
+  install -Dm755 app/build/omainstall "$pkgdir/usr/bin/omainstall"
+  install -Dm644 app/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 app/pkgbuild/omainstall.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/omainstall.svg"
+  install -Dm644 app/pkgbuild/omainstall.desktop "$pkgdir/usr/share/applications/omainstall.desktop"
 }

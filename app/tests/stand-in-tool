@@ -37,7 +37,7 @@ import os
 import sys
 import time
 
-PROTOCOL = 3
+PROTOCOL = 4
 # As the real tool: the flow may write only if the tool was started with it.
 WRITES = "--write" in sys.argv[1:]
 # What a write sends, as the session's own log has it (cli/src/json.rs).
