@@ -453,7 +453,7 @@ impl Phones for Usb {
     type Link = UsbTransport;
 
     fn look(&mut self) -> Res<Vec<Connected>> {
-        self.seen = block_on(nusb::list_devices())?
+        self.seen = nusb::MaybeFuture::wait(nusb::list_devices())?
             .filter(is_fastboot)
             .collect();
         Ok(self
@@ -486,7 +486,7 @@ impl Phones for Usb {
             .serial_number()
             .and_then(PhoneId::of_serial)
             .ok_or("this phone reports no serial number, so the install can't be pinned to it")?;
-        let device = block_on(info.open())?;
+        let device = nusb::MaybeFuture::wait(info.open())?;
         Ok((block_on(UsbTransport::open(&device))?, id))
     }
 }

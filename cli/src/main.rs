@@ -269,7 +269,7 @@ fn is_fastboot(info: &nusb::DeviceInfo) -> bool {
 
 async fn cmd_devices() -> Res<()> {
     let mut n = 0;
-    for info in nusb::list_devices().await?.filter(is_fastboot) {
+    for info in nusb::MaybeFuture::wait(nusb::list_devices())?.filter(is_fastboot) {
         n += 1;
         // Both strings are the device's own: nothing of them that a
         // terminal acts on is printed
@@ -288,8 +288,9 @@ async fn cmd_devices() -> Res<()> {
 /// The one phone in fastboot mode with this serial number, opened; `None`
 /// when there is none.
 async fn open_usb(serial: &str) -> Res<Option<(UsbTransport, PhoneId)>> {
-    let mut found = nusb::list_devices()
-        .await?
+    // nusb's blocking calls are waited for in place: the tool has no async
+    // runtime, and awaiting them would need one (usb/src/lib.rs).
+    let mut found = nusb::MaybeFuture::wait(nusb::list_devices())?
         .filter(|d| is_fastboot(d) && d.serial_number() == Some(serial));
     let Some(info) = found.next() else {
         return Ok(None);
@@ -298,7 +299,7 @@ async fn open_usb(serial: &str) -> Res<Option<(UsbTransport, PhoneId)>> {
         return Err("more than one phone in fastboot mode has that serial number".into());
     }
     let id = PhoneId::of_serial(serial).ok_or("--serial is empty")?;
-    let device = info.open().await?;
+    let device = nusb::MaybeFuture::wait(info.open())?;
     Ok(Some((UsbTransport::open(&device).await?, id)))
 }
 
