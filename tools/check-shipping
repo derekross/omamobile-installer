@@ -235,8 +235,8 @@ fi
 once "the write preview begins its flows from the options of the page that ships" \
   "let mut options = super::page_options(reinstall);" web/src/write_preview.rs
 # Its scripts: not in the directory every build's page is copied from
-strays=$(ls web/static | grep -vxE 'app\.js|index\.html|style\.css' || true)
-if [[ -z $strays ]]; then ok "the page that ships is three files, and none is the write preview's"
+strays=$(ls web/static | grep -vxE 'app\.js|index\.html|release-fetch\.js|style\.css' || true)
+if [[ -z $strays ]]; then ok "the page that ships is four files, and none is the write preview's"
 else bad "web/static holds more than the page that ships" "$strays"; fi
 none "the page that ships loads no script but its own, and names none of the write preview's" \
   'preview\.js|write-walk|page-run|fake-usb|web_write|session_(open|boot|root|finish)|images_(check|root)' web/static/*
@@ -244,6 +244,15 @@ tags=$(grep -c '<script' web/static/index.html || true)
 if [[ $tags == 1 ]] && grep -qF '<script type="module" src="app.js"></script>' web/static/index.html; then
   ok "the page that ships has one script tag, its own"
 else bad "the page that ships has $tags script tags, or its one is not app.js"; fi
+# The page's download of the release (web/static/release-fetch.js): files
+# from the release server, kept in the browser and checked by the module. It
+# reaches no phone, and fetches from the one server it names
+none "the page's download script reaches no phone and names no flow step" \
+  'navigator\.usb|requestDevice|request_phone|read_phone|dry_run|transfer(In|Out)|Phone\b|InstallFlow' web/static/release-fetch.js
+once "the page's download script names one release server" \
+  'export const RELEASES = "https://pkgs.omamobile.org/releases/";' web/static/release-fetch.js
+none "the page's download script names no other server" \
+  'https?://(?!pkgs\.omamobile\.org/releases/)' web/static/release-fetch.js
 none "the write preview's page offers no override and runs no command" \
   'maintainer|slot_override|flashing unlock|fake_phone' "${preview_page[@]}"
 once "a build that is not the write preview copies none of its scripts" \
@@ -307,7 +316,7 @@ if (( built )); then
     else ok "the shipping page's module holds nothing of the write preview: not its transport, not its steps, not its words"; fi
     none "the shipping page's glue has nothing of the write preview" "$preview_glue" "$glue"
     strays=$(cd web/dist && find . -type f ! -path './pkg/*' ! -path './release/*' | sort | tr '\n' ' ')
-    if [[ $strays == "./app.js ./index.html ./style.css " ]]; then ok "the shipping page is its three files, the module and the release's files"
+    if [[ $strays == "./app.js ./index.html ./release-fetch.js ./style.css " ]]; then ok "the shipping page is its four files, the module and the release's files"
     else bad "the shipping page holds other files than its own" "$strays"; fi
     if grep -qF 'cannot write to a phone' web/dist/index.html; then ok "the shipping page says it cannot write to a phone"
     else bad "the shipping page does not say that it cannot write to a phone"; fi
@@ -366,7 +375,7 @@ if (( preview )); then
     none "the write preview's glue has no pretend phone, no self-test and no override" \
       'fake_phone|selftest|slot_override|maintainer|slots_match' "$glue"
     strays=$(cd "$dist" && find . -type f ! -path './pkg/*' ! -path './release/*' | sort | tr '\n' ' ')
-    if [[ $strays == "./app.js ./index.html ./preview.js ./style.css ./write-walk.js " ]]; then ok "the write preview is the page's files and its own three, with none of its tests"
+    if [[ $strays == "./app.js ./index.html ./preview.js ./release-fetch.js ./style.css ./write-walk.js " ]]; then ok "the write preview is the page's files and its own three, with none of its tests"
     else bad "the write preview holds other files than the page's and its own" "$strays"; fi
     if grep -qF 'this build can write to a phone' "$dist/index.html" && grep -qF 'It has never been run against a real phone' "$dist/index.html" &&
       ! grep -qF 'cannot write to a phone' "$dist/index.html"; then

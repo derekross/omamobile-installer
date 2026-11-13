@@ -142,6 +142,13 @@ impl RootCheck {
             .ok_or_else(|| JsError::new("already finished"))?;
         check.finish().map(|_| ()).map_err(js)
     }
+    /// The same as [`Self::finish`], under the name the page's download
+    /// script calls (`web/static/release-fetch.js`): `tools/check-shipping`
+    /// keeps `.finish(` out of the page's scripts, for the direct session
+    /// that once had one.
+    pub fn done(&mut self) -> Result<(), JsError> {
+        self.finish()
+    }
 }
 
 /// Where a phone is: a USB device the person picked in the browser's
@@ -685,6 +692,42 @@ impl InstallFlow {
 #[wasm_bindgen]
 pub fn selftest_factory_zip() -> Vec<u8> {
     fx!("factory/cheetah-test.260101.001-factory-31c2322a.zip").to_vec()
+}
+
+/// A release's small files checked as [`verify_release`] checks them, but
+/// trusted by a test key: the one `fixtures/selftest` was signed with, or
+/// the one `fingerprint` names. Self-test builds only, for the tests of the
+/// page's download (web/test) against a stand-in for the release server.
+#[cfg(feature = "selftest")]
+#[wasm_bindgen]
+pub fn selftest_verify_release(
+    fingerprint: Option<String>,
+    sha256sums: &[u8],
+    sha256sums_sig: &[u8],
+    keyring: &[u8],
+    manifest_json: &[u8],
+    manifest_txt: &[u8],
+    device_conf: &[u8],
+) -> Result<Release, JsError> {
+    let files = ReleaseFiles {
+        sha256sums,
+        sha256sums_sig,
+        keyring,
+        manifest_json,
+        manifest_txt,
+        device_conf,
+    };
+    let fingerprint = match fingerprint {
+        Some(f) => f,
+        None => core::str::from_utf8(fx!("test-key.fingerprint"))
+            .map_err(js)?
+            .trim()
+            .to_string(),
+    };
+    let trusted = TrustedKeys::new(&[fingerprint]).map_err(js)?;
+    Ok(Release {
+        inner: bundle::verify_release(&files, &trusted).map_err(js)?,
+    })
 }
 
 /// Walk the built-in bundle's images through a dry-run session.

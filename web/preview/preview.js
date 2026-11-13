@@ -7,8 +7,10 @@
 // It adds three things, all drawn from the core's screens:
 //   - every flow is begun as one that may write, by the module's own
 //     constructor for that;
-//   - the dry run walks the release's files, which the person picks here
-//     (a flow that writes confirms nothing it has not checked);
+//   - the dry run walks the release's files: the ones the page downloaded
+//     and checked (app.js, release-fetch.js), or, until there are any, the
+//     ones the person picks here (a flow that writes confirms nothing it has
+//     not checked, and the walk checks every file again);
 //   - the confirmation (what the person typed goes to the core as typed)
 //     and the write.
 // It adds no sentence about the phone, no way round a stop, and no control
@@ -66,22 +68,38 @@ async function guarded(action) {
   const warn = (event) => event.preventDefault();
   addEventListener("beforeunload", warn);
   let lock = null;
-  try {
-    lock = await navigator.wakeLock?.request("screen");
-  } catch {
-    // Not allowed or not there: the write goes on without it
-  }
+  let over = false;
+  const take = async () => {
+    try {
+      lock = await navigator.wakeLock?.request("screen");
+    } catch {
+      // Not allowed or not there: the write goes on without it
+    }
+  };
+  // The browser lets go of the lock whenever the tab is hidden; it is taken
+  // again when the tab is shown, while the write lasts
+  const again = () => {
+    if (!over && document.visibilityState === "visible" && (!lock || lock.released)) take();
+  };
+  document.addEventListener("visibilitychange", again);
+  await take();
   try {
     return await action();
   } finally {
+    over = true;
+    document.removeEventListener("visibilitychange", again);
     removeEventListener("beforeunload", warn);
     await lock?.release().catch(() => {});
   }
 }
 
+// The files the walk reads: the release the page downloaded or read and
+// checked, or the ones picked on the dry run's screen
+const chosen = () => page.large ?? picked;
+
 async function runWalk() {
   const release = JSON.parse(page.flow.release());
-  const files = match(picked, release);
+  const files = match(chosen(), release);
   if (files.problems.length) throw new Error(files.problems.join(" "));
   if (!page.phone) page.phone = await core.request_phone();
   walking = true;
@@ -109,6 +127,9 @@ function filePicker() {
   input.addEventListener("change", () => {
     picked = [...input.files];
     draw();
+    // The dry run's button waits for every file
+    const dry = $("dry");
+    if (dry) dry.disabled = walking || match(picked, release).problems.length > 0;
   });
   draw();
   return el(
@@ -130,8 +151,15 @@ additions.controls = (s) => {
     return b;
   };
   switch (s.action) {
-    case "dry-run":
-      return el("div", {}, filePicker(), el("div", { className: "actions" }, go("dry", "Run the dry run", runWalk)), progress);
+    case "dry-run": {
+      if (page.large) {
+        const ready = el("p", { id: "release-ready", textContent: "The release's files are the ones the page downloaded or read above, each checked against the signed release. The dry run reads and checks them again." });
+        return el("div", {}, ready, el("div", { className: "actions" }, go("dry", page.phone ? "Run the dry run" : "Choose the phone and run the dry run", runWalk)), progress);
+      }
+      const button = go("dry", "Run the dry run", runWalk);
+      button.disabled = walking || match(picked, JSON.parse(page.flow.release())).problems.length > 0;
+      return el("div", {}, filePicker(), el("div", { className: "actions" }, button), progress);
+    }
     case "confirm": {
       const typed = el("input", { id: "codename", autocomplete: "off", autocapitalize: "none", spellcheck: false });
       row.append(

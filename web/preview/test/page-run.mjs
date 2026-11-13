@@ -58,6 +58,14 @@ async function run() {
     $(id).dispatchEvent(new Event("change"));
     await page.busy;
   };
+  // The published release's small files, picked as an owner picks a release
+  // saved on this computer: the page would otherwise ask the release
+  // server, which this browser can't reach
+  const published = await Promise.all(
+    ["SHA256SUMS", "SHA256SUMS.sig", "omamobile.gpg", "manifest.json", "MANIFEST", "device.conf"].map(async (n) => new File([await (await fetch(`release/${n}`)).arrayBuffer()], n)),
+  );
+  await pick("bundle-files", published);
+  check("the page takes a saved release's files in place of the release server's", !!page.flow && $("release-from").textContent.startsWith("From this computer: Omarchy Mobile 2026.11.08"), $("release-from").textContent);
   const fetched = async (name) => new Uint8Array(await (await fetch(`test-release/${name}`)).arrayBuffer());
   const releaseFiles = async () => {
     const release = JSON.parse(page.flow.release());
@@ -91,7 +99,9 @@ async function run() {
   check("the chooser was the browser's, with the fastboot filter and nothing else", JSON.stringify(usb.requests.at(-1)) === '{"filters":[{"classCode":255,"subclassCode":66,"protocolCode":3}]}' && usb.listed === 0, JSON.stringify(usb.requests.at(-1)));
   check("the dry run's screen asks for the release's files and lists them", state() === "dry-run" && !!$("release-files") && $("release-wanted").children.length === 6 && [...$("release-wanted").children].every((li) => li.textContent.startsWith("wanted: ")), text());
   await click("dry");
-  check("without the files the dry run is not begun, and the page says which are missing", state() === "dry-run" && ($("failure")?.textContent ?? "").includes("boot.img is not among the files you picked") && notReads(phone).length === 0, $("failure")?.textContent);
+  // Each step's button waits for the one before it: without the files the
+  // dry run's is not pressable, and the list says what is wanted
+  check("without the files the dry run is not begun: its button waits for them, and the list says which are wanted", state() === "dry-run" && $("dry").disabled && !$("failure") && [...$("release-wanted").children].every((li) => li.textContent.startsWith("wanted: ")) && notReads(phone).length === 0, `${$("dry").disabled} ${$("failure")?.textContent}`);
   const files = await releaseFiles();
   await pick("release-files", files);
   check("picked files are marked", [...$("release-wanted").children].every((li) => li.textContent.startsWith("picked: ")), $("release-wanted").textContent);

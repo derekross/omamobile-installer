@@ -124,6 +124,12 @@ jobs:
       # with WebUSB off (the page's test refuses a browser that has it).
       - name: The write preview's tests, in node and in a headless browser
         run: web/preview-test.sh
+      # The page's download of a release, in node: a stand-in for the
+      # release server on the runner (CORS and Range, a release signed with
+      # a test key) and a stand-in for the browser's own file system. The
+      # same download in the headless browser is part of web/selftest.sh.
+      - name: The page's download of a release, against a stand-in server
+        run: web/fetch-test.sh
       # Then the preview as it would be built for an attended run, read the
       # other way round: it must hold the write path and say so, or the
       # look for it in the shipping build above proves nothing. And the
