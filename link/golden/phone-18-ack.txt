@@ -1,0 +1,13 @@
+frame: phone-18-ack
+ack, sent by itself (no re)
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 17
+len: 30
+offset: 0
+payload sha256: b011a0cf9a1fda9d78530e7ed9f7de6805d6d4bdc82945ef4de1be6c6876f7b1
+pad byte: no
+frame bytes: 86
+frame sha256: f5d473b06738640b2dac0d04e3e1f7f0126a8c63cb0a5f685a00ff56fa5ce80c
+payload: {"t":"ack","offset":134217728}

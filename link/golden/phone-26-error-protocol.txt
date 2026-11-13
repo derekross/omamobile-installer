@@ -1,0 +1,13 @@
+frame: phone-26-error-protocol
+error, sent by itself (no re)
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 25
+len: 129
+offset: 0
+payload sha256: 64c9e5aceb4bd7b6792a0d7a858a4a26bec717edd0a8daa717ed15925fb55c6f
+pad byte: no
+frame bytes: 185
+frame sha256: 8fc778cd0623d987a2b97de1afe2118ad4fdb874dc254f62b50d4c2455a66eba
+payload: {"t":"error","code":"protocol","message":"a frame or a message was not protocol 1; the session is over","stage":"firstboot-done"}

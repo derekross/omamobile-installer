@@ -1,0 +1,13 @@
+frame: limit-data-1048576
+a full data frame at the default max_data
+direction: host to phone
+kind: 2 (data)
+flags: 0
+seq: 100
+len: 1048576
+offset: 67108864
+payload sha256: 1c59b8670027384143781a8a8bff2f3b44bd8818d0f53b13b064c2375a1afe38
+pad byte: no
+frame bytes: 1048632
+frame sha256: e1b12ff096640a921530540d823eb4cb344038639f74ae570c4d41a73df11c4b
+payload: 1048576 bytes: byte i is (i * 31 + 7) mod 251

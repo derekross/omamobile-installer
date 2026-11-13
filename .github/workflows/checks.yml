@@ -1,6 +1,6 @@
 # The gate for every push and pull request: no identifiers, formatted, the
-# core's tests and the command-line tool's flow against the fake phone (as
-# text and as JSON lines), the web page built both ways and its self-test in
+# core's tests, the install link's protocol in memory, the command-line
+# tool's flow against the fake phone (as text and as JSON lines), the web page built both ways and its self-test in
 # a headless browser, a look at what ships (no way to write to a phone but
 # the command-line tool's, no pretend phone), and the desktop app built and
 # tested against a stand-in and against the real tool with its pretend
@@ -42,6 +42,10 @@ jobs:
         run: cargo clippy --locked
       - name: Tests (the core, against the fake phone; the install flow and the build index among them)
         run: cargo test --locked
+      - name: The install link's protocol builds for the web page, without its test stand-ins
+        run: cargo check --locked -p omamobile-link --target wasm32-unknown-unknown
+      - name: The install link's protocol builds for the phone (aarch64 Linux), without its test stand-ins
+        run: cargo check --locked -p omamobile-link --target aarch64-unknown-linux-gnu
       - name: Tests (the command-line tool driving the flow against the pretend phone, as text and as JSON lines)
         run: cargo test --locked -p omamobile-installer-cli --features fake-phone
       # web/build.sh needs wasm-bindgen-cli at exactly the wasm-bindgen
