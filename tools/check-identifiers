@@ -13,6 +13,17 @@
 # Cargo.lock (names and checksums of crates) and this script (it holds the
 # patterns and its self-test's samples).
 #
+# One part of one kind of file is not read as text, because it is not text:
+# the pixel data of a PNG picture (its IDAT chunks), which is compressed and
+# in which a megabyte of noise holds a few runs of capitals and digits by
+# chance. Everything else of a PNG is read: its header, its text chunks
+# (where a program that saves a picture can leave a path or a name) and
+# anything before, between or after its chunks. A file that only begins like
+# a PNG, or whose chunks do not add up to its size, is read whole. What a
+# picture shows is for a reviewer's eyes, like a Wi-Fi network's name: the
+# pictures under app/docs/screens are of a pretend phone, with made-up
+# answers.
+#
 # What is declared, and passes, is listed in ALLOWED below, each value with
 # the one file it may stand in and why. Add to it only what is public and
 # names no phone and no person; a new fixture that trips a pattern is looked
@@ -66,7 +77,34 @@ PATTERNS=(
 
 errors=$(mktemp)
 scratch=
-trap 'rm -rf "$errors" "$scratch"' EXIT
+pictures=
+trap 'rm -rf "$errors" "$scratch" "$pictures"' EXIT
+
+# bytes FILE OFFSET COUNT: that many bytes of the file from that offset
+bytes() { tail -c +"$(( $2 + 1 ))" -- "$1" | head -c "$3"; }
+
+# without_pixels FILE: a PNG picture without the data of its IDAT chunks, on
+# standard output. Status 1, whatever was printed, when the file is not a
+# PNG whose chunks add up to its size: such a file is read whole.
+without_pixels() {
+  local file=$1 size offset=8 length kind
+  [[ $(bytes "$file" 0 8 | od -An -tx1 | tr -d ' \n') == 89504e470d0a1a0a ]] || return 1
+  size=$(wc -c <"$file")
+  bytes "$file" 0 8
+  while (( offset + 12 <= size )); do
+    length=$(( 16#$(bytes "$file" "$offset" 4 | od -An -tx1 | tr -d ' \n') ))
+    kind=$(bytes "$file" $((offset + 4)) 4 | tr -c 'A-Za-z' '?')
+    (( offset + 12 + length <= size )) || return 1
+    if [[ $kind == IDAT ]]; then
+      # The chunk stays, as its name: only its data is left out
+      printf 'IDAT\n'
+    else
+      bytes "$file" "$offset" $((12 + length))
+    fi
+    offset=$((offset + 12 + length))
+  done
+  (( offset == size ))
+}
 
 allowed() {   # allowed FILE VALUE
   local entry
@@ -82,8 +120,20 @@ allowed() {   # allowed FILE VALUE
 scan() {
   local files=() file entry name pattern found line value keep hit=0
   while IFS= read -r -d '' file; do files+=("$file"); done
+  local whole=() stripped=() n=0
   for file in "${files[@]}"; do
     [[ -f $file && -r $file ]] || { echo "check-identifiers: can't read $file" >&2; exit 2; }
+  done
+  # A PNG picture is read without its pixel data; every other file whole
+  [[ -n $pictures ]] || pictures=$(mktemp -d)
+  for file in "${files[@]}"; do
+    n=$((n + 1))
+    if without_pixels "$file" >"$pictures/$n" 2>/dev/null; then
+      stripped+=("$n|$file")
+    else
+      rm -f "$pictures/$n"
+      whole+=("$file")
+    fi
   done
   for entry in "${PATTERNS[@]}"; do
     name=${entry%%|*} pattern=${entry#*|}
@@ -91,7 +141,14 @@ scan() {
     if (( ${#files[@]} )); then
       # Status 1 is "nothing found"; whatever goes wrong says so on stderr.
       # A binary file's line may hold NUL bytes, which a variable can't
-      found=$(grep -naHP -- "$pattern" "${files[@]}" /dev/null 2>"$errors" | tr '\000' '?') || true
+      found=$(
+        {
+          grep -naHP -- "$pattern" "${whole[@]}" /dev/null || true
+          for file in "${stripped[@]}"; do
+            grep -naHP --label="${file#*|}" -- "$pattern" - <"$pictures/${file%%|*}" || true
+          done
+        } 2>"$errors" | tr '\000' '?'
+      ) || true
       if [[ -s $errors ]]; then
         echo "check-identifiers: grep failed on '$name':" >&2; cat "$errors" >&2; exit 2
       fi
@@ -179,6 +236,29 @@ self_test() {
   printf '%s\0' "$scratch/sample" | scan >/dev/null || status=$?
   if (( status == 1 )); then printf 'ok - caught: an identifier in a binary file\n'
   else printf 'not ok - NOT caught: an identifier in a binary file\n'; bad=1; fi
+  # A PNG picture: its pixel data is not read as text, and all the rest is.
+  # chunk KIND DATA: one chunk (the check sum is not looked at: four zeros)
+  chunk() { printf "$(printf '\\%03o' 0 0 0 "${#2}")%s%s\\0\\0\\0\\0" "$1" "$2"; }
+  png() { printf '\211PNG\r\n\032\n'; chunk IHDR 'thirteen byte'; }
+  made_up='serialno 1A234BCD5E6789 /home/someone/x'
+  picture() {   # picture WHAT WANTED: the scan's status on $scratch/sample
+    n=$((n + 1)); status=0
+    printf '%s\0' "$scratch/sample" | scan >"$scratch/out" || status=$?
+    if (( status == $2 )); then printf 'ok - %s\n' "$1"
+    else printf 'not ok - %s (status %s, wanted %s)\n' "$1" "$status" "$2"; cat "$scratch/out"; bad=1; fi
+  }
+  { png; chunk IDAT "$made_up"; chunk IEND ''; } >"$scratch/sample"
+  picture "passes: what looks like an identifier in a picture's compressed pixel data" 0
+  { png; chunk tEXt "Comment $made_up"; chunk IDAT 'pixels'; chunk IEND ''; } >"$scratch/sample"
+  picture "caught: an identifier in a picture's text chunk" 1
+  { png; chunk IDAT 'pixels'; chunk IEND ''; printf '%s\n' "$made_up"; } >"$scratch/sample"
+  picture "caught: an identifier after a picture's last chunk" 1
+  { png; chunk IDAT 'pixels'; printf '\0\0\377\377IDAT%s' "$made_up"; } >"$scratch/sample"
+  picture "caught: an identifier in a chunk that says it is longer than the file" 1
+  { printf 'IDAT %s\n' "$made_up"; } >"$scratch/sample"
+  picture "caught: an identifier in a file that is no picture and says IDAT" 1
+  { printf '\211PNG %s\n' "$made_up"; } >"$scratch/sample"
+  picture "caught: an identifier in a file that only begins like a picture" 1
   # A file that can't be read is an error, never a pass
   n=$((n + 1)); status=0
   (printf '%s\0' "$scratch/no-such-file" | scan >/dev/null 2>&1) || status=$?
