@@ -1,8 +1,11 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
+# The Arch package of the app and the tool it drives, built from this
+# checkout and installed (pkgbuild/PKGBUILD). makepkg asks for your
+# password to install the package, and to install what it needs to build
+# that is missing (-s).
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-"$ROOT/bin/build"
 cd "$ROOT/pkgbuild"
 exec makepkg -fsi "$@"

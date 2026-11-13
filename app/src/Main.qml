@@ -36,7 +36,7 @@ ApplicationWindow {
     // A step is in hand: the tool was given something and has not answered.
     readonly property bool stepRunning: backend.busy && backend.hasScreen
     readonly property bool knownAction: ["acknowledge", "read-phone", "slot-b", "accept-terms", "download", "take-file",
-                                         "answers", "dry-run", "confirm", "write", "none"].indexOf(action) >= 0
+                                         "answers", "dry-run", "confirm", "write", "after", "none"].indexOf(action) >= 0
     readonly property bool wantsFile: action === "download" || action === "take-file"
     // The keys below must not take a letter meant for a field, or Space and
     // Enter meant for the button that has the focus.
@@ -51,7 +51,9 @@ ApplicationWindow {
         { label: qsTr("Factory image"), states: ["google-terms", "factory-image"] },
         { label: qsTr("About you"), states: ["answers"] },
         { label: qsTr("Dry run"), states: ["dry-run", "done"] }
-    ].concat(backend.writes ? [{ label: qsTr("Install"), states: ["confirm", "write", "installed"] }] : [])
+    ].concat(backend.writes ? [{ label: qsTr("Install"), states: ["confirm", "write", "installed"] },
+                               { label: qsTr("Set up"), states: ["after-resume", "network", "first-start", "backup",
+                                                                 "firmware", "restart", "ready"] }] : [])
     readonly property int stage: {
         for (let i = 0; i < stages.length; i++)
             if (stages[i].states.indexOf(backend.state) >= 0)
@@ -102,6 +104,10 @@ ApplicationWindow {
         case "dry-run": return qsTr("Running the dry run")
         case "verify": return qsTr("Checking the release's files")
         case "write": return qsTr("Writing to the phone")
+        case "first-start": return qsTr("Waiting for the phone's first start")
+        case "backup": return qsTr("Backing up the radio partitions")
+        case "firmware": return qsTr("Adding the firmware")
+        case "restart": return qsTr("Waiting for the phone to restart")
         }
         return qsTr("Working")
     }

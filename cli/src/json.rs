@@ -29,9 +29,10 @@
 //! owner's statement about a bootloader slot the phone does not report
 //! (that is `install`'s, typed by the owner on a command line), and none
 //! for the maintainer's override.
+use crate::after::{self, After, Seams};
 use crate::{
-    download_factory_zip, is_fastboot, parse_proxy, piece_line, take_factory_zip, walk_images,
-    Bundle, Fetcher, Res, Watch,
+    default_work_dir, download_factory_zip, is_fastboot, parse_proxy, piece_line, take_factory_zip,
+    walk_images, Bundle, Fetcher, Res, Watch,
 };
 use omamobile_installer_core::fastboot::{PhoneId, PieceReport, Transport};
 use omamobile_installer_core::flow::{
@@ -52,7 +53,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The protocol this tool speaks (docs/APP.md §3).
-pub const PROTOCOL: u64 = 3;
+pub const PROTOCOL: u64 = 4;
 /// A line longer than this is not a message of this protocol.
 const LONGEST_LINE: usize = 1 << 20;
 
@@ -141,6 +142,11 @@ pub struct Args {
     /// with a text is sent: `flash:userdata:2`.
     #[cfg(feature = "fake-phone")]
     fake_unplug: Option<(String, usize)>,
+    /// Stand-ins for this computer's programs the steps after the write
+    /// run (`nmcli`, `ssh-keygen`), and the waits (a file `waits`), for a
+    /// pretend run.
+    #[cfg(feature = "fake-phone")]
+    fake_after: Option<PathBuf>,
 }
 
 impl Args {
@@ -168,6 +174,8 @@ impl Args {
                 #[cfg(feature = "fake-phone")]
                 "--fake-google" => out.fake_google = Some(value()?),
                 #[cfg(feature = "fake-phone")]
+                "--fake-after" => out.fake_after = Some(PathBuf::from(value()?)),
+                #[cfg(feature = "fake-phone")]
                 "--fake-unplug" => {
                     let value = value()?;
                     let parsed = value
@@ -185,7 +193,9 @@ impl Args {
             }
         }
         #[cfg(feature = "fake-phone")]
-        if (out.fake_google.is_some() || out.fake_unplug.is_some()) && out.fake_phone.is_none() {
+        if (out.fake_google.is_some() || out.fake_unplug.is_some() || out.fake_after.is_some())
+            && out.fake_phone.is_none()
+        {
             return Err(
                 "a stand-in for Google's server and a pulled cable are for the pretend phone only: --fake-phone STATE"
                     .into(),
@@ -399,8 +409,14 @@ impl Watch for Wire<'_> {
     }
 
     fn go_on(&mut self, what: &'static str) -> bool {
+        // A wait for the phone after the write only reads: a quit (or the
+        // end of the input) ends it, a cancel does not
+        if what == "first-start" || what == "restart" {
+            return !DEAF.load(Ordering::SeqCst) && !matches!(self.lines.front(), Front::Quit);
+        }
         // A dry run only reads and is soon over: it is finished, not cut
-        // off. A write is never cut off from here: what was begun is sent
+        // off. A write is never cut off from here: what was begun is sent,
+        // and neither is a tool of the release that runs after it
         if what != "download" && what != "check" {
             return true;
         }
@@ -638,6 +654,17 @@ struct Driver<P: Phones> {
     listed: Vec<String>,
     /// The phone the flow last looked at.
     chosen: Option<String>,
+    /// This computer's programs and folders for the steps after the write,
+    /// in a run that writes (none in a pretend run without stand-ins).
+    seams: Option<Seams>,
+    /// The key the phone will take from this computer.
+    key: Option<after::Key>,
+    /// The factory image this run checked, where it is on this computer.
+    factory_path: Option<PathBuf>,
+    /// The steps after the write, once the write is done or a record of
+    /// unfinished ones was found at `start`. While it is here, its screen
+    /// is the one on show.
+    after: Option<After>,
 }
 
 enum Found {
@@ -664,7 +691,9 @@ fn word(s: &str) -> String {
 
 impl<P: Phones> Driver<P> {
     fn screen(&self) {
-        if let Some(started) = &self.started {
+        if let Some(after) = &self.after {
+            say(json!({"type": "screen", "screen": after.screen()}));
+        } else if let Some(started) = &self.started {
             say(json!({"type": "screen", "screen": started.flow.screen()}));
         }
     }
@@ -763,14 +792,81 @@ impl<P: Phones> Driver<P> {
         // and nothing a message says
         // The app draws the core's question of what slot B holds, so a
         // phone on slot B is asked about rather than stopped
+        // In a run that writes, the key the phone will take from this
+        // computer goes into slot B's initramfs, and the steps after the
+        // write follow when the release ships the tools for them
+        if self.may_write {
+            if let Some(seams) = &self.seams {
+                self.key = Some(after::choose_key(seams).map_err(|e| {
+                    Fatal(format!(
+                        "this computer has no SSH key for the phone, and none could be made: {e}"
+                    ))
+                })?);
+            }
+        }
         let options = FlowOptions {
             reinstall,
             asks_what_slot_b_holds: true,
             write: self.may_write,
+            owner_ssh_key: self.key.as_ref().map(|k| k.public.clone()),
+            after_write_steps: self.key.is_some() && after::release_has_tools(&dir),
             ..Default::default()
         };
         let flow = Flow::begin(&bundle.files(), bundle.index.as_deref(), &trusted, options);
+        // A setup after a write that did not finish, on this computer, for
+        // this phone model: offered before a new install begins
+        if let (Some(seams), Some(key), Some(release)) = (&self.seams, &self.key, flow.release()) {
+            let codename = &release.manifest().codename;
+            if let Some(record) = after::load_record(seams, codename).filter(|r| !r.finished()) {
+                self.after = Some(After::resume(
+                    seams.clone(),
+                    key.clone(),
+                    release.clone(),
+                    dir.clone(),
+                    record,
+                ));
+            }
+        }
         self.started = Some(Started { flow, dir });
+        Ok(())
+    }
+
+    /// The write is done: the steps after it come next, when this run has
+    /// them (a run that writes, a release that ships the tools).
+    fn after_the_write(&mut self) -> Res<()> {
+        let (Some(started), Some(seams), Some(key)) = (&self.started, &self.seams, &self.key)
+        else {
+            return Ok(());
+        };
+        let flow = &started.flow;
+        let (Some(release), Some(phone), Some(zip), Some(path)) = (
+            flow.release(),
+            flow.pinned_phone(),
+            flow.factory_zip_verified(),
+            self.factory_path.clone(),
+        ) else {
+            return Ok(());
+        };
+        if flow.screen().state != "installed" || !after::release_has_tools(&started.dir) {
+            return Ok(());
+        }
+        let m = release.manifest();
+        let written = after::Written {
+            codename: m.codename.clone(),
+            release: m.version.clone(),
+            device_name: m.device_name.clone().unwrap_or_else(|| m.codename.clone()),
+            phone: phone.digest().to_string(),
+            factory_zip: path,
+            factory_sha256: zip.sha256.clone(),
+        };
+        self.after = Some(After::after_write(
+            seams.clone(),
+            key.clone(),
+            release.clone(),
+            started.dir.clone(),
+            flow.screen(),
+            written,
+        )?);
         Ok(())
     }
 
@@ -818,8 +914,12 @@ impl<P: Phones> Driver<P> {
         let Some(started) = self.started.as_ref() else {
             return Err("the install has not started".into());
         };
-        let asks = started.flow.screen().action;
+        let asks = match &self.after {
+            Some(after) => after.screen().action,
+            None => started.flow.screen().action,
+        };
         let fits = match kind {
+            "after" => asks == "after",
             "acknowledge" | "decline" => asks == "acknowledge",
             "read-phone" => asks == "read-phone",
             "slot-b" => asks == "slot-b",
@@ -854,6 +954,17 @@ impl<P: Phones> Driver<P> {
             .into());
         }
         match kind {
+            "after" => {
+                let answer = text(message, "answer").unwrap_or_default().to_string();
+                let Some(after) = self.after.as_mut() else {
+                    return Ok(());
+                };
+                after.act(&answer, &mut Wire::new(&mut self.lines))?;
+                if after.forgotten() {
+                    // A new install begins: the flow's first screen
+                    self.after = None;
+                }
+            }
             "acknowledge" => self.flow().acknowledge_warning()?,
             "decline" => self.flow().decline_warning()?,
             "read-phone" => {
@@ -909,14 +1020,23 @@ impl<P: Phones> Driver<P> {
                     return Ok(());
                 };
                 let name = started.flow.screen().file.map(|f| f.name);
+                let name = name.ok_or("the flow names no file to download")?;
                 download_factory_zip(
                     &mut started.flow,
                     &self.fetcher,
                     self.proxied,
                     self.work_dir.as_deref(),
-                    &name.ok_or("the flow names no file to download")?,
+                    &name,
                     &mut Wire::new(&mut self.lines),
                 )?;
+                if started.flow.factory_zip_verified().is_some() {
+                    // Where download_factory_zip keeps a file the core verified
+                    self.factory_path = self
+                        .work_dir
+                        .clone()
+                        .or_else(default_work_dir)
+                        .map(|d| d.join("factory").join(&name));
+                }
             }
             "take-file" => {
                 let path = Path::new(text(message, "path").ok_or("take-file needs \"path\".")?);
@@ -928,6 +1048,9 @@ impl<P: Phones> Driver<P> {
                 };
                 if !take_factory_zip(&mut started.flow, path, &mut Wire::new(&mut self.lines))? {
                     return Err(format!("There is no file {}", path.display()).into());
+                }
+                if started.flow.factory_zip_verified().is_some() {
+                    self.factory_path = Some(path.to_path_buf());
                 }
             }
             "answers" => {
@@ -1019,6 +1142,7 @@ impl<P: Phones> Driver<P> {
                     match block_on(walk_images(&mut session, &release, &started.dir, &mut wire)) {
                         Ok(true) => {
                             started.flow.write_done(session)?;
+                            self.after_the_write()?;
                         }
                         Ok(false) => {
                             let gone = Error::Transport(
@@ -1051,7 +1175,13 @@ impl<P: Phones> Driver<P> {
     }
 }
 
-fn drive<P: Phones>(phones: P, trust: Trust, fetcher: Fetcher, args: Args) -> (P, ExitCode) {
+fn drive<P: Phones>(
+    phones: P,
+    trust: Trust,
+    fetcher: Fetcher,
+    seams: Option<Seams>,
+    args: Args,
+) -> (P, ExitCode) {
     // At once, before a release is read or anything is looked at
     say(json!({
         "type": "hello",
@@ -1074,6 +1204,10 @@ fn drive<P: Phones>(phones: P, trust: Trust, fetcher: Fetcher, args: Args) -> (P
         started: None,
         listed: Vec::new(),
         chosen: None,
+        seams,
+        key: None,
+        factory_path: None,
+        after: None,
     };
     let code = match driver.run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -1116,12 +1250,54 @@ pub fn run(args: &[&str]) -> ExitCode {
             (Err(e), _) | (_, Err(e)) => return fatal(&e.to_string()),
         };
         eprintln!("Pretend phones ({states}), held in memory. No USB device is opened.");
-        let (phones, code) = drive(phones, test_key, fetcher, args);
+        // The steps after a write run only with stand-ins for this
+        // computer's programs: a pretend run never reaches NetworkManager
+        let seams = match &args.fake_after {
+            None => None,
+            Some(dir) => match pretend_seams(dir) {
+                Ok(seams) => Some(seams),
+                Err(e) => return fatal(&e),
+            },
+        };
+        let (phones, code) = drive(phones, test_key, fetcher, seams, args);
         phones.record();
         return code;
     }
     let fetcher = Fetcher::google(args.proxy.clone());
-    drive(Usb::default(), release_keys, fetcher, args).1
+    let seams = if args.write { Seams::system() } else { None };
+    drive(Usb::default(), release_keys, fetcher, seams, args).1
+}
+
+/// The stand-ins a pretend run's steps after the write use: `nmcli` and
+/// `ssh-keygen` in `dir`, and the waits in `dir/waits` (`first_start=2`,
+/// `restart=2`, `settle=1`, `poll_ms=50`).
+#[cfg(feature = "fake-phone")]
+fn pretend_seams(dir: &Path) -> Result<Seams, String> {
+    let mut waits = after::Waits::default();
+    let text = std::fs::read_to_string(dir.join("waits")).unwrap_or_default();
+    for (key, value) in text
+        .split_whitespace()
+        .filter_map(|w| w.split_once('='))
+        .filter_map(|(k, v)| Some((k, v.parse::<u64>().ok()?)))
+    {
+        match key {
+            "first_start" => waits.first_start = value,
+            "restart" => waits.restart = value,
+            "settle" => waits.settle = value,
+            "poll_ms" => waits.poll = Duration::from_millis(value),
+            _ => {}
+        }
+    }
+    for program in ["nmcli", "ssh-keygen"] {
+        if !dir.join(program).is_file() {
+            return Err(format!(
+                "--fake-after {}: no stand-in {program} there",
+                dir.display()
+            ));
+        }
+    }
+    Seams::with_programs(dir.join("nmcli"), dir.join("ssh-keygen"), waits)
+        .ok_or_else(|| "a pretend run's steps after the write need HOME".to_string())
 }
 
 #[cfg(test)]
@@ -1175,6 +1351,7 @@ mod tests {
             vec!["--release", "DIR", "--fake-phone", "ready"],
             vec!["--fake-google", "127.0.0.1:1"],
             vec!["--fake-unplug", "flash:userdata:1"],
+            vec!["--fake-after", "DIR"],
         ] {
             assert!(Args::parse(&args).is_err(), "{args:?}");
         }
@@ -1185,6 +1362,8 @@ mod tests {
     fn the_stand_in_for_google_is_for_the_pretend_phone_only() {
         assert!(Args::parse(&["--fake-google", "127.0.0.1:1"]).is_err());
         assert!(Args::parse(&["--fake-unplug", "flash:userdata:1"]).is_err());
+        assert!(Args::parse(&["--fake-after", "DIR"]).is_err());
+        assert!(Args::parse(&["--fake-phone", "ready", "--fake-after", "DIR"]).is_ok());
         assert!(Args::parse(&["--fake-phone", "ready", "--fake-unplug", "flash"]).is_err());
         let args = Args::parse(&["--fake-phone", "ready", "--fake-unplug", "flash:userdata:2"]);
         assert_eq!(

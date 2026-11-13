@@ -197,6 +197,13 @@ impl PhoneId {
     pub fn of_serial(serial: &str) -> Option<Self> {
         (!serial.is_empty()).then(|| PhoneId(sha256_hex(serial.as_bytes())))
     }
+    /// The digest itself, as lower-case hex: what a later step compares the
+    /// phone that answers with (over USB SSH, the phone works out the same
+    /// digest of the serial its bootloader handed the kernel). It still
+    /// identifies the phone: keep it private, as the radio backup.
+    pub fn digest(&self) -> &str {
+        &self.0
+    }
 }
 
 impl core::fmt::Debug for PhoneId {
@@ -519,6 +526,12 @@ pub struct PhoneOptions {
     /// The session that writes is refused with it before anything is sent
     /// ([`Error::OverrideOutsideDryRun`]).
     pub maintainer_skip_bootloader_slot_check: bool,
+    /// This computer's SSH public key (one OpenSSH line), appended to slot
+    /// B's initramfs as `tools/install-phone` appends it
+    /// ([`crate::ramdisk_key`]): the image that carries the vendor ramdisk
+    /// (`vendor_kernel_boot`, else `vendor_boot`) is written with it, and
+    /// every other image as the release signed it.
+    pub owner_ssh_key: Option<String>,
 }
 
 impl Default for PhoneOptions {
@@ -528,8 +541,22 @@ impl Default for PhoneOptions {
             reinstall: false,
             bootloader_slots_confirmed: None,
             maintainer_skip_bootloader_slot_check: false,
+            owner_ssh_key: None,
         }
     }
+}
+
+/// The boot image that carries slot B's vendor ramdisk, where the owner's
+/// key goes: `vendor_kernel_boot`, or `vendor_boot` on a phone without one.
+/// Its place in the release's writes.
+pub fn ramdisk_write(m: &Manifest) -> Option<usize> {
+    ["vendor_kernel_boot_b", "vendor_boot_b"]
+        .iter()
+        .find_map(|name| {
+            m.boot_writes
+                .iter()
+                .position(|w| w.partition.name() == *name)
+        })
 }
 
 /// What the read-only checks found, for the confirmation screen.
@@ -590,6 +617,8 @@ pub struct Session<T: Transport> {
     /// piece this session took carried them.
     answers: Option<RootAnswers>,
     answers_sent: Vec<bool>,
+    /// The owner's key, and the boot write it is appended to.
+    owner_key: Option<(String, usize)>,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -667,6 +696,28 @@ impl<T: Transport> Session<T> {
             .map(|w| w.partition.name().to_string())
             .collect();
         flashable.push(m.root_image.partition.name().to_string());
+        // The owner's key goes into one image, and only one that carries
+        // no AVB footer: a signed image changed by a byte no longer passes
+        let owner_key = match options.owner_ssh_key {
+            None => None,
+            Some(key) => {
+                let at = ramdisk_write(m).ok_or_else(|| {
+                    Error::Refused("this release has no image that carries slot B's initramfs, so the SSH key can't be added".into())
+                })?;
+                if m.boot_writes[at].partition_size.is_some() {
+                    return Err(Error::Refused(format!(
+                        "{} carries an AVB footer, so the SSH key can't be added to it",
+                        m.boot_writes[at].source
+                    )));
+                }
+                if !crate::firstboot::is_ssh_public_key(&key) {
+                    return Err(Error::Refused(
+                        "the SSH key for slot B's initramfs is not a single OpenSSH public key line".into(),
+                    ));
+                }
+                Some((key, at))
+            }
+        };
         let mut client = Client::for_session(transport, flashable, dry_run);
         let serial = client.getvar("serialno").await?;
         if PhoneId::of_serial(&serial).as_ref() != Some(expected) {
@@ -799,6 +850,7 @@ impl<T: Transport> Session<T> {
             reach: WriteReach::Nothing,
             answers: None,
             answers_sent: Vec::new(),
+            owner_key,
         })
     }
 
@@ -1095,7 +1147,27 @@ impl<T: Transport> Session<T> {
             ));
         }
         let partition = self.release.manifest().boot_writes[next].partition.clone();
-        match self.write(&partition, image.bytes).await {
+        // The image that carries the initramfs, with the owner's key: made
+        // here from the verified bytes, checked against its partition and
+        // the download limit before anything of it is sent
+        let keyed = match &self.owner_key {
+            Some((key, at)) if *at == next => {
+                let keyed = crate::ramdisk_key::with_owner_key(image.bytes, key)?;
+                let psize = self.boot_partition_sizes[next];
+                if keyed.len() as u64 > psize || keyed.len() as u64 > self.facts.max_download_size {
+                    return Err(Error::Phone(format!(
+                        "{} with the SSH key is {} bytes, larger than {} ({psize} bytes) or the phone's max-download-size",
+                        self.release.manifest().boot_writes[next].source,
+                        keyed.len(),
+                        partition.name()
+                    )));
+                }
+                Some(keyed)
+            }
+            _ => None,
+        };
+        let bytes = keyed.as_deref().unwrap_or(image.bytes);
+        match self.write(&partition, bytes).await {
             Ok(_) => {
                 self.state = State::Boot(next + 1);
                 Ok(())
@@ -1617,9 +1689,11 @@ mod tests {
             reinstall,
             bootloader_slots_confirmed,
             maintainer_skip_bootloader_slot_check,
+            owner_ssh_key,
         } = PhoneOptions::default();
         assert!(!reinstall && !maintainer_skip_bootloader_slot_check);
         assert_eq!(bootloader_slots_confirmed, None);
+        assert_eq!(owner_ssh_key, None);
     }
 
     /// A phone that answers every command with the packets it was given.

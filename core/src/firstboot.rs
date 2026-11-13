@@ -186,7 +186,7 @@ pub fn sha512_crypt(password: &[u8], salt: &str) -> Result<String> {
     Ok(out)
 }
 
-fn is_ssh_public_key(line: &str) -> bool {
+pub(crate) fn is_ssh_public_key(line: &str) -> bool {
     const KINDS: [&str; 7] = [
         "ssh-ed25519",
         "ssh-rsa",

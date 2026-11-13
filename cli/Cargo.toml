@@ -28,6 +28,10 @@ required-features = ["fake-phone"]
 name = "json_mode"
 required-features = ["fake-phone"]
 
+[[test]]
+name = "after_write"
+required-features = ["fake-phone"]
+
 [dependencies]
 omamobile-installer-core = { path = "../core" }
 omamobile-installer-usb = { path = "../usb" }

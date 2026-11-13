@@ -235,7 +235,7 @@ Flickable {
                     Layout.fillWidth: true
                     text: modelData.label
                     enabled: !backend.busy
-                    onClicked: backend.answerSlotB(modelData.answer)
+                    onClicked: backend.answerChoice(modelData.answer)
                 }
             }
         }

@@ -1,0 +1,11 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Stand-in for ssh-keygen -t ed25519 -N "" -C COMMENT -f FILE -q
+set -u
+P=${OMAINSTALL_PRETEND_PHONE:?the stand-ins run only in a test}
+echo "ssh-keygen $*" >> "$P/log"
+file="" comment=""
+while (($#)); do case $1 in -f) file=$2; shift ;; -C) comment=$2; shift ;; esac; shift; done
+[[ -n $file && ! -e $file ]] || { echo "ssh-keygen stand-in: no -f, or $file exists" >&2; exit 1; }
+echo "-----BEGIN OPENSSH PRIVATE KEY----- (a stand-in, not a key)" > "$file"; chmod 600 "$file"
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlaceholderPlaceholderPlaceholderPlacehol $comment" > "$file.pub"

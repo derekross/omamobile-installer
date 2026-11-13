@@ -1906,3 +1906,115 @@ fn a_locked_phone_on_slot_b_answered_as_a_reinstall_is_shown_the_unlock_steps() 
     assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
     nothing_written(&phone);
 }
+
+// ---- This computer's SSH key in slot B's initramfs ------------------------
+
+const KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlaceholderPlaceholderPlaceholderPlacehol installer";
+
+fn with_key(key: &str) -> FlowOptions {
+    FlowOptions {
+        owner_ssh_key: Some(key.into()),
+        ..writing()
+    }
+}
+
+#[test]
+fn the_ssh_key_is_added_to_the_initramfs_image_and_every_other_byte_is_the_releases() {
+    let bundle = TestBundle::new();
+    let phone = ready();
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        with_key(KEY),
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
+    // The confirmation says which image is changed, and how
+    let body = flow.screen().body.join("\n");
+    assert!(
+        body.contains("vendor_kernel_boot_b is written with this computer's SSH public key added to the initramfs it carries"),
+        "{body}"
+    );
+    drive(&mut flow, &bundle, &phone, "cheetah", "");
+    assert_eq!(flow.screen().state, "installed", "{:?}", flow.step());
+    let mut ours = OURS.map(str::to_string).to_vec();
+    ours.sort();
+    assert_eq!(phone.written(), ours);
+    for (name, size, _) in IMAGES {
+        let part = phone.partition(&format!("{name}_b"));
+        let want = if name == "vendor_kernel_boot" {
+            omamobile_installer_core::ramdisk_key::with_owner_key(bundle.image(name), KEY).unwrap()
+        } else {
+            bundle.image(name).to_vec()
+        };
+        assert_eq!(want.len(), size, "the archive fits the ramdisk's last page");
+        assert!(part[..want.len()] == want[..], "{name}_b");
+        assert!(
+            part[want.len()..].iter().all(|b| *b == SENTINEL),
+            "{name}_b"
+        );
+    }
+    assert_ne!(
+        &phone.partition("vendor_kernel_boot_b")[..IMAGES[3].1],
+        bundle.image("vendor_kernel_boot")
+    );
+    only_our_commands(&phone);
+}
+
+#[test]
+fn without_a_key_the_images_are_the_releases_and_the_confirmation_says_nothing_of_one() {
+    let bundle = TestBundle::new();
+    let phone = ready();
+    let flow = run(&bundle, &phone, writing());
+    assert_eq!(flow.screen().state, "installed");
+    holds_the_release(&bundle, &phone);
+    let at_confirm = flow_at(&bundle, &ready(), "confirm");
+    assert!(!at_confirm.screen().body.join(" ").contains("SSH"));
+}
+
+#[test]
+fn a_key_that_is_not_one_public_key_line_or_an_image_with_a_footer_writes_nothing() {
+    // A private key, two lines, nothing: the dry run's session refuses it,
+    // before the confirmation, with nothing written
+    for key in [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "ssh-ed25519 AAAA\nssh-rsa BBBB",
+        "",
+    ] {
+        let bundle = TestBundle::new();
+        let phone = ready();
+        let flow = run(&bundle, &phone, with_key(key));
+        assert_eq!(
+            flow.screen().stop,
+            Some("dry-run-refused"),
+            "{key:?}: {:?}",
+            flow.step()
+        );
+        nothing_written(&phone);
+    }
+    // The image that carries the initramfs, signed with an AVB footer
+    let bundle = TestBundle::build(
+        |m| {
+            m["install"]["writes"][3]["partition_size"] = json!(12 << 10);
+        },
+        |c| c.replace("AVB_FOOTERS=\"", "AVB_FOOTERS=\"vendor_kernel_boot:0x3000 "),
+    );
+    bundle
+        .verify()
+        .expect("a release whose initramfs image has a footer");
+    let phone = ready();
+    let flow = run(&bundle, &phone, with_key(KEY));
+    assert_eq!(
+        flow.screen().stop,
+        Some("dry-run-refused"),
+        "{:?}",
+        flow.step()
+    );
+    let said = format!("{:?}", flow.screen());
+    assert!(
+        said.contains("carries an AVB footer, so the SSH key can't be added"),
+        "{said}"
+    );
+    nothing_written(&phone);
+}

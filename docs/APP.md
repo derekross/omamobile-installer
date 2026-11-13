@@ -1,6 +1,6 @@
 # The desktop app: design
 
-Status (2026-11-13): **the app and the tool's side of the protocol below (`omamobile-install json`, `cli/src/json.rs`) are both built, and tested against each other with the tool's pretend phone. Neither has been run with a real phone: the tool's USB path in this mode has never listed or opened a device.** Started as it is by default, the window goes to the dry run and no further. Started with `--write` it goes on through the flow's write path (DESIGN §11), which has not run on a real phone either. What works, what has never run and the app's first attended run are in [app/docs/STATUS.md](../app/docs/STATUS.md).
+Status (2026-11-13): **the app and the tool's side of the protocol below (`omamobile-install json`, `cli/src/json.rs`) are both built, and tested against each other with the tool's pretend phone. Neither has been run with a real phone: the tool's USB path in this mode has never listed or opened a device.** Started as it is by default, the window goes to the dry run and no further. Started with `--write` it goes on through the flow's write path (DESIGN §11), which has not run on a real phone either, and then, for a release that ships the tools for them, through the steps after the write (DESIGN §13: the USB connection, the first start, the radio backup, the firmware, a restart and a check, with the release's own tools), which have run against stand-ins only. What works, what has never run and the app's first attended run are in [app/docs/STATUS.md](../app/docs/STATUS.md).
 
 `omainstall` (`app/`) is a Qt Quick window in the style of Omarchy's own apps. Its one job is to guide a person through installing Omarchy Mobile on a phone plugged into this computer. It is a third front end for the flow in [DESIGN.md](DESIGN.md), next to the command-line tool and the web page, and DESIGN §7 ("What a front end must do") applies to it.
 
@@ -36,13 +36,13 @@ The app starts the tool as a child process and talks to it over the child's stan
 
 **Starting it.** `omamobile-install json`, with `--write` when the app was started as `omainstall open --write` and `--release DIR` when it was given a directory. Those are all the arguments the app ever passes. `omainstall check` never passes `--write`.
 
-**The mode's arguments are a closed list:** `--release DIR`; `--write` (the flow may write: §3.6); and two the app does not pass and a script may, `--work-dir DIR` (where a download of Google's factory image is kept; by default the user's cache directory, as for `install`) and `--proxy http://HOST:PORT` (the download's route, as for `install`). A build with the `fake-phone` feature also takes `--fake-phone STATES`, `--fake-google 127.0.0.1:PORT` and `--fake-unplug COMMAND:N` (§10); a build that ships has none of them. Any other argument is refused before `hello`, with a `fatal` and exit status 1: there is no argument that names a phone (`--serial`), none for the owner's statement about a bootloader slot (`--bootloader-slots-match`), and none for the maintainer's override (§3.6).
+**The mode's arguments are a closed list:** `--release DIR`; `--write` (the flow may write: §3.6); and two the app does not pass and a script may, `--work-dir DIR` (where a download of Google's factory image is kept; by default the user's cache directory, as for `install`) and `--proxy http://HOST:PORT` (the download's route, as for `install`). A build with the `fake-phone` feature also takes `--fake-phone STATES`, `--fake-google 127.0.0.1:PORT`, `--fake-unplug COMMAND:N` and `--fake-after DIR` (§10); a build that ships has none of them. Any other argument is refused before `hello`, with a `fatal` and exit status 1: there is no argument that names a phone (`--serial`), none for the owner's statement about a bootloader slot (`--bootloader-slots-match`), and none for the maintainer's override (§3.6).
 
 **Without `--release`** the tool still says `hello`, so `omainstall check` works anywhere. `start` then fails with a `fatal`: this version can't find or fetch a release by itself (§9).
 
 ## 3. The protocol
 
-Protocol number **3**. (Number 2 was the same protocol without the question of what slot B holds: no `choices` in the screen, no `slot-b` action and message; a phone on slot B in a run not said to be a reinstall stopped at `runs-from-slot-b`. Number 1 was 2 without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. Sides that speak different numbers refuse each other, §3.2.)
+Protocol number **4**. (Number 3 was the same protocol without the steps after the write: no action `after` and no message of that type, and the last screen of a write named no action. Number 2 was the same protocol without the question of what slot B holds: no `choices` in the screen, no `slot-b` action and message; a phone on slot B in a run not said to be a reinstall stopped at `runs-from-slot-b`. Number 1 was 2 without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. Sides that speak different numbers refuse each other, §3.2.)
 
 ### 3.1 Framing
 
@@ -56,8 +56,8 @@ Protocol number **3**. (Number 2 was the same protocol without the question of w
 ### 3.2 The handshake, and versions
 
 ```
-tool -> app   {"type":"hello","protocol":3,"tool":"omamobile-install","version":"0.0.1","writes":false}
-app -> tool   {"type":"hello","protocol":3,"app":"omainstall","version":"0.1.0"}     (not answered)
+tool -> app   {"type":"hello","protocol":4,"tool":"omamobile-install","version":"0.0.1","writes":false}
+app -> tool   {"type":"hello","protocol":4,"app":"omainstall","version":"0.1.0"}     (not answered)
 app -> tool   {"type":"start","reinstall":false}
 tool -> app   {"type":"screen","screen":{...}}
 ```
@@ -77,7 +77,7 @@ tool -> app   {"type":"screen","screen":{...}}
 | --- | --- | --- |
 | `hello` | `protocol` (number), `tool` (text), `version` (text), `writes` (true or false) | §3.2 |
 | `screen` | `screen`: the core's `Screen` | The flow's current screen. Ends the action in hand (§3.5) |
-| `progress` | `what` (text), `done` (number), `total` (number) | Bytes done and bytes in all, for the action in hand. `what` is `download` (Google's factory image arriving), `check` (a file handed in being hashed), `dry-run` (the release's images on disk being checked and walked through the dry run: each file twice, once to check it and once through the session; none is sent when the images are not there), and in a run that writes `verify` (every file of the release checked again, before the first write) and then `write` (the same files as they are sent to the phone). Another word is shown as plain "Working". `total` 0 means the end is not known. A few a second at most |
+| `progress` | `what` (text), `done` (number), `total` (number) | Bytes done and bytes in all, for the action in hand. `what` is `download` (Google's factory image arriving), `check` (a file handed in being hashed, or the factory image hashed again before the firmware), `dry-run` (the release's images on disk being checked and walked through the dry run: each file twice, once to check it and once through the session; none is sent when the images are not there), and in a run that writes `verify` (every file of the release checked again, before the first write) and then `write` (the same files as they are sent to the phone). After the write (DESIGN §13), in seconds rather than bytes: `first-start` and `restart` (waited, of the bound), `backup` and `firmware` (run so far, `total` 0). Another word is shown as plain "Working". `total` 0 means the end is not known. A few a second at most |
 | `phones` | `title` (text), `phones`: `[{"id": text, "label": text}]`, at least one | More than one phone in Fastboot Mode answered a `read-phone` that named none, and none of them is the phone the flow looked at before. `title` is the question, in the tool's words. `id` is a name the tool makes up for this run (a number, as text) and stays that phone's for the run; `label` is what the person can tell the phones apart by: the product name the phone gives over USB, and the USB bus and port it is on. **Neither is a serial number** (the core prints none, README "Safety") |
 | `problems` | `problems`: `[{"field": text, "message": text}]` | The core's objections to the owner's answers, as `AnswerProblem` serialises: `field` is `username`, `password`, `hostname`, `timezone`, `wifi_ssid` or `wifi_psk`. The flow stays at `answers` |
 | `sent` | `command` (text) | Only during `write`: a command that is not a question was sent by the session that writes, as the phone received it (`download:00004000`, `flash:boot_b`, `set_active:b`, `reboot`). The pieces of `userdata` are not said this way but as `piece` |
@@ -91,7 +91,9 @@ tool -> app   {"type":"screen","screen":{...}}
 
 ```
 state     text          warning, phone, slot-b, unlock, google-terms, factory-image, answers, dry-run, done,
-                        confirm, write, installed (those three only in a run that writes), stopped
+                        confirm, write, installed (those three only in a run that writes), stopped;
+                        after the write (DESIGN §13, made by the tool): after-resume, network, first-start,
+                        backup, firmware, restart, ready
 stop      text | null   for `stopped`: the stop's id (DESIGN §4)
 retry     text | null   for `stopped`: whether starting the installer again can get past the stop:
                         whenever (at any time), after-fix (once what the message says is done),
@@ -108,10 +110,11 @@ plan      [text]
 footer    [text]
 choices   [{ answer: text, label: text }]
                         for `slot-b`: the answers to the core's question, in order; the label is the
-                        core's words for the button, the answer what the app sends back. Empty on
-                        every other screen
+                        core's words for the button, the answer what the app sends back. For `after`:
+                        the owner's choices on a screen of the steps after the write. Empty on every
+                        other screen
 action    text          acknowledge, read-phone, slot-b, accept-terms, download, take-file, answers,
-                        dry-run, confirm, write, none
+                        dry-run, confirm, write, after, none
 ```
 
 The app checks that every key is there and of that type. A screen that lacks one is malformed (§6): a missing `notice` must never be read as "no notice". Keys the app does not know are carried along and ignored.
@@ -137,6 +140,7 @@ One message per action that `Screen.action` names. The app sends an action only 
 | `dry-run` | `{"type":"dry-run"}` | The phone the flow looked at (or the only one connected) is opened; then `dry_run`, the release's images walked through it when they are on disk, `dry_run_done` or `dry_run_failed`. No phone in Fastboot Mode: `error`, and the step stays open (the flow has no "no phone" at this step) |
 | `confirm` | `{"type":"confirm","typed":"<what the owner typed>"}` | `confirm_install(typed)`, with the text as it is: the phone's codename takes the flow to `write`, anything else (an empty text among it) to the core's stop `not-confirmed`. A `typed` that is missing or is not text: `error`, and the step stays open |
 | `write` | `{"type":"write"}` | The phone the flow looked at is opened; then `begin_write`, the one place a session that can write is opened; every file of the release checked, then sent through that session; `write_done` or `write_failed`. On the way `progress` (`verify`, then `write`), `sent`, `piece` and `account`. No phone in Fastboot Mode: `error`, and the step stays open. In a run that was not started with `--write` no screen ever names this action, so it is refused like any action out of turn |
+| `after` | `{"type":"after","answer":"<answer>"}`, the `answer` of one of the screen's `choices` | No flow step: the tool's steps after the write (DESIGN §13). `installed` offers `begin`; `after-resume` `go-on` and `forget` (which answers with the flow's first screen); `network` `add` (the tool adds the NetworkManager connection) and `myself`; `first-start` `wait`; `backup` `backup`; `firmware` `firmware`; `restart` `restart`. Each runs its step, with `progress` on the way, and answers with the next step's screen, or the same one with its `problem`. A missing or unknown `answer`: `error`, and the screen stays. A quit behind a wait (`first-start`, `restart`) ends the wait; behind `backup` or `firmware` it waits for the tool to finish, as behind a write |
 | any | `{"type":"quit"}` | Nothing. A download or the check of a file that is running is ended (a download as if cancelled, so its bytes are kept); a look at a phone or a dry run that is running is finished, since both only read and neither takes long. **A write that is running is finished: nothing sent to this mode cuts a write off, and neither does a reader that goes away.** A message the tool can no longer write (the app died) does not end it in the middle of a write; it leaves, with status 1, once the action in hand is over. The action in hand still gets its screen, and then the tool says `bye` |
 
 Also from the app: `hello` and `start` (§3.2). The end of the app's output (the tool's standard input closes) means `quit`.
@@ -160,6 +164,7 @@ After a screen whose `action` is `none` (a stop, or the end), nothing more is ta
 - **No write that the tool was not started for.** Whether the flow may write is said once, on the tool's own command line (`json --write`), which the app passes on only when it was itself started with `--write`. No message turns it on: `start` carries only `reinstall`, the tool reads no message for the switch, and `tools/check-shipping` holds both to one line each. A run without `--write` ends at the dry run, and its tests send it every message that could ask for a write, `confirm` and `write` among them, and end by reading the pretend phone's own record: `getvar`, the one read-only question of a locked phone, and nothing else.
 - **No write without the flow.** With `--write`, `write` is taken only when the flow's screen names it, which it does only after the dry run, the list of what will be written, and `confirm` with the phone's codename. The session that writes is the one `Flow::begin_write` opens (DESIGN §11); this mode opens none of its own. Which partitions are written is the core's: slot B's boot images and `userdata`.
 - **No write that is cut off.** No message cancels a write, and a `quit` or the end of the input behind one waits for it.
+- **Nothing after the write that the tool was not started for.** The steps after the write come only in a run started with `--write`, and only after its write or from its own record of one (`after-resume`); a run without `--write` makes no key, reads no record and runs none of the release's tools.
 - **No statement about a bootloader slot.** `--bootloader-slots-match` is `install`'s (DESIGN §6): this mode refuses it like any argument it does not have and has no message for it, so a phone that reports one bootloader slot's version stops in this mode, in the app and for a script alike.
 - **No command.** A `Screen` step's `command` is text for the person's own terminal. The app shows it and copies it to the clipboard on request. It has no way to run it, and no message sends it back.
 - **No address.** The app never sees where Google's file is fetched from. `Screen.link` and the quote's links are pages for the person, opened in their browser on their click, and only if they are `https`.
@@ -184,8 +189,8 @@ def send(**message):                    # one message; the screen that ends it
     while (reply := json.loads(tool.stdout.readline()))["type"] != "screen":
         print(reply)                    # progress, phones, problems or error
     return reply["screen"]
-assert json.loads(tool.stdout.readline())["protocol"] == 3
-tool.stdin.write('{"type":"hello","protocol":3,"app":"a script","version":"0"}\n')
+assert json.loads(tool.stdout.readline())["protocol"] == 4
+tool.stdin.write('{"type":"hello","protocol":4,"app":"a script","version":"0"}\n')
 zip = os.path.abspath("fixtures/selftest/factory/cheetah-test.260101.001-factory-31c2322a.zip")
 moves = {"acknowledge": {"type": "acknowledge"}, "read-phone": {"type": "read-phone"}, "accept-terms": {"type": "decline-terms"},
          "take-file": {"type": "take-file", "path": zip}, "dry-run": {"type": "dry-run"},
@@ -203,8 +208,8 @@ The app has two commands of its own with no display, for the same readers: `omai
 ### 3.8 An example
 
 ```
-<- {"type":"hello","protocol":3,"tool":"omamobile-install","version":"0.0.1","writes":false}
--> {"type":"hello","protocol":3,"app":"omainstall","version":"0.1.0"}
+<- {"type":"hello","protocol":4,"tool":"omamobile-install","version":"0.0.1","writes":false}
+-> {"type":"hello","protocol":4,"app":"omainstall","version":"0.1.0"}
 -> {"type":"start","reinstall":false}
 <- {"type":"screen","screen":{"state":"warning", ..., "action":"acknowledge"}}
 -> {"type":"acknowledge"}
@@ -256,7 +261,7 @@ One window, comfortable from 720x560, resizable. Text can be selected, and a scr
 From top to bottom:
 
 - **What this is** (DESIGN §7, rule 7): the app's name and which kind of run the window was started for. "Dry run" and "This run cannot write to a phone. It ends at a dry run."; or, started with `--write`, "Install" in the warning colour and "This run can write to a phone. It writes only after it has listed what it will write and you have typed the phone's codename."
-- **The stages** (warning, phone, factory image, about you, dry run, and in a run that writes a sixth, install), the current one marked, from `Screen.state`. Hidden on a stop.
+- **The stages** (warning, phone, factory image, about you, dry run, and in a run that writes a sixth, install, and a seventh, set up, for the steps after the write), the current one marked, from `Screen.state`. Hidden on a stop.
 - **The screen**, in the order the command-line tool prints it:
 
   | `Screen` | Drawn as |
@@ -285,6 +290,7 @@ From top to bottom:
 | `acknowledge` | I have read this. Go on | Stop here |
 | `read-phone` | Look at the phone | |
 | `slot-b` | (none: each of the core's `choices` is its own button, on the screen; none is set apart as the main one) | |
+| `after` | (none: as `slot-b`, each choice is its own button on the screen; a click sends `after` with its answer. While `firmware` runs the window holds, as during a write) | |
 | `accept-terms` | I accept. Download the file | I will download it myself |
 | `download` | Download | Choose a file I saved…; while it runs: Cancel |
 | `take-file` | Choose the file… | |
@@ -374,6 +380,8 @@ The app's own strings go through the `Translator` of the Omarchy conventions: En
 The runs that write (`--write`, against the pretend phone only): a whole install as a transcript, with the files all checked before the first command that writes, what the tool said it sent compared with what the phone received, and the six partitions written; anything but the codename, an empty text among it, stops with nothing written, and a `confirm` without `typed` or a `write` before the codename moves nothing; the pretend phone's cable pulled before the first write, among the boot images and inside `userdata`, each ending in the core's stop with slot B not made active; a `quit` written right behind a `write`, which waits for it; a phone that tells one bootloader slot, which stops with `--write` as without; and the hello's `writes`.
 
 A `fake-phone` build takes `json --fake-phone STATES [--fake-google 127.0.0.1:PORT] [--fake-unplug COMMAND:N]`, as `flow --fake-phone` does (`--fake-unplug flash:userdata:2` pulls the pretend phone's cable as the second command that starts with `flash:userdata` is sent): `STATES` is one of the pretend phone's states (`ready`, `locked`, `slot-b`, …), several with commas between them for several phones connected at once (`ready,slot-b`), or `none`. Such a run trusts the test bundle's key, opens no USB device and reaches a stand-in for Google's server or nothing. A build that ships has none of these arguments (a unit test of the mode's argument parser, in every build).
+
+**The steps after the write** (`cli/tests/after_write.rs`, the same feature): the built tool with `--write`, the release `fixtures/after` (the test bundle with stand-ins for the release's tools, signed with the test key), `--fake-after` naming stand-ins for `nmcli` and `ssh-keygen`, and a pretend phone that answers over "USB SSH" kept in a folder: the whole set-up step by step, a setup cut off and gone on with, one forgotten, another phone that answers, NetworkManager refusing, the key refused, a first start that runs out, a tool that is not the signed one (nothing runs), a backup that fails. `HOME` and the XDG folders are the test's own.
 
 **The app.** `app/bin/test` builds and runs one Qt Test binary, offscreen. It needs no phone, no USB and nothing from the internet. It first builds the tool with the `fake-phone` feature (cargo); without cargo it says that the tests against the real tool are skipped, and they report as skipped.
 
