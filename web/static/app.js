@@ -45,6 +45,13 @@ let busy = Promise.resolve(); // the action in progress, for the self-test to wa
 let standIn = null;
 const GOOGLE = "https://dl.google.com/";
 
+// What a build that is not the page as it ships may add to this script: how
+// a flow is begun, controls for a screen's action, and what the first status
+// line says once the installer is loaded. Nothing in this file sets any of
+// them, and the page as it ships loads no other script (tools/check-shipping
+// reads what it loads), so there all three stay empty.
+export const additions = { begin: null, controls: null, loaded: null };
+
 const show = (id, text, state) => {
   $(id).textContent = text;
   $(id).className = state;
@@ -77,7 +84,7 @@ async function start(tamper = "", slotOverride = false, fetches = false) {
     const files = await Promise.all(RELEASE_FILES.map((name) => bytes("release/" + name)));
     // The list of Google's builds, when the release has one
     const index = await bytes("release/factory-builds.json", true);
-    flow = core.InstallFlow.begin(...files, index, $("reinstall").checked);
+    flow = additions.begin ? additions.begin(files, index, $("reinstall").checked) : core.InstallFlow.begin(...files, index, $("reinstall").checked);
   }
   const text = flow.release();
   if (text) {
@@ -263,6 +270,8 @@ function answersForm() {
 }
 
 function controls(s) {
+  const added = additions.controls?.(s);
+  if (added) return added;
   const row = el("div", { className: "actions" });
   switch (s.action) {
     case "acknowledge":
@@ -726,12 +735,36 @@ async function selftest() {
   return result;
 }
 
+// For a script that sets `additions`: the flow and the phone as they are now,
+// and this script's own helpers. The page as it ships has no such script.
+export const page = {
+  core,
+  $,
+  el,
+  act,
+  button,
+  render,
+  start,
+  get flow() {
+    return flow;
+  },
+  get busy() {
+    return busy;
+  },
+  get phone() {
+    return phone;
+  },
+  set phone(picked) {
+    phone = picked;
+  },
+};
+
 // ---- Start ----------------------------------------------------------------
 
 async function main() {
   try {
     await init();
-    show("core", "loaded (no build of this page can write to a phone)", "ok");
+    show("core", additions.loaded ?? "loaded (this page cannot write to a phone)", "ok");
   } catch (e) {
     show("core", `the installer did not load: ${e.message ?? e}`, "bad");
     return;

@@ -66,7 +66,9 @@ use omamobile_installer_core::fastboot::{
 use omamobile_installer_core::flow::{
     AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen, WRITE_HELP,
 };
-use omamobile_installer_core::install::{flash_userdata_with_progress, UserdataStream};
+use omamobile_installer_core::install::{
+    flash_userdata_with_progress, UserdataStream, SEGMENT_CAP,
+};
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_core::text::plain;
 use omamobile_installer_core::{build_index, Error};
@@ -599,7 +601,8 @@ async fn walk_images<T: Transport>(
         }
     };
     let result =
-        flash_userdata_with_progress(session, &root, reader, Some(64 << 20), &mut progress).await;
+        flash_userdata_with_progress(session, &root, reader, Some(SEGMENT_CAP), &mut progress)
+            .await;
     if writing {
         for line in userdata_account(session.pieces()) {
             println!("    {line}");

@@ -14,6 +14,22 @@ openpgp = ["omamobile-installer-core/openpgp"]
 # Builds the fake phone from core/tests/support into the module so a headless
 # browser can run an install against it. Never in a release build.
 selftest = []
+# The page's write path, for an attended preview and its tests only: the
+# page's own WebUSB transport (web/src/webusb.rs) and the flow's write steps
+# (web/src/write_preview.rs). Never a default, and never in the page as it
+# ships: tools/check-shipping fails if the shipping module holds any of it
+# (docs/WEB-WRITE.md).
+web-write-preview = [
+    "web-sys/UsbConfiguration",
+    "web-sys/UsbInterface",
+    "web-sys/UsbAlternateInterface",
+    "web-sys/UsbEndpoint",
+    "web-sys/UsbDirection",
+    "web-sys/UsbEndpointType",
+    "web-sys/UsbInTransferResult",
+    "web-sys/UsbOutTransferResult",
+    "web-sys/UsbTransferStatus",
+]
 
 [dependencies]
 omamobile-installer-core = { path = "../core", default-features = false }

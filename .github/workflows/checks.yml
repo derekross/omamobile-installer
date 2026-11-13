@@ -1,7 +1,10 @@
 # The gate for every push and pull request: no identifiers, formatted, the
 # core's tests and the command-line tool's flow against the fake phone, the
 # web page built both ways and its self-test in a headless browser, and a
-# look at what ships: no way to write to a phone, no pretend phone. Nothing
+# look at what ships: no way to write to a phone, no pretend phone. Then the
+# page's write preview, a build that does not ship: its tests against a
+# pretend phone behind a pretend WebUSB device, and a look at it the other
+# way round (it holds the write path; the page that ships holds none). Nothing
 # here touches a USB device: the tests use a fake transport, and no step
 # lists or opens USB devices. Nothing here reaches Google: downloads go to
 # stand-ins on the runner, and the self-test's browser can resolve no host
@@ -113,6 +116,25 @@ jobs:
             "in a dry run only" \
             install fixtures/selftest --serial '<SERIAL>' --write --maintainer-skip-bootloader-slot-check
           rm -f out.txt err.txt
+      # The page's write preview (docs/WEB-WRITE.md): a second build, behind
+      # the cargo feature web-write-preview, that does not ship. Its tests
+      # build it with the test bundle and run the page's write path against
+      # a pretend phone behind a pretend USBDevice: in node, which has no
+      # USB, and in the headless browser of the self-test, which is started
+      # with WebUSB off (the page's test refuses a browser that has it).
+      - name: The write preview's tests, in node and in a headless browser
+        run: web/preview-test.sh
+      # Then the preview as it would be built for an attended run, read the
+      # other way round: it must hold the write path and say so, or the
+      # look for it in the shipping build above proves nothing. And the
+      # shipping page once more, built last, so that it is what is left in
+      # web/dist.
+      - name: The write preview holds the page's write path, and the page that ships none of it
+        run: |
+          web/build.sh web-write-preview
+          tools/check-shipping --preview
+          web/build.sh
+          tools/check-shipping --built --control target/debug/omamobile-install
       - name: The web page builds as it would ship, without the pretend phone
         run: |
           web/build.sh
