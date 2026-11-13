@@ -79,6 +79,9 @@ home=$(getent passwd "$user" | cut -d: -f6)
 [[ $(stat -c %u "$repo") == "$uid" ]] || die "the checkout is not $user's: $repo"
 
 cfs=/sys/kernel/config
+started=$(date +%s)
+signal=
+buses=()
 gname=omamobile-l3-$$
 g=$cfs/usb_gadget/$gname
 state_file=/run/omamobile-l3.state
@@ -147,7 +150,7 @@ remove_gadget() {   # remove_gadget DIR: one of this script's gadgets only
   if (( dry )); then
     put "" "$d/UDC"
     run rm -f "$d/configs/c.1/SourceSink.base" "$d/configs/c.1/ffs.link" "$d/os_desc/c.1"
-    printf '+ umount every FunctionFS mounted under %s (a test left mounted)\n' "$tmp"
+    printf '+ umount every FunctionFS mounted under %s (a test left mounted)\n' "${tmp:-$work/t}"
     run rmdir "$d/functions/SourceSink.base" "$d/configs/c.1/strings/0x409" "$d/configs/c.1" "$d/strings/0x409" "$d"
     return 0
   fi
@@ -172,11 +175,25 @@ stop_tests() {
   run pkill -KILL -u "$user" -f -- "--root $t/" 2>/dev/null || true
 }
 
+# The kernel's lines of this run: FunctionFS, the gadget, the virtual bus,
+# and nothing of any other USB device (whose serials are not for a paste)
+kernel_lines() {
+  (( dry )) && { printf '+ journalctl -k --since @%s (the lines of FunctionFS, the gadget and the virtual bus)\n' "$started"; return 0; }
+  local pat='f_fs|ffs_|functionfs|configfs|gadget|dummy_hcd|dummy_udc|udc_core|libcomposite' b
+  for b in "${buses[@]}"; do pat+="|usb $b-|usb usb$b:"; done
+  {
+    echo "--- the kernel's lines since $(date -d "@$started" +%T)"
+    { journalctl -k -q --no-pager -o short-monotonic --since "@$started" 2>/dev/null || dmesg 2>/dev/null; } |
+      grep -E "$pat" | grep -v -i 'serialnumber' | tail -n 400
+    echo "---"
+  } >> "$log_file" 2>/dev/null || true
+}
+
 cleanup() {
   local rc=$? m i
   trap - EXIT INT TERM HUP
   set +e
-  log "cleanup: putting the computer back"
+  log "cleanup: putting the computer back (exit $rc${signal:+, on SIG$signal})"
   [[ -n $broker_pid ]] && { kill "$broker_pid" 2>/dev/null; wait "$broker_pid" 2>/dev/null; }
   stop_tests
   (( made_gadget )) && remove_gadget "$g"
@@ -186,6 +203,7 @@ cleanup() {
   [[ -d $broker_dir ]] && run rm -rf -- "$broker_dir"
   [[ -n $tmp_made && -d $tmp_made ]] && run rm -rf -- "$tmp_made"
   (( dry )) || rm -f "$state_file"
+  kernel_lines
   log "cleanup: done (modules unloaded: ${LOADED[*]:-none})"
   (( dry )) || log "the log: $log_file"
   exit "$rc"
@@ -195,7 +213,8 @@ cleanup() {
 if [[ -r $state_file ]]; then
   declare -A old=()
   while IFS='=' read -r k v; do old[$k]=$v; done < "$state_file"
-  if [[ -n ${old[pid]:-} ]] && kill -0 "${old[pid]}" 2>/dev/null; then
+  # (a run is root's: kill -0 from another account says "no" for a live one)
+  if [[ -n ${old[pid]:-} && -d /proc/${old[pid]} ]]; then
     die "another run (pid ${old[pid]}) is going on"
   fi
   log "an earlier run was killed before it cleaned up; doing that first"
@@ -265,7 +284,10 @@ as_user cargo test --locked --release -p omamobile-linkd --test l3 --no-run >> "
   die "the build failed; see $log_file"
 
 trap cleanup EXIT
-trap 'exit 130' INT TERM HUP
+# (which signal ended a run is in the log: a closed terminal is a SIGHUP)
+trap 'signal=INT; exit 130' INT
+trap 'signal=TERM; exit 143' TERM
+trap 'signal=HUP; exit 129' HUP
 save_state
 
 # --- configfs and the rule ------------------------------------------------------
@@ -395,6 +417,7 @@ for speed in $speeds; do
     done
   fi
   [[ $udc == dummy_udc.* ]] || die "no dummy_udc appeared"
+  for b in /sys/devices/platform/dummy_hcd.*/usb*; do [[ -d $b ]] && buses+=("${b##*/usb}"); done
   for d in "$cfs"/usb_gadget/*; do
     [[ -d $d && $(cat "$d/UDC" 2>/dev/null) == "$udc" ]] && die "$udc is taken by ${d##*/}"
   done

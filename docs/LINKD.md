@@ -1,6 +1,6 @@
 # The install link's daemon
 
-Status (2026-11-13): **stage L2 built and tested on a laptop, against a socket pair and a scratch directory. Stage L3's code is written (the FunctionFS transport, `omamobile-link-gadget`, the host tests, `tools/l3-run-as-root`) and tested without root: against the socket pair, a fake configfs tree and the script's dry run. It has not yet run on FunctionFS: that is the maintainer's `sudo tools/l3-run-as-root` (§5). Nothing here has run on a phone.** These are stages L2 and L3 of Omarchy Mobile's [install link plan](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-LINK-PLAN.md) ("the plan" below): `omamobile-linkd`, the shell around the phone machine of the protocol crate ([LINK.md](LINK.md)), and `omamobile-install-link status|reopen`.
+Status (2026-11-13): **stage L2 built and tested on a laptop, against a socket pair and a scratch directory. Stage L3 has had one root run on a laptop (7.2.15, `dummy_hcd`): at super speed all twelve L3 tests passed on real FunctionFS; at high and full speed they failed at the gadget script's mount, fixed since and not yet run again (§5.6). Nothing here has run on a phone.** These are stages L2 and L3 of Omarchy Mobile's [install link plan](https://github.com/derekross/omarchy-mobile/blob/main/docs/INSTALL-LINK-PLAN.md) ("the plan" below): `omamobile-linkd`, the shell around the phone machine of the protocol crate ([LINK.md](LINK.md)), and `omamobile-install-link status|reopen`.
 
 `linkd/` is the crate `omamobile-linkd`. It applies no rule of the protocol: the frames, the messages, the phone's state machine and the start-up rules (`phone::reconcile`) are the crate's. The daemon reads the phone into what the machine asks for, carries out what the machine returns, in order, and moves the frames.
 
@@ -90,6 +90,7 @@ Anything but a peer's fixed lines ends its connection. The code is in these line
 | E11 | §3.3: a start that finds the hang marker leaves the gadget for that boot | The marker holds the boot id. Only a marker of an earlier boot skips, and the skip is kept on the tmpfs for the rest of that boot; a marker of this boot does not stop the next change | Without the boot id, a daemon killed inside `add` (E3's case, no hang) would make every later start in that boot skip the link |
 | E12 | §3.3: `remove` puts the gadget back "as the initramfs made it" | `add` records the gadget on the tmpfs (the UDC, the functions in order, `bcdDevice`, `os_desc`) and `remove` puts it back from that record, also when the gadget is unbound | When the daemon's files close with the function bound, FunctionFS takes the **whole gadget** off the bus (upstream `ffs_closed()` calls `unregister_gadget_item()`): the UDC file is then empty, and NCM and ACM are gone with the link until the next `remove`. So on the development phone a daemon that dies takes SSH with it until the unit starts it again or `ExecStopPost=` runs `remove`. The mount option `no_disconnect=1` would keep the gadget bound with the link deactivated instead; L3's "a dead daemon" line shows what this kernel does, and the plan should choose after it |
 | E13 | §5.7: `io_cancel` dequeues a write | The endpoint files are opened non-blocking, and every read and write is an asynchronous request | On a blocking endpoint file a request made before `ENABLE` waits for it inside `io_submit`, where no time limit reaches; non-blocking, it fails at once and the bus waits for `ENABLE` itself |
+| E15 | §3.3: the script mounts the link's FunctionFS | `mount --no-canonicalize`, from `/` | mount(8) turns a source that names an existing file into that file's absolute path (libmount does not count functionfs among the pseudo file systems it leaves alone), and FunctionFS then finds no instance of that name: `fsconfig() failed: No such file or directory`. The first root run had the checkout as its working directory, which has a directory `link/` |
 | E14 | §11.1, L2: a socket pair stands in for the endpoints | The L2 tests keep to 1024-byte frames; L3's checks of its own logic on the socket pair use 64 KiB and a small send buffer | A local datagram must fit the sender's buffer (about 208 KiB by default), so a megabyte frame is refused there, and a socket takes many small frames where a bulk IN endpoint holds one. Sizes and blocking are USB's: L3 |
 
 ## 4. The tests
@@ -217,3 +218,25 @@ cleanup: done (modules unloaded: ...)
 The root run is the first time this code meets the kernel: the descriptors' acceptance by FunctionFS, the endpoint files' blocking and `io_cancel` on `dummy_hcd`'s requests, one frame per read at each packet size, the events as FunctionFS sends them, what FunctionFS does to the gadget when the daemon dies (E12), the gadget script on real configfs, and the sizes. Tests marked "USB only" run only there. What a host killed in the middle of an OUT transfer leaves in the phone's read (the partial transfer may join the next run's `hello`) is measured by `flow (d), F1, F2`: if a next run needs more than three frames, the line says so and the plan's F1 needs a host-side fix.
 
 After L3, for the phone (the plan's runbook): the phone's own controller's dequeue (R4), the gadget script on the phone's gadget beside NCM and ACM (R2, R3), the unit and its `ExecStopPost=`, `systemd-run` with the worker's properties, first boot's real log, and the sleep inhibitor (§2).
+
+### 5.6 The first root run (2026-11-13, `7.2.15-1-omarchy`)
+
+`sudo tools/l3-run-as-root`, all three speeds.
+
+- **High speed, and full speed's first six tests: failed** at `mount -t functionfs ... link DIR` (`fsconfig() failed: No such file or directory`; the kernel logged only `ffs_data_put(): freeing`). The cause is E15. The fix (`--no-canonicalize`, from `/`) reached the script in the checkout while the run was in full speed's seventh test. The run's broker runs the script from the checkout, so every later test ran with the fix.
+- **Full speed, from the seventh test on: passed** (`reset`, `unbind and bind`, `suspend and resume`, both `a dead daemon` lines, `the hang marker`, `systemctl show`).
+- **Super speed: 12 of 12 passed.** Among the lines:
+  - `descriptors`: bulk 1024 with companions, OS string vendor code 0xcd, WINUSB.
+  - `remove`: the gadget back to `bcdDevice` 0x0100.
+  - `one frame per read (OUT)`: 12 pings of 1023 to 4097 bytes, 4 padded.
+  - `the pad rule is needed`: a 2048-byte frame without its pad and the next frame were read as one.
+  - `flow (a)`: the host's writes were held 29.9 s, then `io_cancel` ended the session with no `DISABLE` and no new enumeration. The next `hello` passed over 0 stale frames, and the stream resumed at 8 MiB.
+  - `flow (b)`: 5 acks, each 5 s late, verified in 10.1 s.
+  - `flow (c)`: `aborted` 5.0 s after the abort.
+  - `flow (d), F1, F2`: 50 installers killed (34 in the stream, 16 between `hello` and its answer). Every next run paired within 2 frames, with no wrong count, and the image verified.
+  - `a dead daemon, the host's view`: **the gadget's `UDC` read empty and the device left the bus.** This confirms E12 on this kernel.
+  - `a streamed file`: 4 294 968 296 bytes at 298 MiB/s; the phone's whole-file check took 2.5 s.
+- **The cleanup was complete.** No gadget, rule, state file, scratch directory or module was left. The log has no summary block: the script ended between super speed's teardown and its summary, most likely on a signal. It now logs which signal ended it, and appends the kernel's lines for FunctionFS, the gadget and the virtual bus.
+
+Still to run: high speed, and full speed's first six tests. `sudo tools/l3-run-as-root --speeds "high full"` runs them; the default reruns all three.
+

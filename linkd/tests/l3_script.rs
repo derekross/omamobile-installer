@@ -54,6 +54,9 @@ fn the_dry_run_prints_every_root_command_and_changes_nothing() {
     let state = std::path::Path::new("/run/omamobile-l3.state");
     let had_state = state.exists();
     let (rc, text) = script(&["--dry-run", "--speeds", "high super", "--big-bytes", "0"]);
+    if text.contains("another run (pid") {
+        return eprintln!("a real run is going on: the dry run rightly refuses ({text})");
+    }
     assert_eq!(rc, 0, "{text}");
     for want in [
         "+ modprobe dummy_hcd is_high_speed=1 is_super_speed=0",

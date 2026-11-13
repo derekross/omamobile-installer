@@ -17,11 +17,19 @@ ok() { if eval "$2"; then pass=$((pass + 1)); echo "ok - $1"; else fail=$((fail 
 mkdir -p "$T/bin"
 cat > "$T/bin/mount" <<'EOF'
 #!/bin/bash
-# mount -t functionfs [-o OPTS] link DIR
-opts=
+# mount [--no-canonicalize|-c] -t functionfs [-o OPTS] link DIR
+# As util-linux's mount: without --no-canonicalize a source that names an
+# existing file becomes its absolute path, and FunctionFS finds no instance
+# of that name
+opts= canon=1
+[[ $1 == --no-canonicalize || $1 == -c ]] && { canon=0; shift; }
 [[ $1 == -t && $2 == functionfs ]] || exit 32
 shift 2
 [[ $1 == -o ]] && { opts=$2; shift 2; }
+if (( canon )) && [[ -e $1 ]]; then
+  echo "mount: $2: fsconfig() failed: No such file or directory (source $(realpath "$1"))" >&2
+  exit 32
+fi
 [[ $1 == link && -d $2 ]] || exit 32
 echo "mount $opts" >> "$FAKE/log"
 : > "$2/ep0"
@@ -54,6 +62,10 @@ fresh() {
   : > "$T/log"
 }
 export FAKE=$T PATH="$T/bin:$PATH"
+# Run where a directory is named as the FunctionFS instance, as the first
+# root run of L3 did (the checkout has link/): the source must stay "link"
+mkdir -p "$T/cwd/link"
+cd "$T/cwd"
 export LINK_CONFIGFS=$T/cfs LINK_FFS_DIR=$T/run/ffs LINK_RUN_DIR=$T/run \
   LINK_MARKER=$T/var/link-gadget-started LINK_BOOT_ID=$T/boot_id LINK_WAIT_S=2 \
   LINK_FFS_OPTS=uid=1000,gid=1000
@@ -77,6 +89,7 @@ gadget add; rc=$?; wait
 ok "add: done" '(( rc == 0 ))'
 ok "add: the link beside NCM and ACM, bound again" '[[ $(links) == "acm.GS0 ffs.link ncm.usb0 " && $(udc) == fake.udc ]]'
 ok "add: FunctionFS mounted with the given options" 'grep -qx "mount uid=1000,gid=1000" "$T/log"'
+ok "add: the source is the instance's name, even beside a directory of that name" 'grep -c "^mount " "$T/log" >/dev/null && ! grep -q "fsconfig" "$T/err"'
 ok "add: bcdDevice 0x0200 and the OS descriptors" '[[ $(cat "$G/bcdDevice") == 0x0200 && $(cat "$G/os_desc/use") == 1 && $(cat "$G/os_desc/b_vendor_code") == 0xcd && $(cat "$G/os_desc/qw_sign") == MSFT100 && -L $G/os_desc/c.1 ]]'
 ok "add: no marker left; the state recorded for remove" '[[ ! -e $LINK_MARKER && -s $T/run/gadget.state ]]'
 gadget add; ok "add twice: refused, nothing changed" '(( $? == 1 )) && [[ $(links) == "acm.GS0 ffs.link ncm.usb0 " ]]'

@@ -70,6 +70,13 @@ os_code=0xcd
 os_sign=MSFT100
 
 log() { echo "omamobile-link-gadget: $*" >&2; }
+# The kernel's last lines, for a failure the kernel explains (needs root)
+kernel_log() {
+  local l
+  { dmesg 2>/dev/null || journalctl -k -q -n 20 --no-pager 2>/dev/null; } | tail -n 20 |
+    while IFS= read -r l; do log "kernel: $l"; done
+  return 0
+}
 syncdir() { sync -f "$1" 2>/dev/null || sync; }
 
 usage() { echo "usage: omamobile-link-gadget add|remove" >&2; exit 2; }
@@ -243,9 +250,18 @@ trap put_back EXIT
 
 udc_unbind || exit 1
 for n in $s_links; do rm -f "$cfg/$n"; done
-mkdir "$g/functions/$fn" || { log "the kernel refused functions/$fn (is usb_f_fs there?)"; exit 1; }
+mkdir "$g/functions/$fn" || { log "the kernel refused functions/$fn (is usb_f_fs there?)"; kernel_log; exit 1; }
 mkdir -p "$ffs" || exit 1
-mount -t functionfs ${ffs_opts:+-o "$ffs_opts"} link "$ffs" || { log "could not mount FunctionFS"; exit 1; }
+# The source is the instance's name, not a path. mount(8) makes a source
+# that names an existing file into that file's absolute path (libmount
+# counts functionfs as no pseudo file system), and FunctionFS then finds no
+# instance of that name (ENOENT): so --no-canonicalize, and from / . The
+# first L3 run hit it: its working directory had a directory named link.
+if ! (cd / && mount --no-canonicalize -t functionfs ${ffs_opts:+-o "$ffs_opts"} link "$ffs"); then
+  log "could not mount FunctionFS"
+  kernel_log
+  exit 1
+fi
 
 # The daemon writes the descriptors now: the endpoint files appear
 for (( i = 0; i < wait_s * 10; i++ )); do
