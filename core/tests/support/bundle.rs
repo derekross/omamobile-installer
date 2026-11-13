@@ -499,10 +499,17 @@ impl TestBundle {
     /// ([`super::drive::answers`], [`super::drive::SALT`]) writes it: the
     /// placeholders' blocks hold the answers.
     pub fn root_as_installed(&self) -> Vec<u8> {
+        self.root_as_installed_with(None)
+    }
+
+    /// The same, from a run that hands the flow this computer's SSH key:
+    /// `firstboot.conf` carries it too.
+    pub fn root_as_installed_with(&self, ssh_key: Option<&str>) -> Vec<u8> {
         let release = self.verify().unwrap();
         let answers = omamobile_installer_core::firstboot::root_answers(
             &release,
             &super::drive::answers(),
+            ssh_key,
             super::drive::SALT,
         )
         .unwrap();

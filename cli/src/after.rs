@@ -533,6 +533,8 @@ pub struct After {
     /// The check's rows, for the last screen.
     rows: Vec<String>,
     tools: Option<PathBuf>,
+    /// The phone's last answer refused this computer's key.
+    refused: bool,
 }
 
 /// One answer of the owner's on a screen of these steps.
@@ -614,6 +616,7 @@ impl After {
             show_command: false,
             rows: Vec::new(),
             tools: None,
+            refused: false,
         };
         after.save()?;
         Ok(after)
@@ -643,6 +646,7 @@ impl After {
             show_command: false,
             rows: Vec::new(),
             tools: None,
+            refused: false,
         }
     }
 
@@ -716,9 +720,9 @@ impl After {
                     .unwrap_or_else(|| blank("installed", ""));
                 s.action = "after";
                 s.body.push(if self.key.made {
-                    format!("This computer had no SSH key, so the installer made one for itself ({}) and put it in slot B's initramfs. The steps that follow use it to talk to the phone.", self.key.private.display())
+                    format!("This computer had no SSH key, so the installer made one for itself ({}). It went to the phone with your answers, for root and your account, and into slot B's initramfs for its rescue SSH. The steps that follow use it to talk to the phone.", self.key.private.display())
                 } else {
-                    format!("Slot B's initramfs was given this computer's SSH key ({}.pub). The steps that follow use it to talk to the phone.", self.key.private.display())
+                    format!("This computer's SSH key ({}.pub) went to the phone with your answers, for root and your account, and into slot B's initramfs for its rescue SSH. The steps that follow use it to talk to the phone.", self.key.private.display())
                 });
                 s.choices = vec![choice(
                     BEGIN,
@@ -806,7 +810,7 @@ impl After {
             Step::FirstStart => {
                 let mut s = blank("first-start", "The phone's first start");
                 s.body = vec![
-                    "The phone is starting Omarchy Mobile for the first time. It makes the system fill the phone's storage, which takes a few minutes. Leave the phone connected and alone.".into(),
+                    "The phone is starting Omarchy Mobile for the first time. It makes the system fill the phone's storage and sets up your account, and this computer's SSH key, from your answers, which takes a few minutes. Leave the phone connected and alone.".into(),
                     format!(
                         "The installer waits for it over the USB connection, for up to {}.",
                         minutes(self.seams.waits.first_start)
@@ -981,12 +985,14 @@ impl After {
             .arg("--fresh")
             .arg(command)
             .env("OMAMOBILE_SSH_KEY", &self.key.private);
+        self.refused = false;
         let mut running = Running::start(c).ok()?;
         let ok = running.wait(Some(Duration::from_secs(60)), &mut |_| {})?;
         let said = running.said();
         if said.iter().any(|l| l.contains("Permission denied")) {
+            self.refused = true;
             self.problem = Some(format!(
-                "The phone answers at {PHONE_ADDR}, and does not take this computer's SSH key ({}). The key reaches the phone's system with the answers of the install (its image), and this install did not put it there, so the steps after the write can't reach the phone. (Slot B's initramfs was given the key, for its rescue SSH before the system starts.)",
+                "The phone answers at {PHONE_ADDR}, and does not take this computer's SSH key ({}.pub). That key went to the phone with your answers, and its first start set it up for root; the phone no longer takes it, so it was changed on the phone, or this computer's key file is not the one this install used. Put that key file back, or add this computer's key to /root/.ssh/authorized_keys on the phone, and try again.",
                 self.key.private.display()
             ));
         }
@@ -1117,10 +1123,21 @@ impl After {
             if self.phone(ask::FIRST_START_DONE).is_some() {
                 break;
             }
+            // The phone's system takes this computer's key only once its
+            // first start has set it up from the answers, early on
+            // (omamobile-firstboot's "SSH keys" step, after the keyring,
+            // the host name and the account): until then a refused
+            // key is the first start still running
+            let refused = self.refused;
+            self.problem = None;
             let waited = began.elapsed().as_secs();
             watch.progress("first-start", waited.min(limit), limit);
-            if self.problem.is_some() {
-                // The key was refused: waiting longer changes nothing
+            if waited >= limit && refused {
+                self.problem = Some(format!(
+                    "The phone answers at {PHONE_ADDR}, and after {} it still does not take this computer's SSH key ({}.pub). The key went to the phone with your answers, and the phone's first start sets it up for root early on. If the phone shows its lock screen, its first start has finished, so this computer's key file is not the one this install used: put that one back and wait again. If the phone's screen is dark or stuck, its first start stopped before it set up the key: hold its power key to restart it, and a first start that stopped tries again.",
+                    minutes(limit),
+                    self.key.private.display()
+                ));
                 return Ok(());
             }
             if waited >= limit {

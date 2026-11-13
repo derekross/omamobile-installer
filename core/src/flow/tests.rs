@@ -145,8 +145,13 @@ fn a_session_writes_only_with_a_token() {
     assert_eq!(writing.may_flash().len(), 6);
     writing
         .set_answers(
-            crate::firstboot::root_answers(&release, &support::drive::answers(), "testsalt0123")
-                .unwrap(),
+            crate::firstboot::root_answers(
+                &release,
+                &support::drive::answers(),
+                None,
+                "testsalt0123",
+            )
+            .unwrap(),
         )
         .unwrap();
     block_on(support::drive::walk(&mut writing, &bundle, &release)).unwrap();

@@ -1514,7 +1514,7 @@ fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {
         "userdata will be ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again.",
         "Slot B's boot partitions, listed above, are overwritten.",
         "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.",
-        "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone, which this version of the installer does not put there). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.",
+        "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.",
         "To go ahead, type the phone's codename: cheetah",
         "Anything else stops the install here, with nothing written.",
     ]);
@@ -1959,6 +1959,13 @@ fn the_ssh_key_is_added_to_the_initramfs_image_and_every_other_byte_is_the_relea
         &phone.partition("vendor_kernel_boot_b")[..IMAGES[3].1],
         bundle.image("vendor_kernel_boot")
     );
+    // The running system takes it from the answers: firstboot.conf carries
+    // it, and every other byte of userdata is the release's
+    let want = bundle.root_as_installed_with(Some(KEY));
+    let userdata = phone.partition("userdata");
+    assert!(userdata[..want.len()] == want[..]);
+    assert!(String::from_utf8_lossy(&want).contains(&format!("\nSSH_KEY={KEY}\n")));
+    assert_ne!(want, bundle.root_as_installed());
     only_our_commands(&phone);
 }
 
@@ -1975,24 +1982,49 @@ fn without_a_key_the_images_are_the_releases_and_the_confirmation_says_nothing_o
 
 #[test]
 fn a_key_that_is_not_one_public_key_line_or_an_image_with_a_footer_writes_nothing() {
-    // A private key, two lines, nothing: the dry run's session refuses it,
-    // before the confirmation, with nothing written
+    // A private key, two lines, options before the key, nothing, one too
+    // long to go with the answers: refused with the answers, before the
+    // dry run, with nothing written
+    let too_long = format!(
+        "ssh-ed25519 AAAA {}",
+        "x".repeat(omamobile_installer_core::firstboot::SSH_KEY_MAX - 16)
+    );
     for key in [
         "-----BEGIN OPENSSH PRIVATE KEY-----",
         "ssh-ed25519 AAAA\nssh-rsa BBBB",
+        "no-pty ssh-ed25519 AAAA",
         "",
+        too_long.as_str(),
     ] {
         let bundle = TestBundle::new();
         let phone = ready();
-        let flow = run(&bundle, &phone, with_key(key));
-        assert_eq!(
-            flow.screen().stop,
-            Some("dry-run-refused"),
-            "{key:?}: {:?}",
-            flow.step()
+        let mut flow = Flow::begin(
+            &bundle.files(),
+            bundle.index(),
+            &bundle.trusted(),
+            with_key(key),
         );
+        drive(&mut flow, &bundle, &phone, "cheetah", "answers");
+        assert_eq!(flow.screen().state, "answers", "{key:?}");
+        let refused = flow
+            .answers(&support::drive::answers(), support::drive::SALT)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("SSH"), "{key:?}: {refused}");
+        assert!(
+            key.is_empty() || !refused.contains(key),
+            "the key is not repeated: {refused}"
+        );
+        assert_eq!(flow.screen().state, "answers", "{key:?}");
         nothing_written(&phone);
     }
+    // One byte shorter fits, with the longest answers
+    let fits = format!(
+        "ssh-ed25519 AAAA {}",
+        "x".repeat(omamobile_installer_core::firstboot::SSH_KEY_MAX - 17)
+    );
+    assert_eq!(fits.len(), omamobile_installer_core::firstboot::SSH_KEY_MAX);
+    omamobile_installer_core::firstboot::check_ssh_key(&fits).unwrap();
     // The image that carries the initramfs, signed with an AVB footer
     let bundle = TestBundle::build(
         |m| {

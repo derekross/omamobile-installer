@@ -22,10 +22,16 @@
 //!   descriptor's `BOOT_UPDATE_AUTO_WRITE` (default yes), as install-phone
 //!   writes it: the phone's kernel updates then reach slot B by themselves.
 //! - `/root/.ssh/authorized_keys` (mode 0600, in a directory of mode 0700),
-//!   when the owner gave an SSH public key: [`files`] makes it, but the
-//!   image keeps no place for it, and neither front end asks for a key. Nor
-//!   is the key appended to slot B's ramdisk image, as install-phone does:
-//!   that would change an image the release signed.
+//!   when the owner gave an SSH public key: [`files`] makes it, as
+//!   install-phone writes it, but the image keeps no place for it. The key
+//!   reaches the running system the other way install-phone gives it:
+//!   `SSH_KEY=` in `firstboot.conf`, which `omamobile-firstboot` installs
+//!   for root and the owner's account (0700 folders, 0600 files, each
+//!   owner's own) a few seconds into the first start, and never logs. A run
+//!   that hands the flow a key (the tool's `json --write`) puts it there
+//!   ([`root_answers`]); the key must fit the block with the other answers
+//!   ([`SSH_KEY_MAX`], [`check_ssh_key`]). The same run appends it to slot
+//!   B's initramfs too, for its rescue SSH ([`crate::ramdisk_key`]).
 //!
 //! A placeholder is filled with the file's text and then padding: one
 //! comment line, `#` and spaces up to the last byte, which is a newline
@@ -186,6 +192,53 @@ pub fn sha512_crypt(password: &[u8], salt: &str) -> Result<String> {
     Ok(out)
 }
 
+/// The longest answers `firstboot.conf` can hold but the key, line by line,
+/// each at the longest [`OwnerAnswers::check`] lets through: the header,
+/// a 32-byte user name, a sha512-crypt hash with a 16-character salt, a
+/// 63-byte host name, a time zone of [`crate::flow::TIMEZONE_MAX`] bytes,
+/// `CREDENTIAL=password`, a 32-byte Wi-Fi name and a 64-digit Wi-Fi key.
+const WORST_ANSWERS: usize = HEADER.len()
+    + line_len("USERNAME", 32)
+    + line_len("PASSWORD_HASH", 3 + 16 + 1 + 86)
+    + line_len("HOSTNAME", 63)
+    + line_len("TIMEZONE", crate::flow::TIMEZONE_MAX)
+    + line_len("CREDENTIAL", "password".len())
+    + line_len("WIFI_SSID", 32)
+    + line_len("WIFI_PSK", 64);
+
+const fn line_len(key: &str, value: usize) -> usize {
+    key.len() + 1 + value + 1
+}
+
+/// The longest SSH public key line that goes into `firstboot.conf` with
+/// any answers [`OwnerAnswers::check`] lets through, within the one block
+/// the system image keeps for them. An Ed25519 key is about 100 bytes, a
+/// 4096-bit RSA key about 750; a longer one is refused ([`check_ssh_key`]),
+/// never cut.
+pub const SSH_KEY_MAX: usize = PLACEHOLDER_LEN as usize - WORST_ANSWERS - line_len("SSH_KEY", 0);
+
+const HEADER: &str = "# Written by the Omarchy Mobile installer on the computer; omamobile-firstboot reads and deletes it.\n";
+
+/// One OpenSSH public key line, as `omamobile-firstboot` takes it (its
+/// `SSHKEY_RE`): a key type it knows, the key, an optional comment of
+/// printable ASCII; no options before it, no second line. And no longer
+/// than [`SSH_KEY_MAX`], so that it fits the answers' block with any
+/// answers. The key itself is never in the message.
+pub fn check_ssh_key(key: &str) -> Result<()> {
+    if !is_ssh_public_key(key) {
+        return Err(Error::Refused(
+            "this computer's SSH key is not a single OpenSSH public key line (a .pub file's line: a key type, the key and a comment, with no options before it and no second line)".into(),
+        ));
+    }
+    if key.len() > SSH_KEY_MAX {
+        return Err(Error::Refused(format!(
+            "this computer's SSH public key is {} bytes, and at most {SSH_KEY_MAX} fit in the place the system image keeps for the answers (4096 bytes in all). Use a shorter key: an Ed25519 key (ssh-keygen -t ed25519) is about 100 bytes",
+            key.len()
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_ssh_public_key(line: &str) -> bool {
     const KINDS: [&str; 7] = [
         "ssh-ed25519",
@@ -242,9 +295,7 @@ pub fn files(answers: &OwnerAnswers, extras: &Extras<'_>, salt: &str) -> Result<
         }
     }
     let hash = sha512_crypt(answers.password.as_bytes(), salt)?;
-    let mut conf = String::from(
-        "# Written by the Omarchy Mobile installer on the computer; omamobile-firstboot reads and deletes it.\n",
-    );
+    let mut conf = String::from(HEADER);
     let mut line = |key: &str, value: &str| {
         conf.push_str(key);
         conf.push('=');
@@ -343,6 +394,7 @@ pub struct RootAnswers {
     pub(crate) regions: Vec<Region>,
     summary: AnswersSummary,
     auto_write: Option<bool>,
+    ssh_key: bool,
 }
 
 impl core::fmt::Debug for RootAnswers {
@@ -371,6 +423,10 @@ impl RootAnswers {
     pub fn auto_write(&self) -> Option<bool> {
         self.auto_write
     }
+    /// `firstboot.conf` carries this computer's SSH public key.
+    pub fn has_ssh_key(&self) -> bool {
+        self.ssh_key
+    }
     /// The files that are filled, in the image's order.
     pub fn paths(&self) -> Vec<&'static str> {
         self.regions.iter().map(|r| r.path).collect()
@@ -385,14 +441,20 @@ impl RootAnswers {
     }
 }
 
-/// The answers for `release`'s root image. `salt`: from [`salt_from`],
-/// fresh for each install. Refused for a release whose root image keeps no
-/// place for them (one made before the placeholders).
+/// The answers for `release`'s root image. `ssh_key`: this computer's SSH
+/// public key, for root and the owner's account on the phone
+/// ([`check_ssh_key`]). `salt`: from [`salt_from`], fresh for each install.
+/// Refused for a release whose root image keeps no place for them (one
+/// made before the placeholders).
 pub fn root_answers(
     release: &VerifiedRelease,
     answers: &OwnerAnswers,
+    ssh_key: Option<&str>,
     salt: &str,
 ) -> Result<RootAnswers> {
+    if let Some(key) = ssh_key {
+        check_ssh_key(key)?;
+    }
     let root = &release.manifest().root_image;
     let Some(fb) = root.placeholder(FIRSTBOOT_CONF) else {
         return Err(Error::Refused(
@@ -400,7 +462,11 @@ pub fn root_answers(
         ));
     };
     let len = PLACEHOLDER_LEN as usize;
-    let conf = files(answers, &Extras::default(), salt)?
+    let extras = Extras {
+        ssh_key,
+        ..Extras::default()
+    };
+    let conf = files(answers, &extras, salt)?
         .into_iter()
         .find(|f| f.path == FIRSTBOOT_CONF)
         .map(|f| f.content)
@@ -442,6 +508,7 @@ pub fn root_answers(
         regions,
         summary: answers.summary(),
         auto_write,
+        ssh_key: ssh_key.is_some(),
     })
 }
 

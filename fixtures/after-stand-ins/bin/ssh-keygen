@@ -8,4 +8,5 @@ file="" comment=""
 while (($#)); do case $1 in -f) file=$2; shift ;; -C) comment=$2; shift ;; esac; shift; done
 [[ -n $file && ! -e $file ]] || { echo "ssh-keygen stand-in: no -f, or $file exists" >&2; exit 1; }
 echo "-----BEGIN OPENSSH PRIVATE KEY----- (a stand-in, not a key)" > "$file"; chmod 600 "$file"
-echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlaceholderPlaceholderPlaceholderPlacehol $comment" > "$file.pub"
+# A new made-up key each time, in an Ed25519 key's form: random characters
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI$(head -c 33 /dev/urandom | base64 -w0 | tr -d '=') $comment" > "$file.pub"

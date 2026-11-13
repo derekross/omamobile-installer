@@ -710,11 +710,7 @@ impl<T: Transport> Session<T> {
                         m.boot_writes[at].source
                     )));
                 }
-                if !crate::firstboot::is_ssh_public_key(&key) {
-                    return Err(Error::Refused(
-                        "the SSH key for slot B's initramfs is not a single OpenSSH public key line".into(),
-                    ));
-                }
+                crate::firstboot::check_ssh_key(&key)?;
                 Some((key, at))
             }
         };

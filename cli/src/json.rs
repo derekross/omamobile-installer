@@ -458,6 +458,15 @@ trait Phones {
     fn look(&mut self) -> Res<Vec<Connected>>;
     /// Open the `nth` phone of the last look.
     fn open(&mut self, nth: usize) -> Res<(Self::Link, PhoneId)>;
+    /// The write to the `nth` phone is done. Only the pretend phones do
+    /// anything with it: they hand what they received to the stand-ins
+    /// of the steps after the write (see [`Pretend::written`]).
+    fn written(
+        &mut self,
+        _nth: usize,
+        _release: &omamobile_installer_core::bundle::VerifiedRelease,
+    ) {
+    }
 }
 
 #[derive(Default)]
@@ -601,6 +610,45 @@ impl Phones for Pretend {
         }
         let id = PhoneId::of_serial(&p.serial).ok_or("the pretend phone has no serial")?;
         Ok((p.phone.clone(), id))
+    }
+
+    /// The pretend phone that answers over "USB SSH" in the tests of the
+    /// steps after the write (`OMAINSTALL_PRETEND_PHONE`, the folder its
+    /// stand-ins read; fixtures/after-stand-ins/README.md) starts from what
+    /// this pretend phone received: its `userdata`, as `userdata.img`, and
+    /// where the release's file system keeps each placeholder's file, as
+    /// `fs` (`PATH OFFSET LENGTH` lines: the stand-in for ext4's map of the
+    /// file's block), and nothing an earlier first start left there.
+    /// Without that folder, nothing.
+    fn written(&mut self, nth: usize, release: &omamobile_installer_core::bundle::VerifiedRelease) {
+        let Some(dir) = std::env::var_os("OMAINSTALL_PRETEND_PHONE").map(PathBuf::from) else {
+            return;
+        };
+        let Some(p) = self.phones.get(nth) else {
+            return;
+        };
+        let fs: String = release
+            .manifest()
+            .root_image
+            .placeholders
+            .iter()
+            .map(|h| format!("{} {} {}\n", h.path, h.offset, h.length))
+            .collect();
+        // The write erased what an earlier first start left
+        for gone in [
+            "firstboot_done",
+            "authorized_keys",
+            "account",
+            "firstboot_ran",
+        ] {
+            let _ = std::fs::remove_file(dir.join(gone));
+        }
+        let userdata = p.phone.partition("userdata");
+        if let Err(e) = std::fs::write(dir.join("userdata.img"), userdata)
+            .and_then(|_| std::fs::write(dir.join("fs"), fs))
+        {
+            eprintln!("(the pretend phone's userdata could not be handed on: {e})");
+        }
     }
 }
 
@@ -797,11 +845,16 @@ impl<P: Phones> Driver<P> {
         // write follow when the release ships the tools for them
         if self.may_write {
             if let Some(seams) = &self.seams {
-                self.key = Some(after::choose_key(seams).map_err(|e| {
+                let key = after::choose_key(seams).map_err(|e| {
                     Fatal(format!(
                         "this computer has no SSH key for the phone, and none could be made: {e}"
                     ))
-                })?);
+                })?;
+                // It goes into the answers' block with the rest: a key that
+                // can't is refused here, before any phone is asked anything
+                omamobile_installer_core::firstboot::check_ssh_key(&key.public)
+                    .map_err(|e| Fatal(format!("{e} ({}.pub)", key.private.display())))?;
+                self.key = Some(key);
             }
         }
         let options = FlowOptions {
@@ -1142,6 +1195,7 @@ impl<P: Phones> Driver<P> {
                     match block_on(walk_images(&mut session, &release, &started.dir, &mut wire)) {
                         Ok(true) => {
                             started.flow.write_done(session)?;
+                            self.phones.written(n, &release);
                             self.after_the_write()?;
                         }
                         Ok(false) => {

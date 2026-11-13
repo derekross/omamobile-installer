@@ -115,7 +115,10 @@ pub const WRITE_HELP: &str = "Writes to the phone: slot B's boot partitions (the
 /// What the phone does with the answers, said where the owner confirms the
 /// writes. Only for a release whose system image keeps a place for them;
 /// a flow that writes stops for any other ([`StopKind::NoPlaceForAnswers`]).
-pub const ANSWERS_AT_FIRST_START: &str = "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone, which this version of the installer does not put there). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.";
+/// What a run that hands the flow this computer's SSH key adds to
+/// [`ANSWERS_AT_FIRST_START`].
+pub const SSH_KEY_WITH_THE_ANSWERS: &str = "This computer's SSH public key goes with your answers: at its first start the phone sets it up for root and for your account, so that this computer can reach the phone over the USB cable for the steps after the write. Only the public half goes; the private key stays on this computer.";
+pub const ANSWERS_AT_FIRST_START: &str = "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.";
 /// Why this installer does not install a release made before the system
 /// image kept a place for the answers.
 pub const NO_PLACE_FOR_ANSWERS: &str = "This release's system image keeps no place for your answers, so a phone installed from it by this installer would start with no account and nothing to unlock it with. This installer does not install such a release.";
@@ -824,6 +827,11 @@ pub struct AnswersSummary {
     pub wifi: bool,
 }
 
+/// The longest time zone name taken, in bytes. The longest in the zone
+/// database is about 32; the bound keeps the answers within the one block
+/// the system image keeps for them ([`crate::firstboot::SSH_KEY_MAX`]).
+pub const TIMEZONE_MAX: usize = 64;
+
 /// Names the system uses (install-phone's `RESERVED`).
 const RESERVED: [&str; 34] = [
     "root",
@@ -924,6 +932,7 @@ impl OwnerAnswers {
             );
         }
         let tz_ok = !input.timezone.is_empty()
+            && input.timezone.len() <= TIMEZONE_MAX
             && input.timezone.split('/').all(|part| {
                 !part.is_empty()
                     && part
@@ -2186,7 +2195,12 @@ impl Flow {
         self.root_answers = if release.manifest().root_image.placeholders.is_empty() {
             None
         } else {
-            Some(root_answers(release, answers, salt)?)
+            Some(root_answers(
+                release,
+                answers,
+                self.options.owner_ssh_key.as_deref(),
+                salt,
+            )?)
         };
         self.answers = Some(answers.summary());
         self.step = Step::DryRun;
@@ -3003,12 +3017,17 @@ impl Flow {
                 }
                 s.body.extend([
                     format!(
-                        "Your answers: user {} ({}), phone name {}, time zone {}, Wi-Fi {}. The phone sets up your account from them at its first start.",
+                        "Your answers: user {} ({}), phone name {}, time zone {}, Wi-Fi {}{}. The phone sets up your account from them at its first start.",
                         a.username,
                         if a.pin { "PIN" } else { "password" },
                         a.hostname,
                         a.timezone,
-                        if a.wifi { "set" } else { "not set" }
+                        if a.wifi { "set" } else { "not set" },
+                        if self.root_answers.as_ref().is_some_and(RootAnswers::has_ssh_key) {
+                            ", and this computer's SSH public key"
+                        } else {
+                            ""
+                        }
                     ),
                     "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
                 ]);
@@ -3039,9 +3058,18 @@ impl Flow {
                     },
                     "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.".into(),
                     ANSWERS_AT_FIRST_START.into(),
+                ];
+                if self
+                    .root_answers
+                    .as_ref()
+                    .is_some_and(RootAnswers::has_ssh_key)
+                {
+                    s.footer.push(SSH_KEY_WITH_THE_ANSWERS.into());
+                }
+                s.footer.extend([
                     format!("To go ahead, type the phone's codename: {codename}"),
                     "Anything else stops the install here, with nothing written.".into(),
-                ];
+                ]);
             }
             Step::Write(plan) => {
                 s.state = "write";

@@ -12,7 +12,38 @@ if [[ -f $P/up_after ]]; then
   if ((n > 0)); then echo $((n - 1)) > "$P/up_after"; else rm -f "$P/up_after"; touch "$P/up"; fi
 fi
 if [[ ! -f $P/up ]]; then echo "ssh: connect to host 172.16.42.1 port 22: No route to host" >&2; exit 255; fi
-if [[ -f $P/refuse_key ]]; then echo "root@172.16.42.1: Permission denied (publickey)." >&2; exit 255; fi
+
+# A phone that was written by the pretend run (userdata.img, and fs: where
+# its file system keeps each placeholder's file) starts as omamobile-firstboot
+# makes it start: for the first firstboot_steps answers (default 2) its first
+# start is still running and root has no key; then it reads firstboot.conf
+# from the block fs names, gives root the SSH_KEY lines as authorized_keys,
+# and leaves its done marker if the answers named a user (and there is no
+# firstboot_hangs). From then on the
+# phone takes a key only if it is in authorized_keys: the public half of
+# the key phone-ssh was handed (OMAMOBILE_SSH_KEY, its .pub beside it).
+denied() { echo "ssh refused the key" >> "$P/log"; echo "root@172.16.42.1: Permission denied (publickey)." >&2; exit 255; }
+if [[ -f $P/userdata.img && ! -f $P/firstboot_ran ]]; then
+  n=$(cat "$P/firstboot_steps" 2>/dev/null || echo 2)
+  if ((n > 0)); then
+    echo $((n - 1)) > "$P/firstboot_steps"
+  else
+    read -r _ off len < <(grep '^/etc/omamobile/firstboot.conf ' "$P/fs")
+    conf=$(tail -c +$((off + 1)) "$P/userdata.img" | head -c "$len" | grep -v '^[[:space:]]*\(#.*\)\?$' || true)
+    : > "$P/authorized_keys"; chmod 600 "$P/authorized_keys"
+    grep '^SSH_KEY=' <<<"$conf" | sed 's/^SSH_KEY=//' >> "$P/authorized_keys" || true
+    user=$(sed -n 's/^USERNAME=//p' <<<"$conf")
+    # firstboot_hangs: the first start stops after its SSH step
+    [[ -z $user ]] || { echo "$user" > "$P/account"; [[ -f $P/firstboot_hangs ]] || touch "$P/firstboot_done"; }
+    echo "first start: account ${user:-none}, $(grep -c . "$P/authorized_keys") SSH key(s) for root" >> "$P/log"
+    touch "$P/firstboot_ran"
+  fi
+fi
+if [[ -f $P/userdata.img ]]; then
+  pub=$(head -n 1 "${OMAMOBILE_SSH_KEY:-/nonexistent}.pub" 2>/dev/null || true)
+  [[ -n $pub && -f $P/authorized_keys ]] && grep -qxF -- "$pub" "$P/authorized_keys" || denied
+fi
+if [[ -f $P/refuse_key ]]; then denied; fi
 case $cmd in
   *serialno*) cat "$P/id" ;;
   *firstboot/done*) [[ -f $P/firstboot_done ]] ;;

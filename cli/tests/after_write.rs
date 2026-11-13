@@ -280,6 +280,12 @@ impl Tool {
         assert!(confirm
             .text()
             .contains("vendor_kernel_boot_b is written with this computer's SSH public key"));
+        assert!(confirm
+            .text()
+            .contains("This computer's SSH public key goes with your answers"));
+        assert!(confirm
+            .text()
+            .contains("Wi-Fi not set, and this computer's SSH public key."));
         assert_eq!(
             self.act(json!({"type": "confirm", "typed": "cheetah"}))
                 .state(),
@@ -589,7 +595,7 @@ fn a_phone_that_refuses_this_computers_key_is_said_plainly() {
 #[test]
 fn a_first_start_that_does_not_finish_is_waited_for_within_its_bound() {
     let world = World::new("no-first-start");
-    std::fs::remove_file(world.phone().join("firstboot_done")).unwrap();
+    world.put("firstboot_hangs", "");
     let mut tool = Tool::start(&world, &release(), true);
     tool.install(&release());
     tool.after("begin");
@@ -603,6 +609,151 @@ fn a_first_start_that_does_not_finish_is_waited_for_within_its_bound() {
         .unwrap()
         .contains("hasn't finished its first start after 1 minute."));
     world.put("firstboot_done", "");
+    assert_eq!(tool.after("wait").state(), "backup");
+    tool.finish();
+}
+
+/// A made-up SSH key pair for the owner, new for each test run: random
+/// characters in an Ed25519 public key's form, and a private file that is
+/// no key. Never a real key.
+fn made_up_key(home: &Path, comment: &str) -> String {
+    let mut random = [0u8; 33];
+    std::fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut random)
+        .unwrap();
+    const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let body: String = random
+        .chunks(3)
+        .flat_map(|c| {
+            let w = (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32;
+            (0..4)
+                .rev()
+                .map(move |n| B64[((w >> (6 * n)) & 63) as usize] as char)
+        })
+        .collect();
+    let line = format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI{body} {comment}");
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".ssh/id_ed25519"), "a stand-in, not a key\n").unwrap();
+    std::fs::write(home.join(".ssh/id_ed25519.pub"), format!("{line}\n")).unwrap();
+    line
+}
+
+/// What the pretend run wrote to the phone's firstboot.conf: the block the
+/// signed manifest names, in the userdata the pretend phone received.
+fn firstboot_conf(world: &World) -> String {
+    let fs = std::fs::read_to_string(world.phone().join("fs")).unwrap();
+    let line = fs
+        .lines()
+        .find(|l| l.starts_with("/etc/omamobile/firstboot.conf "))
+        .unwrap();
+    let mut words = line.split(' ').skip(1).map(|w| w.parse::<usize>().unwrap());
+    let (offset, length) = (words.next().unwrap(), words.next().unwrap());
+    let userdata = std::fs::read(world.phone().join("userdata.img")).unwrap();
+    String::from_utf8(userdata[offset..offset + length].to_vec()).unwrap()
+}
+
+/// The whole run, as the desktop app runs it: the write with the answers
+/// and this computer's key in the release image's placeholder, the phone's
+/// first start reading them (the stand-in for omamobile-firstboot, which
+/// gives root the answers' SSH_KEY and only then takes the key), then the
+/// radio backup, the firmware, the restart and the check.
+#[test]
+fn one_run_from_the_write_to_a_working_phone_with_the_key_from_the_answers() {
+    let world = World::new("end-to-end");
+    let key = made_up_key(&world.root.join("home"), "owner@laptop");
+    let mut tool = Tool::start(&world, &release(), true);
+    let installed = tool.install(&release());
+    assert_eq!(installed.state(), "installed", "{}", installed.text());
+    // The owner's own key, not one made for the installer
+    assert!(world.ran("ssh-keygen").is_empty());
+    assert!(
+        installed
+            .text()
+            .contains("went to the phone with your answers"),
+        "{}",
+        installed.text()
+    );
+    // The answers' block holds the key, once, as firstboot reads it
+    let conf = firstboot_conf(&world);
+    assert_eq!(conf.len(), 4096);
+    let lines: Vec<&str> = conf.lines().filter(|l| !l.starts_with('#')).collect();
+    assert!(lines.contains(&"USERNAME=alex"), "{lines:?}");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("SSH_KEY="))
+            .collect::<Vec<_>>(),
+        [&format!("SSH_KEY={key}").as_str()]
+    );
+    assert!(!conf.contains(PIN), "no PIN in the image");
+
+    tool.after("begin");
+    let backup = tool.after("add");
+    assert_eq!(backup.state(), "backup", "{}", backup.text());
+    // The phone refused the key while its first start ran, then took it,
+    // because the first start gave root the key from the answers
+    let log = world.log();
+    let started = log
+        .iter()
+        .position(|l| l == "first start: account alex, 1 SSH key(s) for root")
+        .expect("the first start ran");
+    assert!(log[..started].iter().any(|l| l == "ssh refused the key"));
+    assert!(!log[started..].iter().any(|l| l == "ssh refused the key"));
+    assert_eq!(
+        std::fs::read_to_string(world.phone().join("authorized_keys")).unwrap(),
+        format!("{key}\n")
+    );
+    assert!(backup.screen["problem"].is_null(), "{}", backup.text());
+
+    assert_eq!(tool.after("backup").state(), "firmware");
+    assert_eq!(tool.after("firmware").state(), "restart");
+    let ready = tool.after("restart");
+    assert_eq!(ready.state(), "ready", "{}", ready.text());
+    assert_eq!(world.record().unwrap()["check"], "passed");
+    assert_eq!(world.ran("nv-backup").len(), 1);
+    assert_eq!(world.ran("phone-provision").len(), 1);
+    assert_eq!(world.ran("phone-smoke"), ["phone-smoke --json"]);
+    // The key is in no message the tool sent, and nowhere on its standard
+    // error
+    let stderr = tool.finish();
+    let body = key.split(' ').nth(1).unwrap();
+    assert!(!stderr.contains(body), "{stderr}");
+    assert!(!ready.text().contains(body));
+}
+
+/// The phone takes only the key that went with the answers: with another
+/// in this computer's key file, the first start finishes and the key is
+/// refused to the end of the wait, said plainly; with the key file back,
+/// waiting again goes on.
+#[test]
+fn a_key_that_is_not_the_one_in_the_answers_is_refused() {
+    let world = World::new("other-key");
+    let home = world.root.join("home");
+    let key = made_up_key(&home, "owner@laptop");
+    let mut tool = Tool::start(&world, &release(), true);
+    tool.install(&release());
+    // After the write, this computer's key file changes
+    let other = made_up_key(&home, "owner@laptop");
+    assert_ne!(key, other);
+    tool.after("begin");
+    let waiting = tool.after("add");
+    assert_eq!(
+        (waiting.state(), waiting.answers()),
+        ("first-start", vec!["wait"])
+    );
+    let problem = waiting.screen["problem"].as_str().unwrap();
+    assert!(
+        problem.contains("still does not take this computer's SSH key"),
+        "{problem}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(world.phone().join("authorized_keys")).unwrap(),
+        format!("{key}\n")
+    );
+    assert!(world.ran("nv-backup").is_empty());
+    // The key that went with the answers, back in its file
+    std::fs::write(home.join(".ssh/id_ed25519.pub"), format!("{key}\n")).unwrap();
     assert_eq!(tool.after("wait").state(), "backup");
     tool.finish();
 }

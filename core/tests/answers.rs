@@ -45,15 +45,25 @@ fn with_wifi() -> OwnerAnswers {
     .unwrap()
 }
 
-/// A flow that writes, taken to its end with `answers` given at the
+/// A made-up SSH public key line, new for each test run: an Ed25519 key's
+/// form (its 68 characters of key), random characters, never a real key.
+fn test_key() -> String {
+    use rand::Rng;
+    const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut rng = rand::thread_rng();
+    let body: String = (0..68).map(|_| B64[rng.gen_range(0..64)] as char).collect();
+    format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5{body} installer-test")
+}
+
+/// A flow started with `options`, taken to its end with `answers` given at the
 /// answers step.
-fn install(bundle: &TestBundle, phone: &FakePhone, answers: &OwnerAnswers) -> Flow {
-    let mut flow = Flow::begin(
-        &bundle.files(),
-        bundle.index(),
-        &bundle.trusted(),
-        writing(),
-    );
+fn install_with(
+    bundle: &TestBundle,
+    phone: &FakePhone,
+    answers: &OwnerAnswers,
+    options: FlowOptions,
+) -> Flow {
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), options);
     drive(&mut flow, bundle, phone, "cheetah", "answers");
     assert_eq!(flow.screen().state, "answers", "{:?}", flow.step());
     flow.answers(answers, SALT).unwrap();
@@ -172,9 +182,20 @@ fn the_answers_land_in_a_real_ext4_image_that_stays_clean() {
         );
     }
 
+    // A run that hands the flow this computer's key, as the tool's json
+    // --write does: it goes into firstboot.conf with the answers
+    let key = test_key();
     let bundle = TestBundle::with_root_image(raw.clone(), json!(places));
     let phone = FakePhone::new("cheetah");
-    let flow = install(&bundle, &phone, &with_wifi());
+    let flow = install_with(
+        &bundle,
+        &phone,
+        &with_wifi(),
+        FlowOptions {
+            owner_ssh_key: Some(key.clone()),
+            ..writing()
+        },
+    );
     assert!(
         matches!(flow.step(), Step::Installed(_)),
         "{:?}",
@@ -203,11 +224,16 @@ fn the_answers_land_in_a_real_ext4_image_that_stays_clean() {
             hash.as_str(),
             "HOSTNAME=alex-phone",
             "TIMEZONE=Europe/Paris",
+            &format!("SSH_KEY={key}"),
             "CREDENTIAL=pin",
             "WIFI_SSID=Test network",
             "WIFI_PSK=not-a-real-passphrase",
         ]
     );
+    // The image keeps no place for root's authorized_keys: it is
+    // omamobile-firstboot's to make from SSH_KEY at the first start
+    let (_, stat) = run(&debugfs, &["-R", "stat /root/.ssh/authorized_keys", inst]);
+    assert!(!stat.contains("Size:"), "{stat}");
     // The PIN itself is nowhere in the image
     let image = std::fs::read(&installed).unwrap();
     assert!(!String::from_utf8_lossy(&conf).contains("4812"));
@@ -317,7 +343,7 @@ fn the_manifest_names_its_placeholders_within_the_rules() {
         |c| c,
     );
     let release = bundle.verify().unwrap();
-    let answers = root_answers(&release, &with_wifi(), SALT).unwrap();
+    let answers = root_answers(&release, &with_wifi(), None, SALT).unwrap();
     assert_eq!(answers.paths(), [FIRSTBOOT_CONF]);
     assert_eq!(answers.auto_write(), None);
 }
@@ -374,7 +400,7 @@ fn a_release_without_placeholders_is_not_installed() {
 #[test]
 fn the_placeholders_hold_the_answers_padded_to_the_block() {
     let release = TestBundle::new().verify().unwrap();
-    let answers = root_answers(&release, &with_wifi(), SALT).unwrap();
+    let answers = root_answers(&release, &with_wifi(), None, SALT).unwrap();
     let blocks: Vec<(&str, u64, Vec<u8>)> = answers
         .blocks()
         .map(|(p, o, b)| (p, o, b.to_vec()))
@@ -402,7 +428,7 @@ fn the_placeholders_hold_the_answers_padded_to_the_block() {
 
     // BOOT_UPDATE_AUTO_WRITE=no in the descriptor: AUTO_WRITE=no
     let no = TestBundle::build(|_| {}, |c| c + "BOOT_UPDATE_AUTO_WRITE=no\n");
-    let answers = root_answers(&no.verify().unwrap(), &with_wifi(), SALT).unwrap();
+    let answers = root_answers(&no.verify().unwrap(), &with_wifi(), None, SALT).unwrap();
     let boot = answers
         .blocks()
         .find(|(p, _, _)| *p == BOOT_UPDATE_CONF)
@@ -506,4 +532,82 @@ fn a_wifi_name_is_counted_in_bytes() {
     assert!(check(&"a".repeat(32)));
     assert!(check(&"é".repeat(16)));
     assert!(!check(&"é".repeat(17)));
+}
+
+/// The longest answers the checks let through and the longest key
+/// `check_ssh_key` takes fill the block exactly; a byte more of key, or of
+/// time zone, is refused, plainly, before anything is written.
+#[test]
+fn the_longest_answers_and_key_fit_the_block_and_a_byte_more_is_refused() {
+    use omamobile_installer_core::firstboot::{check_ssh_key, SSH_KEY_MAX};
+    use omamobile_installer_core::flow::TIMEZONE_MAX;
+    let release = TestBundle::new().verify().unwrap();
+    let zone = format!("A/{}", "b".repeat(TIMEZONE_MAX - 2));
+    let ssid = "\u{e9}".repeat(16); // 32 bytes
+    let longest = OwnerAnswers::check(&AnswersInput {
+        username: &"a".repeat(32),
+        password: "not digits only",
+        password_again: "not digits only",
+        hostname: &"h".repeat(63),
+        timezone: &zone,
+        wifi_ssid: &ssid,
+        wifi_psk: &"0".repeat(64),
+    })
+    .unwrap();
+    let key = format!("ssh-ed25519 AAAA {}", "c".repeat(SSH_KEY_MAX - 17));
+    assert_eq!(key.len(), SSH_KEY_MAX);
+    // docs/DESIGN.md §12 gives the number
+    assert_eq!(SSH_KEY_MAX, 3539);
+    // 16 characters of salt, the longest
+    let salt = "abcdefgh12345678";
+    let answers = root_answers(&release, &longest, Some(&key), salt).unwrap();
+    let (_, _, block) = answers
+        .blocks()
+        .find(|(p, _, _)| *p == FIRSTBOOT_CONF)
+        .unwrap();
+    assert_eq!(block.len(), 4096);
+    // No room was left for padding: the key's line is the block's last
+    let text = String::from_utf8(block.to_vec()).unwrap();
+    assert!(
+        text.ends_with(&format!(
+            "SSH_KEY={key}\nCREDENTIAL=password\nWIFI_SSID={ssid}\nWIFI_PSK={}\n",
+            "0".repeat(64)
+        )),
+        "{text}"
+    );
+    // The header is the one comment line: no padding was left
+    assert_eq!(text.lines().filter(|l| l.starts_with('#')).count(), 1);
+    assert!(answers.has_ssh_key());
+
+    // A byte more of key: refused, and the message says why and what to use
+    let longer = format!("{key}c");
+    let why = root_answers(&release, &longest, Some(&longer), salt)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        why.contains(&format!("at most {SSH_KEY_MAX}")) && why.contains("Ed25519"),
+        "{why}"
+    );
+    assert!(!why.contains(&longer), "the key is not repeated");
+    assert!(check_ssh_key(&longer).is_err());
+    // A time zone longer than any: a problem with the answers, not a key's
+    let long_zone = format!("A/{}", "b".repeat(TIMEZONE_MAX - 1));
+    assert!(OwnerAnswers::check(&AnswersInput {
+        username: "alex",
+        password: "4812",
+        password_again: "4812",
+        hostname: "",
+        timezone: &long_zone,
+        wifi_ssid: "",
+        wifi_psk: "",
+    })
+    .is_err());
+    // Without a key, firstboot.conf has no SSH_KEY line
+    let answers = root_answers(&release, &longest, None, salt).unwrap();
+    assert!(!answers.has_ssh_key());
+    let (_, _, block) = answers
+        .blocks()
+        .find(|(p, _, _)| *p == FIRSTBOOT_CONF)
+        .unwrap();
+    assert!(!block.windows(8).any(|w| w == b"SSH_KEY="));
 }
