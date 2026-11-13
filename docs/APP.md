@@ -12,7 +12,7 @@ This document is the app's design and, in §3, the protocol between the app and 
 - **No install logic.** The app has no check of a phone, a release, a file or an answer. It does not open a USB device, does not fetch anything from the internet, does not hash a file and does not read one: it passes a path.
 - **No sentence about the phone of its own.** The app's own words are the labels of its buttons and fields, the names of the five stages at the top, the shortcut list, the line that says it is a preview, and what it says when the tool itself fails (§6). Even the question "which of these phones?" is the tool's (§3.3, `phones`).
 - **It writes only when it was started to.** `omainstall open --write` passes `--write` on to the tool, and that is the one way: no control in the window and no message of the protocol turns writing on (§3.6). Without it the window ends at the dry run. With it, the writes still wait for the list of what will be written and for the phone's codename, typed by the owner, as on the command line. The window says which kind of run it is from its first screen.
-- **It cannot give the owner's statement about a bootloader slot.** A phone that tells the version of one bootloader copy only (the Pixel 7 Pro) stops in the app, with or without `--write`: the statement that passes that stop is typed on the tool's own command line and nowhere else (DESIGN §6). The app draws the stop.
+- **It cannot give the owner's statement about a bootloader slot, and it does reinstalls.** A phone that tells the version of one bootloader copy only (the Pixel 7 Pro) stops in the app on a first install, with or without `--write`: the statement that passes that stop is typed on the tool's own command line and nowhere else (DESIGN §6). A phone that runs from slot B is asked what slot B holds, in the core's words; answered "Omarchy Mobile", the run is a reinstall, and the bootloader-slot check passes with the version slot B reports, which the phone already runs (DESIGN §6, "A reinstall from slot B", decided on 2026-11-13). The app draws the question and the stops.
 
 ## 2. The shape
 
@@ -42,7 +42,7 @@ The app starts the tool as a child process and talks to it over the child's stan
 
 ## 3. The protocol
 
-Protocol number **2**. (Number 1 was the same protocol without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. A side that speaks 1 and one that speaks 2 refuse each other, §3.2.)
+Protocol number **3**. (Number 2 was the same protocol without the question of what slot B holds: no `choices` in the screen, no `slot-b` action and message; a phone on slot B in a run not said to be a reinstall stopped at `runs-from-slot-b`. Number 1 was 2 without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. Sides that speak different numbers refuse each other, §3.2.)
 
 ### 3.1 Framing
 
@@ -56,8 +56,8 @@ Protocol number **2**. (Number 1 was the same protocol without a write: no `--wr
 ### 3.2 The handshake, and versions
 
 ```
-tool -> app   {"type":"hello","protocol":2,"tool":"omamobile-install","version":"0.0.1","writes":false}
-app -> tool   {"type":"hello","protocol":2,"app":"omainstall","version":"0.1.0"}     (not answered)
+tool -> app   {"type":"hello","protocol":3,"tool":"omamobile-install","version":"0.0.1","writes":false}
+app -> tool   {"type":"hello","protocol":3,"app":"omainstall","version":"0.1.0"}     (not answered)
 app -> tool   {"type":"start","reinstall":false}
 tool -> app   {"type":"screen","screen":{...}}
 ```
@@ -67,7 +67,7 @@ tool -> app   {"type":"screen","screen":{...}}
   - the app shows "The installer's tool speaks protocol N and this app speaks protocol M. Update whichever is older.", sends nothing more, and ends the tool;
   - the tool answers the app's `hello` with `fatal` and exits with status 1. A `hello` that names no whole number as its `protocol` is taken the same way. Of the app's `hello` the tool reads `protocol` and nothing else.
 - **The tool's `hello` says whether this run's flow may write:** `writes`, true exactly when the tool was started with `--write`. The app compares it with what it was started for and goes on with neither a tool that writes when a dry run was asked for nor the reverse: it says so, sends nothing, and ends the tool.
-- `start` comes after the app's `hello`, once. It carries what the person said up front (`FlowOptions`): `reinstall`, true or false, slot B already holds Omarchy Mobile. **It does not carry the write switch**, and a `write` field in it, or in any message, is ignored: the switch is the tool's own argument. The tool then reads the release, calls `Flow::begin` and sends the first screen: the warning, or a stop if the release fails its checks. A release that can't be read at all (no directory was named, or a file of it is missing) is a `fatal`.
+- `start` comes after the app's `hello`, once. It carries what the person said up front (`FlowOptions`): `reinstall`, true or false, slot B already holds Omarchy Mobile. With `false` a phone on slot B is not stopped but asked about (`slot-b`, §3.4): this mode tells the flow that its front end can ask (`FlowOptions::asks_what_slot_b_holds`). **It does not carry the write switch**, and a `write` field in it, or in any message, is ignored: the switch is the tool's own argument. The tool then reads the release, calls `Flow::begin` and sends the first screen: the warning, or a stop if the release fails its checks. A release that can't be read at all (no directory was named, or a file of it is missing) is a `fatal`.
 - **Before `start` there is no flow and so no screen.** What the tool can't take then (a line that is not a JSON object, a `start` before the app's `hello` or without `reinstall`, any other message but `quit`) is answered with `error` alone.
 - A new message type, a new field the other side must understand, or a changed meaning takes a new protocol number. A new *optional* field does not: both sides ignore fields they do not know. A new value of `Screen.action` does not either: an app that does not know it shows the screen, offers no main action, and says "The installer asks for a step this app does not know (…). Update the app to go on."
 
@@ -90,7 +90,7 @@ tool -> app   {"type":"screen","screen":{...}}
 **`screen.screen` is exactly `omamobile_installer_core::flow::Screen` as serde serialises it**, the same JSON the web page reads from `InstallFlow::screen()`:
 
 ```
-state     text          warning, phone, unlock, google-terms, factory-image, answers, dry-run, done,
+state     text          warning, phone, slot-b, unlock, google-terms, factory-image, answers, dry-run, done,
                         confirm, write, installed (those three only in a run that writes), stopped
 stop      text | null   for `stopped`: the stop's id (DESIGN §4)
 retry     text | null   for `stopped`: whether starting the installer again can get past the stop:
@@ -106,13 +106,17 @@ file      null | { name: text, size: number, build: text }
 problem   text | null
 plan      [text]
 footer    [text]
-action    text          acknowledge, read-phone, accept-terms, download, take-file, answers, dry-run,
-                        confirm, write, none
+choices   [{ answer: text, label: text }]
+                        for `slot-b`: the answers to the core's question, in order; the label is the
+                        core's words for the button, the answer what the app sends back. Empty on
+                        every other screen
+action    text          acknowledge, read-phone, slot-b, accept-terms, download, take-file, answers,
+                        dry-run, confirm, write, none
 ```
 
 The app checks that every key is there and of that type. A screen that lacks one is malformed (§6): a missing `notice` must never be read as "no notice". Keys the app does not know are carried along and ignored.
 
-`retry` is the stop's `Retry` in the core, the same fact its closing line says in words. It was added to `Screen` when the tool's side was built; no tool spoke protocol 1 before that, so it was part of protocol 1 from its first tool on, and it is unchanged in 2. A front end offers "start again" from it (§4) and never from the stop's sentences.
+`retry` is the stop's `Retry` in the core, the same fact its closing line says in words. It was added to `Screen` when the tool's side was built; no tool spoke protocol 1 before that, so it was part of protocol 1 from its first tool on, and it is unchanged in 2 and 3. A front end offers "start again" from it (§4) and never from the stop's sentences.
 
 ### 3.4 From the app
 
@@ -122,6 +126,7 @@ One message per action that `Screen.action` names. The app sends an action only 
 | --- | --- | --- |
 | `acknowledge` | `{"type":"acknowledge"}` | `acknowledge_warning` |
 | `acknowledge` | `{"type":"decline"}` | `decline_warning` |
+| `slot-b` | `{"type":"slot-b","answer":"<answer>"}`, the `answer` of one of the screen's `choices`: `omarchy-mobile`, `android` or `not-sure` | `answer_slot_b`: Omarchy Mobile makes the run a reinstall and the flow goes on from the look at the phone, with no new question sent to it; the other two end in the core's stop `runs-from-slot-b`. A missing or unknown `answer`: `error`, and the question stays |
 | `read-phone` | `{"type":"read-phone"}` or `{"type":"read-phone","phone":"<id>"}` | No phone in Fastboot Mode: `no_phone`. One, or the one chosen: `read_phone`. Several and none chosen: the phone the flow looked at before, if it is among them; otherwise a `phones` message, and the flow is not touched. An `id` no `phones` message of this run gave, or a phone that is gone: `error` |
 | `accept-terms` | `{"type":"accept-terms"}` | `accept_google_terms(now)`, by the tool's clock: the app sends no time |
 | `accept-terms` | `{"type":"decline-terms"}` | `decline_google_terms` |
@@ -179,8 +184,8 @@ def send(**message):                    # one message; the screen that ends it
     while (reply := json.loads(tool.stdout.readline()))["type"] != "screen":
         print(reply)                    # progress, phones, problems or error
     return reply["screen"]
-assert json.loads(tool.stdout.readline())["protocol"] == 2
-tool.stdin.write('{"type":"hello","protocol":2,"app":"a script","version":"0"}\n')
+assert json.loads(tool.stdout.readline())["protocol"] == 3
+tool.stdin.write('{"type":"hello","protocol":3,"app":"a script","version":"0"}\n')
 zip = os.path.abspath("fixtures/selftest/factory/cheetah-test.260101.001-factory-31c2322a.zip")
 moves = {"acknowledge": {"type": "acknowledge"}, "read-phone": {"type": "read-phone"}, "accept-terms": {"type": "decline-terms"},
          "take-file": {"type": "take-file", "path": zip}, "dry-run": {"type": "dry-run"},
@@ -198,8 +203,8 @@ The app has two commands of its own with no display, for the same readers: `omai
 ### 3.8 An example
 
 ```
-<- {"type":"hello","protocol":2,"tool":"omamobile-install","version":"0.0.1","writes":false}
--> {"type":"hello","protocol":2,"app":"omainstall","version":"0.1.0"}
+<- {"type":"hello","protocol":3,"tool":"omamobile-install","version":"0.0.1","writes":false}
+-> {"type":"hello","protocol":3,"app":"omainstall","version":"0.1.0"}
 -> {"type":"start","reinstall":false}
 <- {"type":"screen","screen":{"state":"warning", ..., "action":"acknowledge"}}
 -> {"type":"acknowledge"}
@@ -261,6 +266,7 @@ From top to bottom:
   | `body` | Paragraphs |
   | `quote` | Set in behind a bar in the accent: the intro, each line in italics and quotation marks, what comes after, and each link as a button that opens the browser |
   | `steps` | Numbered. A step's `command` in a monospace box with "Copy" |
+  | `choices` | One full-width button for each, labelled with the core's words, in the core's order; a click sends its `answer` (`slot-b`) |
   | `link` | "Open the page in the browser", with the address under it |
   | `file` | A box with the file's name, its size and the build |
   | `plan` | A numbered monospace list |
@@ -278,6 +284,7 @@ From top to bottom:
 | --- | --- | --- |
 | `acknowledge` | I have read this. Go on | Stop here |
 | `read-phone` | Look at the phone | |
+| `slot-b` | (none: each of the core's `choices` is its own button, on the screen; none is set apart as the main one) | |
 | `accept-terms` | I accept. Download the file | I will download it myself |
 | `download` | Download | Choose a file I saved…; while it runs: Cancel |
 | `take-file` | Choose the file… | |
@@ -347,11 +354,11 @@ The app's own strings go through the `Translator` of the Omarchy conventions: En
 
 - **A run with a real phone.** `omamobile-install json` finds the phones in Fastboot Mode over USB as `install` does, and that part of it has never run: every test and every run so far used the pretend phone. Unknown until then, besides what DESIGN §9 lists: what a Pixel gives as its product name over USB (the `phones` label), and how two connected phones show.
 - **Where the release comes from.** The tool takes a directory. `omainstall open DIR` passes one on; without it `start` ends in a `fatal` that says so, because the tool can't find or fetch a release itself yet.
-- **The owner's statement about a bootloader slot, through the app.** Decided for now: the command line only (DESIGN §6). So a Pixel 7 Pro, the one phone the write path is for, stops in the app before anything is written, and no real phone can be installed through the app today (app/docs/STATUS.md §4).
-- **A write through the app on a real phone.** Not run, and not runnable on a Pixel 7 Pro for the reason above.
+- **The owner's statement about a bootloader slot, through the app.** Decided for now (2026-11-13): the command line only (DESIGN §6), and first installs stay there. A Pixel 7 Pro reaches a write in the app only as a reinstall from slot B (DESIGN §6, "A reinstall from slot B"); a first install stops at the bootloader-slot stop. The later goal is that the installer measures the other slot itself (DESIGN §6, "Measuring the other slot").
+- **A write through the app on a real phone.** Not run. On a Pixel 7 Pro it is runnable as a reinstall only, for the reason above.
 - **The maintainer's override through this mode.** `json` has no argument for it (§3.6), so the maintainer's own dry runs on a Pixel 7 Pro go through `install --dry-run` on a terminal, not through the app. Whether the app should ever show such a run is the maintainer's decision.
 - **Windows and macOS.** The mode keeps standard output for the protocol by moving the descriptor aside, on Unix only; elsewhere it writes to standard output as it is. It was built and run on Linux only.
-- **Saying that this is a reinstall.** The slot B stop tells the person to start the installer again and say so. The app takes it as `omainstall open --reinstall` and offers no control in the window, because the sentence beside that control would be about the phone. If the core named the choice (a field of the stop's screen, or an action), the app would draw it.
+- **Saying that this is a reinstall.** The core now names the choice: a phone on slot B is asked what slot B holds (`slot-b`, with `Screen.choices`), and the app draws the core's three answers as buttons, with no main action of its own on that screen. `omainstall open --reinstall` still says it up front, and the question is then not asked.
 - **Cancelling the check of a file handed in.** A factory image is several gigabytes and hashing it takes a while; the protocol can cancel a download and nothing else (a `quit` does end the check). The same goes for a dry run that walks a release's root image.
 - **A signal.** Ctrl-C in the terminal the app was started from reaches the tool too, as it reaches `install --write`, and would cut a write off. The window's own close is held while the phone is written; a signal is not.
 - **A download that has not begun to arrive.** A cancel takes effect once Google's server has answered; while the tool still waits for that answer (at most a minute and a half, by its timeouts) it is not seen.
@@ -371,7 +378,7 @@ A `fake-phone` build takes `json --fake-phone STATES [--fake-google 127.0.0.1:PO
 **The app.** `app/bin/test` builds and runs one Qt Test binary, offscreen. It needs no phone, no USB and nothing from the internet. It first builds the tool with the `fake-phone` feature (cargo); without cargo it says that the tests against the real tool are skipped, and they report as skipped.
 
 - **The stand-in** (`app/tests/stand-in-tool`, Python) speaks the protocol and replays recorded screens. It can replay one screen, walk the whole flow (to the dry run, or through the write when it was started with `--write`), offer two phones, hold a download open until it is cancelled, hold a write open for two and a half seconds, end a write in the core's stop for a lost link, find no phone at the first try of a write, and fail in each way of §6, which the real tool can't be asked to do.
-- **The recorded screens** (`app/tests/fixtures/screens/`, 55 files) are the core's own output: `Flow::screen()` serialised by serde, for every state and every kind of stop, driven against the core's pretend phone and test bundle. `app/tests/record-screens/run` writes them again from the core as it is; run it when the flow's words or the `Screen`'s fields change. They include stops the tool's pretend phone can't be brought to from outside (a phone that changes at the dry run or at the write, a release for another phone), every place a write can stop that the core's closing lines tell apart, and screens the app can't begin itself (a run on the owner's statement about a bootloader slot, with its notice).
+- **The recorded screens** (`app/tests/fixtures/screens/`, 60 files) are the core's own output: `Flow::screen()` serialised by serde, for every state and every kind of stop, driven against the core's pretend phone and test bundle. `app/tests/record-screens/run` writes them again from the core as it is; run it when the flow's words or the `Screen`'s fields change. They include stops the tool's pretend phone can't be brought to from outside (a phone that changes at the dry run or at the write, a release for another phone), every place a write can stop that the core's closing lines tell apart, and screens the app can't begin itself (a run on the owner's statement about a bootloader slot, with its notice).
 - **Written by hand,** for the stand-in, from the flow's own sentences: the two `problems` it sends, and its `phones` and `error` messages.
 - **Against the stand-in:** every recorded screen reaches QML equal to what was sent; each action and each button sends exactly its message, and an action the screen does not name is not sent; "Start again" is on a stop exactly when its `retry` says so, and starts a new run; malformed JSON, a screen that lacks a field, an unknown message, an unexpected exit, a crash, a protocol mismatch, a `fatal`, a tool started for the other kind of run, a silent tool and a missing tool each give the stated error; a run that writes: the switch passed on only when the window was started with it and never for a probe, the flow through the write with the tool's record of what it sent, the confirmation in the window (the field, the disabled button, "Do not install"), a window that stays while the phone is written and an app that waits for the write when it is ended, a write that finds no phone, and a write that stops partway; the file picker is the injected fake; and `Main.qml` is loaded for every recorded screen, compared with it text for text, and fails on any QML warning.
 - **Against the real tool** (`omamobile-install json --fake-phone …`, started through a script the test writes, since the app itself passes only `json` and the release): the straight path to the dry run clicked in the window, with a download from a stand-in for Google's server in the test; eight stops, each drawn from the real screen with "Start again" where its `retry` allows, and a ninth for a download that is not the listed file; a locked phone; a reinstall on slot B; two phones in the chooser; a file handed in that is missing, wrong and right; a download that stands still, cancelled and gone on with; and the hello that `omainstall check` reads. Each ends by reading the pretend phones' record: reads only.
