@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""A stand-in for `omamobile-install json`, for the app's tests.
+
+It speaks the protocol of docs/APP.md and replays recorded screens of the
+core's flow (fixtures/screens/*.json). It holds no install logic, opens no
+USB device and reaches no network: there is no phone behind it and no core.
+What it sends is what was recorded, in an order that looks like an install.
+
+    OMAINSTALL_STANDIN          how it behaves (below); default "flow"
+    OMAINSTALL_STANDIN_LOG      a file that gets every line it was sent
+    OMAINSTALL_STANDIN_DONE     a file that is made when a write ran to its end
+
+    flow            the whole flow, on a phone that is ready
+    flow-locked     the same, with the unlock steps after the first look
+    flow-phones     two phones answer the first look, and one must be chosen
+    flow-slow       a download that goes on until it is cancelled
+    flow-unplugged  a run that writes, whose write ends in the core's stop for a lost link
+    flow-no-phone   a run that writes, whose first try at the writes finds no phone
+    flow-long-write a run that writes, whose write takes two and a half seconds
+    flow-odd-write  a run that writes, and says something that is not of the protocol in the
+                    middle of the write, which it then finishes whoever still listens
+    other-mode      a hello that says the opposite of what it was started for
+    screen:NAME     the recorded screen NAME, again after every action
+    mismatch        a hello with another protocol number
+    malformed       a line that is not JSON, after the start
+    odd-screen      a screen that lacks a field
+    unknown         a message of a kind the protocol does not have
+    exit            leaves with status 3 after the start, with a line on stderr
+    fatal           reports that it failed
+    silent          never says hello
+"""
+import json
+import os
+import sys
+import time
+
+PROTOCOL = 2
+# As the real tool: the flow may write only if the tool was started with it.
+WRITES = "--write" in sys.argv[1:]
+# What a write sends, as the session's own log has it (cli/src/json.rs).
+SENT = ["download:00004000", "flash:boot_b", "download:00002000", "flash:init_boot_b", "download:00001000",
+        "flash:vendor_boot_b", "download:00003000", "flash:vendor_kernel_boot_b", "download:00001000", "flash:dtbo_b"]
+PIECES = 3
+ACCOUNT = ["userdata, the piece that covered the most blocks: piece 1: 131 blocks, 524 KiB written on the phone, 258144 bytes sent, answered in 0.004 s",
+           "userdata, the flash the phone took longest over: piece 2: 63 blocks, 252 KiB written on the phone, 258112 bytes sent, answered in 0.006 s"]
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODE = os.environ.get("OMAINSTALL_STANDIN", "flow")
+LOG = os.environ.get("OMAINSTALL_STANDIN_LOG")
+# The core's objections to answers, as its AnswerProblem serialises
+# (core/src/flow.rs). Written by hand from the flow's own sentences.
+PROBLEMS = [
+    {"field": "username", "message": "Use lower-case letters, digits, - and _, starting with a letter (at most 32)."},
+    {"field": "password", "message": "The two don't match."},
+]
+
+
+def fixture(name):
+    with open(os.path.join(HERE, "fixtures", "screens", name + ".json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def say(message):
+    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def screen(name):
+    say({"type": "screen", "screen": fixture(name)})
+    return name
+
+
+def hear():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    if LOG:
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(line)
+    return json.loads(line)
+
+
+def progress(what, total, steps=4):
+    for n in range(1, steps + 1):
+        say({"type": "progress", "what": what, "done": total * n // steps, "total": total})
+        time.sleep(0.01)
+
+
+def piece(number):
+    line = "flash:userdata (piece %d: 64 blocks, 256 KiB written on the phone, 258112 bytes sent, answered in 0.005 s)" % number
+    say({"type": "piece", "number": number, "blocks": 64, "bytes": 258112, "seconds": 0.005, "line": line})
+
+
+def flow(first):
+    """Recorded screens, in the order of an install."""
+    at = screen(first)
+    looks = 0
+    tries = 0
+    while True:
+        message = hear()
+        kind = message.get("type")
+        action = fixture(at)["action"]
+        if kind == "quit":
+            say({"type": "bye"})
+            return
+        if kind == "acknowledge" and action == "acknowledge":
+            at = screen("phone")
+        elif kind == "decline" and action == "acknowledge":
+            at = screen("stop-warning-declined")
+        elif kind == "read-phone" and action == "read-phone":
+            looks += 1
+            if MODE == "flow-phones" and "phone" not in message:
+                say({"type": "phones", "title": "Two phones are connected. Which one is this install for?",
+                     "phones": [{"id": "1", "label": "Phone on USB port 1"}, {"id": "2", "label": "Phone on USB port 2"}]})
+                screen(at)
+            elif MODE == "flow-locked" and looks == 1:
+                at = screen("unlock")
+            else:
+                at = screen("google-terms")
+        elif kind == "accept-terms" and action == "accept-terms":
+            at = screen("factory-image-download")
+        elif kind == "decline-terms" and action == "accept-terms":
+            at = screen("factory-image-take-file")
+        elif kind == "download" and message.get("do") == "start" and action == "download":
+            size = fixture(at)["file"]["size"]
+            if MODE == "flow-slow":
+                say({"type": "progress", "what": "download", "done": 20000, "total": size})
+                while hear() != {"type": "download", "do": "cancel"}:
+                    pass
+                at = screen("factory-image-download-interrupted")
+            else:
+                progress("download", size)
+                at = screen("answers")
+        elif kind == "take-file" and action in ("download", "take-file"):
+            wanted = fixture(at)["file"]
+            if os.path.basename(message.get("path", "")) == "nowhere.zip":
+                say({"type": "error", "message": "There is no file " + message["path"]})
+                screen(at)
+            elif os.path.basename(message.get("path", "")) == wanted["name"]:
+                progress("check", wanted["size"])
+                at = screen("answers")
+            else:
+                at = screen("factory-image-download-wrong-file" if action == "download" else "factory-image-take-file-incomplete")
+        elif kind == "answers" and action == "answers":
+            if message.get("username") == "Root" or message.get("password") != message.get("password_again"):
+                say({"type": "problems", "problems": PROBLEMS})
+                screen(at)
+            else:
+                at = screen("dry-run")
+        elif kind == "dry-run" and action == "dry-run":
+            progress("dry-run", 8)
+            at = screen("confirm" if WRITES else "done")
+        elif kind == "confirm" and action == "confirm" and isinstance(message.get("typed"), str):
+            at = screen("write" if message["typed"] == "cheetah" else "stop-not-confirmed")
+        elif kind == "write" and action == "write":
+            tries += 1
+            if MODE == "flow-no-phone" and tries == 1:
+                say({"type": "error", "message": "No phone in Fastboot Mode answered."})
+                screen(at)
+                continue
+            progress("verify", 1642290)
+            say({"type": "progress", "what": "write", "done": 0, "total": 1642290})
+            for command in SENT:
+                say({"type": "sent", "command": command})
+            if MODE == "flow-long-write":
+                time.sleep(2.5)
+            if MODE == "flow-odd-write":
+                say({"type": "surprise"})
+                time.sleep(1.2)
+            piece(1)
+            if MODE == "flow-unplugged":
+                say({"type": "account", "lines": ACCOUNT[:1] + ["userdata, sent and not confirmed: piece 2: 63 blocks, 252 KiB written on the phone, 258112 bytes sent, not answered"]})
+                at = screen("stop-write-interrupted-userdata")
+                continue
+            for number in range(2, PIECES + 1):
+                piece(number)
+            say({"type": "account", "lines": ACCOUNT})
+            progress("write", 1642290, steps=1)
+            say({"type": "sent", "command": "set_active:b"})
+            say({"type": "sent", "command": "reboot"})
+            if os.environ.get("OMAINSTALL_STANDIN_DONE"):
+                open(os.environ["OMAINSTALL_STANDIN_DONE"], "w").close()
+            at = screen("installed")
+        elif kind in ("acknowledge", "decline", "read-phone", "accept-terms", "decline-terms", "download",
+                      "take-file", "answers", "dry-run", "confirm", "write"):
+            say({"type": "error", "message": kind + " is not this step"})
+            screen(at)
+        else:
+            say({"type": "fatal", "message": "unknown message: " + str(kind)})
+            sys.exit(1)
+
+
+def main():
+    if MODE == "silent":
+        time.sleep(60)
+        return
+    say({"type": "hello", "protocol": 99 if MODE == "mismatch" else PROTOCOL,
+         "tool": "omamobile-install (the tests' stand-in)", "version": "0.0.0-stand-in",
+         "writes": WRITES != (MODE == "other-mode")})
+    while True:
+        message = hear()
+        if message.get("type") == "quit":
+            say({"type": "bye"})
+            return
+        if message.get("type") == "hello":
+            if message.get("protocol") != PROTOCOL:
+                say({"type": "fatal", "message": "the app speaks protocol %s, and this tool speaks %d" % (message.get("protocol"), PROTOCOL)})
+                sys.exit(1)
+        elif message.get("type") == "start":
+            break
+        else:
+            say({"type": "fatal", "message": "expected hello, then start"})
+            sys.exit(1)
+
+    if MODE == "malformed":
+        sys.stdout.write("this is not JSON\n")
+        sys.stdout.flush()
+        time.sleep(60)
+    elif MODE == "odd-screen":
+        odd = fixture("warning")
+        del odd["footer"]
+        say({"type": "screen", "screen": odd})
+        time.sleep(60)
+    elif MODE == "unknown":
+        say({"type": "surprise"})
+        time.sleep(60)
+    elif MODE == "exit":
+        sys.stderr.write("stand-in: leaving, as the test asked\n")
+        sys.exit(3)
+    elif MODE == "fatal":
+        say({"type": "fatal", "message": "the release could not be read (the stand-in was told to fail)"})
+        sys.exit(1)
+    elif MODE.startswith("screen:"):
+        name = MODE.split(":", 1)[1]
+        screen(name)
+        while True:
+            if hear().get("type") == "quit":
+                say({"type": "bye"})
+                return
+            screen(name)
+    else:
+        flow("warning")
+
+
+if __name__ == "__main__":
+    main()

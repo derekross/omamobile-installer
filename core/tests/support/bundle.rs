@@ -202,6 +202,21 @@ impl TestBundle {
         conf: impl FnOnce(String) -> String,
         index: impl FnOnce(&mut Value),
     ) -> Self {
+        Self::build_for("cheetah", edit, conf, index)
+    }
+
+    /// A bundle for another phone model: its manifest, descriptor and
+    /// `MANIFEST` name `codename`. The build index stays cheetah's.
+    pub fn for_device(codename: &str) -> Self {
+        Self::build_for(codename, |_| {}, |c| c, |_| {})
+    }
+
+    fn build_for(
+        codename: &str,
+        edit: impl FnOnce(&mut Value),
+        conf: impl FnOnce(String) -> String,
+        index: impl FnOnce(&mut Value),
+    ) -> Self {
         let images: Vec<(String, Vec<u8>)> = IMAGES
             .iter()
             .enumerate()
@@ -209,8 +224,10 @@ impl TestBundle {
             .collect();
         let root_raw = root_image();
         let root_zst = zstd_store(&root_raw, true);
-        let device_conf = conf(default_conf()).into_bytes();
-        let manifest_txt = format!("version: 2026.01.02\ndevice: cheetah\nkernel release: 7.3.0-test\nroot image: {ROOT_NAME} ({})\n", sha256_hex(&root_zst)).into_bytes();
+        let device_conf =
+            conf(default_conf().replace("CODENAME=cheetah", &format!("CODENAME={codename}")))
+                .into_bytes();
+        let manifest_txt = format!("version: 2026.01.02\ndevice: {codename}\nkernel release: 7.3.0-test\nroot image: {ROOT_NAME} ({})\n", sha256_hex(&root_zst)).into_bytes();
 
         // The key: Ed25519 in the v4 format, as the release key is
         let mut rng = rand::thread_rng();
@@ -258,12 +275,12 @@ impl TestBundle {
         );
         let mut manifest = json!({
             "format": 1, "version": "2026.01.02", "label": "test", "name": "Omarchy Mobile",
-            "device": {"codename": "cheetah", "name": "Pixel 7 Pro"},
+            "device": {"codename": codename, "name": "Pixel 7 Pro"},
             "kernel": {"commit": "000000000000", "release": "7.3.0-test"},
             "files": files.iter().map(|(p, d)| json!({"path": p, "sha256": sha256_hex(d), "size": d.len()})).collect::<Vec<_>>(),
             "root_image": {"compression": "zstd", "name": ROOT_NAME, "sha256": sha256_hex(&root_zst), "size": root_zst.len()},
             "install": {
-                "tool": "fastboot", "product": "cheetah",
+                "tool": "fastboot", "product": codename,
                 "require_unlocked_bootloader": true, "require_matching_bootloader_slots": true,
                 "storage_guard_allowlist": ["boot_b", "init_boot_b", "vendor_boot_b", "vendor_kernel_boot_b", "dtbo_b", "userdata"],
                 "never": ["slot A (any *_a partition)"],

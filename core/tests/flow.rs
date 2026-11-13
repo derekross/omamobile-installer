@@ -142,11 +142,22 @@ fn footer_is_honest(stop: &Stop) {
     for claim in ["Nothing is lost", "nothing is lost", "safe to"] {
         assert!(!text.contains(claim) && !stop.message.join(" ").contains(claim));
     }
-    match stop.retry {
-        Retry::StopsAgain => assert!(text.contains("will stop here again")),
-        Retry::AfterFix => assert!(text.contains("once that is done")),
-        Retry::Whenever => assert!(text.contains("at any time")),
-    }
+    // The same fact as words in the footer and as the screen's typed field
+    let word = match stop.retry {
+        Retry::StopsAgain => {
+            assert!(text.contains("will stop here again"));
+            "stops-again"
+        }
+        Retry::AfterFix => {
+            assert!(text.contains("once that is done"));
+            "after-fix"
+        }
+        Retry::Whenever => {
+            assert!(text.contains("at any time"));
+            "whenever"
+        }
+    };
+    assert_eq!(serde_json::to_value(stop.retry).unwrap(), word);
     match stop.phone {
         PhoneFact::NotAsked => assert!(text.starts_with("Nothing was sent to a phone.")),
         PhoneFact::OnlyRead => {
@@ -161,6 +172,8 @@ fn footer_is_honest(stop: &Stop) {
             assert!(text.contains("written nothing to either"));
             assert_eq!(text.contains("erased that phone"), unlock_shown);
         }
+        // The stops after a write began are tested in write_path.rs
+        PhoneFact::WriteStopped { .. } => panic!("no stop of this file follows a write"),
     }
 }
 
@@ -1012,33 +1025,19 @@ fn the_maintainers_override_passes_no_other_stop() {
 fn the_maintainers_override_is_refused_where_a_write_could_follow() {
     let bundle = TestBundle::new();
     let release = bundle.verify().unwrap();
-    // A session that would write, asked to skip the check: a typed refusal,
-    // before a single question reaches the phone. On a one-slot phone...
+    // A session that would write, asked to skip the check, is refused
+    // before a single question reaches the phone. No test here can open
+    // one to try: that test is in core/src/flow/tests.rs
+    // (`the_session_that_writes_refuses_the_maintainers_override_before_anything_is_sent`).
+    assert!(Error::OverrideOutsideDryRun
+        .to_string()
+        .contains("in a dry run only"));
     let phone = phone("one-slot");
-    let writing = PhoneOptions {
-        maintainer_skip_bootloader_slot_check: true,
-        dry_run: false,
-        ..Default::default()
-    };
-    let err = block_on(Session::connect(
-        phone.clone(),
-        &release,
-        SERIAL,
-        writing.clone(),
-    ))
-    .unwrap_err();
-    assert_eq!(err, Error::OverrideOutsideDryRun);
-    assert!(err.to_string().contains("in a dry run only"));
-    assert!(phone.log().is_empty());
-    // ...and on any other, where it would have skipped nothing
     let ready = self::phone("ready");
-    let err = block_on(Session::connect(ready.clone(), &release, SERIAL, writing)).unwrap_err();
-    assert_eq!(err, Error::OverrideOutsideDryRun);
-    assert!(ready.log().is_empty());
-    // With every write held back it is taken, and the session says so
+    // A session opened directly holds every write back. There the override
+    // is taken, and the session says so
     let dry = PhoneOptions {
         maintainer_skip_bootloader_slot_check: true,
-        dry_run: true,
         ..Default::default()
     };
     let session = block_on(Session::connect(
@@ -1063,10 +1062,7 @@ fn the_maintainers_override_is_refused_where_a_write_could_follow() {
     let err = block_on(Session::connect(differ.clone(), &release, SERIAL, dry)).unwrap_err();
     assert!(matches!(&err, Error::Phone(why) if why.contains("slots differ")));
     // Without the override a one-slot phone is refused in a dry run too
-    let plain = PhoneOptions {
-        dry_run: true,
-        ..Default::default()
-    };
+    let plain = PhoneOptions::default();
     let err = block_on(Session::connect(phone.clone(), &release, SERIAL, plain)).unwrap_err();
     assert!(matches!(&err, Error::Phone(why) if why.contains("other slot")));
     for p in [&phone, &ready, &differ] {
@@ -2005,4 +2001,57 @@ fn a_file_name_with_control_characters_is_made_fit_to_print() {
     let text = fit_to_print(&flow);
     assert!(text.contains("wrong\\u{1b}[2J"), "{text}");
     assert!(text.contains("is not the file for this phone"));
+}
+
+#[test]
+fn a_stopped_screen_carries_whether_starting_again_can_help() {
+    let bundle = TestBundle::new();
+    // No screen that isn't a stop says anything about starting again
+    let mut flow = begin(&bundle);
+    let warning = serde_json::to_value(flow.screen()).unwrap();
+    assert_eq!(warning["retry"], Value::Null);
+    let p = phone("ready");
+    for state in [
+        "phone",
+        "google-terms",
+        "factory-image",
+        "answers",
+        "dry-run",
+    ] {
+        let flow = flow_at(&bundle, &p, state);
+        assert_eq!(flow.screen().retry, None, "{state}");
+    }
+    let mut done = flow_at(&bundle, &p, "dry-run");
+    finish_dry_run(&mut done, &p);
+    assert_eq!((done.screen().state, done.screen().retry), ("done", None));
+
+    // A stop's screen carries the stop's own fact, typed, and as one word
+    flow.decline_warning().unwrap();
+    let mut seen = vec![(flow.screen(), stop(&flow).retry)];
+    for scenario in ["other-model", "slot-b", "one-slot", "untested-old-build"] {
+        let p = phone(scenario);
+        let mut flow = flow_at(&bundle, &p, "phone");
+        look(&mut flow, &p).unwrap();
+        seen.push((flow.screen(), stop(&flow).retry));
+    }
+    let words: Vec<String> = seen
+        .iter()
+        .map(|(screen, retry)| {
+            assert_eq!(screen.retry, Some(*retry), "{:?}", screen.stop);
+            serde_json::to_value(screen).unwrap()["retry"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        words,
+        [
+            "whenever",
+            "after-fix",
+            "stops-again",
+            "stops-again",
+            "after-fix"
+        ]
+    );
 }

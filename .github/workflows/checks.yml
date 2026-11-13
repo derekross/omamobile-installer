@@ -1,11 +1,13 @@
 # The gate for every push and pull request: no identifiers, formatted, the
-# core's tests and the command-line tool's flow against the fake phone, the
-# web page built both ways and its self-test in a headless browser, and a
-# look at what ships: no way to write to a phone, no pretend phone. Nothing
-# here touches a USB device: the tests use a fake transport, and no step
-# lists or opens USB devices. Nothing here reaches Google: downloads go to
-# stand-ins on the runner, and the self-test's browser can resolve no host
-# but 127.0.0.1.
+# core's tests and the command-line tool's flow against the fake phone (as
+# text and as JSON lines), the web page built both ways and its self-test in
+# a headless browser, a look at what ships (no way to write to a phone but
+# the command-line tool's, no pretend phone), and the desktop app built and
+# tested against a stand-in and against the real tool with its pretend
+# phone. Nothing here touches a USB device: the tests use a fake transport,
+# and no step lists or opens USB devices. Nothing here reaches Google:
+# downloads go to stand-ins on the runner, and the self-test's browser can
+# resolve no host but 127.0.0.1.
 name: Checks
 on:
   push:
@@ -34,13 +36,13 @@ jobs:
         run: rustup show
       - name: Format
         run: cargo fmt --all --check
-      - name: The sources of what ships hold no way to write and no pretend phone
+      - name: The sources of what ships hold one way to write (the tool's --write) and no pretend phone
         run: tools/check-shipping
       - name: Lints (errors fail; warnings are listed)
         run: cargo clippy --locked
       - name: Tests (the core, against the fake phone; the install flow and the build index among them)
         run: cargo test --locked
-      - name: Tests (the command-line tool driving the flow against the pretend phone)
+      - name: Tests (the command-line tool driving the flow against the pretend phone, as text and as JSON lines)
         run: cargo test --locked -p omamobile-installer-cli --features fake-phone
       # web/build.sh needs wasm-bindgen-cli at exactly the wasm-bindgen
       # version in Cargo.lock. Built once per version and kept.
@@ -76,16 +78,19 @@ jobs:
       # What ships, as built: the command-line tool without features and the
       # page without the self-test. The tool is read as bytes, with the
       # tool the tests built with the pretend phone as the control; the
-      # page's module is loaded in node and asked whether it can write.
-      - name: What ships holds no way to write and no pretend phone
+      # page's module is loaded in node and its exports are listed (the
+      # flow, no direct session, no pretend phone), and what the page loads
+      # is read for the flow's write steps.
+      - name: What ships holds no pretend phone, and the page no way to write
         run: |
           cargo build --release --locked -p omamobile-installer-cli
           web/build.sh
           tools/check-shipping --built --control target/debug/omamobile-install
       # The shipping tool itself, on two commands it refuses from their
       # arguments alone, before any USB device is listed or opened: the
-      # pretend phone, and an install that is not a dry run.
-      - name: The shipping tool refuses the pretend phone and an install that is not a dry run
+      # pretend phone, an install that says neither --dry-run nor --write,
+      # one that says both, and the maintainer's override with --write.
+      - name: The shipping tool refuses the pretend phone and an install that does not say plainly what it is
         run: |
           tool=target/release/omamobile-install
           refused() {   # refused WHAT SAYS ARGS...: status 1, SAYS on stderr, nothing on stdout
@@ -100,9 +105,15 @@ jobs:
           refused "the shipping tool has no pretend phone" \
             "this build has no pretend phone" \
             flow fixtures/selftest --fake-phone ready
-          refused "the shipping tool installs only as a dry run" \
-            "this version installs only with --dry-run" \
+          refused "install has no default: it needs --dry-run or --write" \
+            "install needs --dry-run or --write, and has no default" \
             install fixtures/selftest --serial '<SERIAL>'
+          refused "--dry-run and --write together are refused" \
+            "--dry-run and --write are two different runs" \
+            install fixtures/selftest --serial '<SERIAL>' --dry-run --write
+          refused "the maintainer's override is refused with --write" \
+            "in a dry run only" \
+            install fixtures/selftest --serial '<SERIAL>' --write --maintainer-skip-bootloader-slot-check
           rm -f out.txt err.txt
       - name: The web page builds as it would ship, without the pretend phone
         run: |
@@ -115,4 +126,36 @@ jobs:
           # The maintainer's bootloader-slot override: no way to set it from the page
           if grep -qiE 'slot_override|maintainer' web/dist/pkg/omamobile_installer_web.js web/dist/*.html; then
             echo "the shipping build offers the bootloader-slot override"; exit 1
+          fi
+          grep -q 'cannot write to a phone' web/dist/index.html
+
+  # The desktop app (app/). It needs Qt 6.5 or newer (the window uses
+  # Material.roundedScale), and the runner's own distribution, Ubuntu 24.04,
+  # packages Qt 6.4.2: the window does not load there. So this job runs in an
+  # Arch Linux container, which is also what the app is built for.
+  app:
+    name: The desktop app, against a stand-in and against the real tool
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 30
+    steps:
+      # A font too: the image has none, and the test of the window at its
+      # smallest size measures the buttons' labels.
+      - name: Packages (Qt 6, a C++ compiler, Python for the tests' stand-in, a font, rustup)
+        run: pacman -Syu --noconfirm --needed base-devel git python qt6-base qt6-declarative ttf-dejavu rustup
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: The app builds
+        run: app/bin/build
+      # app/bin/test builds omamobile-install with its pretend phone (cargo)
+      # and runs the Qt tests offscreen: no window, no phone, no USB. A test
+      # that was skipped means the real tool was not there, and fails the job.
+      - name: The app's tests, with none skipped
+        shell: bash
+        run: |
+          set -o pipefail
+          app/bin/test | tee app-tests.log
+          if grep -q '^SKIP' app-tests.log; then
+            echo "a test of the app was skipped"; exit 1
           fi

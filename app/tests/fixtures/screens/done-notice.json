@@ -1,0 +1,33 @@
+{
+  "state": "done",
+  "stop": null,
+  "retry": null,
+  "title": "The dry run finished with one check skipped. Nothing was written",
+  "notice": "The bootloader-slot check was skipped by a maintainer override. This phone tells the version of only one of its two bootloader copies, and the installer went on without knowing the other. This run is not evidence that an install would be allowed.",
+  "body": [
+    "The Pixel 7 Pro (cheetah) is unlocked and runs from slot a; bootloader fake-1.0, baseband fake-radio-1.0.",
+    "Google's factory image for build TEST.260101.001 is the right file (cheetah-test.260101.001-factory-31c2322a.zip).",
+    "User alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set.",
+    "The release's images were not fetched for this dry run, so the list is the signed plan's. An install would send these writes, and only these:"
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [
+    "flash boot_b images/boot.img (16384 bytes)",
+    "flash init_boot_b images/init_boot.img (8192 bytes)",
+    "flash vendor_boot_b images/vendor_boot.img (4096 bytes)",
+    "flash vendor_kernel_boot_b images/vendor_kernel_boot.img (12288 bytes)",
+    "flash dtbo_b images/dtbo.img (4096 bytes)",
+    "flash userdata omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst (erases userdata)",
+    "set_active b",
+    "reboot"
+  ],
+  "footer": [
+    "The dry run only asked the phone questions. It has written nothing to it.",
+    "This run was a dry run, and it ends here: a dry run has no step that writes to a phone."
+  ],
+  "action": "none"
+}

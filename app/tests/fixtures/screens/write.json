@@ -1,0 +1,21 @@
+{
+  "state": "write",
+  "stop": null,
+  "retry": null,
+  "title": "Writing to the phone",
+  "notice": null,
+  "body": [
+    "The installer now writes the 6 partitions that were listed, then makes slot B the active slot and restarts the phone.",
+    "Keep the phone connected and in Fastboot Mode until it restarts by itself. Don't unplug it and don't press its keys."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "Before the first write the installer asks the phone once more what it is, and checks each image against its partition again."
+  ],
+  "action": "write"
+}

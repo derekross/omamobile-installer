@@ -8,18 +8,34 @@
 //!   omamobile-install install BUNDLE_DIR --serial SERIAL --dry-run [--reinstall]
 //!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the install flow up to the dry run, read-only
-//!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--reinstall] [--factory-zip FILE]
-//!                             [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
+//!   omamobile-install install BUNDLE_DIR --serial SERIAL --write [--reinstall]
+//!                             [--bootloader-slots-match VERSION]
+//!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
+//!                                                USB: the install flow, and the writes
+//!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--write] [--reinstall]
+//!                             [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
 //!                                                no phone: the same flow against a pretend phone
 //!                                                (only in a build with the `fake-phone` feature)
+//!   omamobile-install json [--release BUNDLE_DIR] [--work-dir DIR]
+//!                                                USB: the same flow as JSON lines on standard input
+//!                                                and output, for the desktop app, agents and scripts
+//!                                                (json.rs, docs/APP.md)
+//!   omamobile-install help                       what each command does, and what --write erases
 //!
-//! `install` and `flow` drive the core's one install flow (core/src/flow.rs):
-//! this file prints the screens the flow gives it and hands in what was
-//! typed. It decides nothing and words nothing of its own about the phone.
+//! `install`, `flow` and `json` drive the core's one install flow
+//! (core/src/flow.rs): this file prints the screens the flow gives it and
+//! hands in what was typed, and json.rs sends them as they are. Neither
+//! decides anything or words anything of its own about the phone.
 //!
-//! The flow ends at the dry run, and `install` runs only with `--dry-run`:
-//! nothing here can write to a phone. All that reaches one is `getvar` and,
-//! for a locked phone, the one question `flashing get_unlock_ability`.
+//! `install` takes `--dry-run` or `--write`, one of them, and has no default.
+//! With `--dry-run` all that reaches a phone is `getvar` and, for a locked
+//! phone, the one question `flashing get_unlock_ability`. With `--write` the
+//! flow does the same dry run first, then lists what it will write and what
+//! is erased, and waits for the phone's codename to be typed; only then does
+//! this file send the release's images through the one session the flow
+//! opens for it (`Flow::begin_write`). It opens no session of its own, and
+//! which partitions are written is the core's: slot B's boot images and
+//! `userdata`, then `set_active:b` and `reboot`.
 //!
 //! Google's factory image: once the owner has accepted Google's terms on the
 //! flow's terms step, this tool downloads the file from the address the core
@@ -43,28 +59,32 @@
 //! take `--maintainer-skip-bootloader-slot-check`, which lets a dry run go on
 //! past a phone that reports one bootloader slot's version (docs/DESIGN.md
 //! §6). The core says on every screen that the check was skipped; without
-//! `--dry-run` it is refused here, before any USB device is looked for.
+//! `--dry-run` it is refused here, before any USB device is looked for, and
+//! the core refuses it again in a flow that writes.
 use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
 use omamobile_installer_core::download::{
     FactoryDownload, FetchFailure, FetchNext, FetchRequest, FetchResponse,
 };
 use omamobile_installer_core::fastboot::{
-    PhoneId, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
+    PhoneId, PieceReport, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
 use omamobile_installer_core::flow::{
-    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen,
+    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen, WRITE_HELP,
 };
-use omamobile_installer_core::install::{flash_userdata_from_reader, UserdataStream};
+use omamobile_installer_core::install::{flash_userdata_with_progress, UserdataStream};
 use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_core::text::plain;
 use omamobile_installer_core::{build_index, Error};
 use omamobile_installer_usb::UsbTransport;
 use pollster::block_on;
+use std::cell::{Cell, RefCell};
 use std::fs::{self, File};
 use std::io::{self, BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+mod json;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -157,12 +177,15 @@ fn find_root(dir: &Path, name: &str) -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
+/// Hash the root image from an open file, from where it stands (its
+/// start). The caller keeps the handle and streams from it afterwards, so
+/// that what is hashed and what is sent are one file, not two openings of
+/// a name.
 fn hash_root(
     release: &VerifiedRelease,
-    path: &Path,
+    file: &mut impl Read,
 ) -> Res<omamobile_installer_core::bundle::VerifiedRootImage> {
     let mut check = release.root_image_check();
-    let mut file = File::open(path)?;
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = file.read(&mut buf)?;
@@ -183,7 +206,7 @@ fn cmd_verify(dir: &Path) -> Res<()> {
     );
     match find_root(dir, &m.root_image.name) {
         Some(path) => {
-            hash_root(&release, &path)?;
+            hash_root(&release, &mut File::open(&path)?)?;
             println!("root image matches the signed manifest");
         }
         None => println!(
@@ -407,6 +430,58 @@ fn show(screen: &Screen) {
     }
 }
 
+/// What a long step says on the way, and how it is ended early. The
+/// terminal prints; the JSON mode sends `progress` and listens for a cancel.
+trait Watch {
+    /// A line for a person at a terminal.
+    fn note(&mut self, _text: &str) {}
+    /// Bytes done and bytes in all. `what`: `download`, `check`, `dry-run`,
+    /// and in a run that writes `verify` (the release's files, each checked
+    /// before the first write) and `write` (the same files, as they are sent).
+    fn progress(&mut self, what: &'static str, done: u64, total: u64);
+    /// A command that is not a question was sent by the session that
+    /// writes, as the phone received it.
+    fn sent(&mut self, _command: &str) {}
+    /// A piece of `userdata` was sent by the session that writes.
+    fn piece(&mut self, _number: u32, _piece: &PieceReport) {}
+    /// What the run keeps of the pieces of `userdata` ([`userdata_account`]).
+    fn account(&mut self, _lines: &[String]) {}
+    /// Asked between the pieces of a step: `false` ends it here.
+    fn go_on(&mut self, _what: &'static str) -> bool {
+        true
+    }
+}
+
+/// The terminal: a download's bytes at each tenth, and nothing ends early.
+#[derive(Default)]
+struct Terminal {
+    tenth: Option<u64>,
+}
+
+impl Watch for Terminal {
+    fn note(&mut self, text: &str) {
+        println!("    {text}");
+    }
+    fn progress(&mut self, what: &'static str, done: u64, total: u64) {
+        let tenth = done * 10 / total.max(1);
+        if what == "download" && self.tenth != Some(tenth) {
+            self.tenth = Some(tenth);
+            println!("    {done} of {total} bytes");
+        }
+    }
+    fn sent(&mut self, command: &str) {
+        println!("    {command}");
+    }
+    fn piece(&mut self, number: u32, piece: &PieceReport) {
+        println!("    flash:userdata ({})", piece_line(number, piece));
+    }
+    fn account(&mut self, lines: &[String]) {
+        for line in lines {
+            println!("    {line}");
+        }
+    }
+}
+
 fn local_timezone() -> String {
     fs::read_link("/etc/localtime")
         .ok()
@@ -466,14 +541,77 @@ fn ask_answers(typed: &mut Typed) -> Res<OwnerAnswers> {
     }
 }
 
-/// Walk the release's images through the dry run's session, when they are
-/// on disk: each is checked against the signed manifest first, and the
-/// session holds every write back. `Ok(false)`: the files aren't here.
+/// Tell `watch` what the session sent since `seen` that is not a question:
+/// the commands themselves, as the phone received them.
+fn show_sent<T: Transport>(session: &Session<T>, seen: &mut usize, watch: &mut dyn Watch) {
+    for command in &session.log()[*seen..] {
+        if !command.starts_with("getvar:") {
+            watch.sent(command);
+        }
+    }
+    *seen = session.log().len();
+}
+
+/// One piece of userdata in words: what its flash covered on the phone, and
+/// how long the phone took to answer it.
+fn piece_line(number: u32, piece: &PieceReport) -> String {
+    let took = match piece.flash {
+        Some(took) => format!("answered in {:.3} s", took.as_secs_f64()),
+        None => "not answered".into(),
+    };
+    format!(
+        "piece {number}: {} blocks, {} KiB written on the phone, {} bytes sent, {took}",
+        piece.blocks,
+        piece.blocks as u64 * 4,
+        piece.bytes
+    )
+}
+
+/// What the run's log keeps of the userdata pieces: the one that covered
+/// the most blocks (the most work one flash asked of the phone), the flash
+/// the phone took longest over, and a piece that was sent and not answered.
+fn userdata_account(pieces: &[PieceReport]) -> Vec<String> {
+    let numbered = || pieces.iter().enumerate().map(|(i, p)| (i as u32 + 1, p));
+    let mut out = Vec::new();
+    // The first of equals, so the line names one piece
+    if let Some((n, piece)) = numbered().rev().max_by_key(|(_, p)| p.blocks) {
+        out.push(format!(
+            "userdata, the piece that covered the most blocks: {}",
+            piece_line(n, piece)
+        ));
+    }
+    if let Some((n, piece)) = numbered()
+        .rev()
+        .filter(|(_, p)| p.flash.is_some())
+        .max_by_key(|(_, p)| p.flash)
+    {
+        out.push(format!(
+            "userdata, the flash the phone took longest over: {}",
+            piece_line(n, piece)
+        ));
+    }
+    if let Some((n, piece)) = numbered().next_back().filter(|(_, p)| p.flash.is_none()) {
+        out.push(format!(
+            "userdata, sent and not confirmed: {}",
+            piece_line(n, piece)
+        ));
+    }
+    out
+}
+
+/// Send the release's images through a session the flow opened, when they
+/// are on disk: each is checked against the signed manifest first. In the
+/// dry run's session every write is held back; in the one `Flow::begin_write`
+/// opened they are written, and `watch` is told each command as it is sent.
+/// `Ok(false)`: the files aren't here, and nothing was sent.
 async fn walk_images<T: Transport>(
     session: &mut Session<T>,
     release: &VerifiedRelease,
     dir: &Path,
+    watch: &mut dyn Watch,
 ) -> Result<bool, Error> {
+    let writing = !session.is_dry_run();
+    let mut seen = session.log().len();
     let m = release.manifest();
     let Some(root_path) = find_root(dir, &m.root_image.name) else {
         return Ok(false);
@@ -482,17 +620,94 @@ async fn walk_images<T: Transport>(
         return Ok(false);
     }
     let io = |e: io::Error| Error::Transport(format!("reading the release's files: {e}"));
+    // Every file is checked before the first write, the root image among
+    // them: a file that is not the release's is found while the phone is
+    // still as it was, not after slot B's boot partitions are written.
+    // The bytes to get through: every file twice, once to check it and
+    // once to send it (or, in a dry run, to walk it through the session).
+    // A dry run counts the two as one; a run that writes says which of
+    // the two it is at, since only the second reaches the phone
+    let root_size = fs::metadata(&root_path).map_err(io)?.len();
+    let once = m.boot_writes.iter().map(|w| w.size).sum::<u64>() + root_size;
+    let watch = RefCell::new(watch);
+    let (done, sending) = (Cell::new(0u64), Cell::new(false));
+    let add = |bytes: u64| {
+        done.set(done.get() + bytes);
+        let (what, done, total) = match (writing, sending.get()) {
+            (false, _) => ("dry-run", done.get(), 2 * once),
+            (true, false) => ("verify", done.get(), once),
+            (true, true) => ("write", done.get().saturating_sub(once), once),
+        };
+        watch.borrow_mut().progress(what, done, total);
+    };
+    add(0);
     for w in &m.boot_writes {
         let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
-        session
-            .flash_boot(&release.verify_boot_image(w, &bytes)?)
-            .await?;
+        release.verify_boot_image(w, &bytes)?;
+        add(bytes.len() as u64);
     }
-    let root = hash_root(release, &root_path).map_err(|e| Error::Checksum(e.to_string()))?;
-    let reader = File::open(&root_path).map_err(io)?;
-    flash_userdata_from_reader(session, &root, reader, Some(64 << 20)).await?;
-    session.activate_and_reboot().await?;
+    // The root image is opened once. It is hashed from this handle, and
+    // the same handle is rewound and streamed, so the file that is sent is
+    // the file that was checked even if the name is given to another file
+    // meanwhile. A file whose bytes change in place between the two is
+    // caught by the session, which hashes what it is sent again and
+    // refuses to make slot B active for anything else.
+    let mut root_file = File::open(&root_path).map_err(io)?;
+    let root = hash_root(release, &mut Counted(&mut root_file, &add))
+        .map_err(|e| Error::Checksum(e.to_string()))?;
+    root_file.seek(SeekFrom::Start(0)).map_err(io)?;
+    sending.set(true);
+    add(0);
+    // Each boot image is read and checked again as it is written: the
+    // bytes that are sent are the bytes that were just checked
+    for w in &m.boot_writes {
+        let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
+        let result = session
+            .flash_boot(&release.verify_boot_image(w, &bytes)?)
+            .await;
+        if writing {
+            show_sent(session, &mut seen, &mut **watch.borrow_mut());
+        }
+        result?;
+        add(bytes.len() as u64);
+    }
+    let reader = Counted(&mut root_file, &add);
+    if writing {
+        // The core has no clock: this one times each flash of userdata
+        let begun = std::time::Instant::now();
+        session.time_flashes_with(Box::new(move || begun.elapsed()));
+    }
+    let mut progress = |pieces: u32, piece: &PieceReport| {
+        if writing {
+            watch.borrow_mut().piece(pieces, piece);
+        }
+    };
+    let result =
+        flash_userdata_with_progress(session, &root, reader, Some(64 << 20), &mut progress).await;
+    if writing {
+        watch
+            .borrow_mut()
+            .account(&userdata_account(session.pieces()));
+    }
+    result?;
+    seen = session.log().len();
+    let result = session.activate_and_reboot().await;
+    if writing {
+        show_sent(session, &mut seen, &mut **watch.borrow_mut());
+    }
+    result?;
     Ok(true)
+}
+
+/// A file of the release as a session reads it, counted for the progress.
+struct Counted<'a, R>(R, &'a dyn Fn(u64));
+
+impl<R: Read> Read for Counted<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.0.read(buf)?;
+        (self.1)(n as u64);
+        Ok(n)
+    }
 }
 
 // ---- Google's factory image ----------------------------------------------
@@ -544,6 +759,22 @@ fn agent(https_only: bool, proxy: Option<ureq::Proxy>) -> ureq::Agent {
 impl Fetcher {
     fn google(proxy: Option<ureq::Proxy>) -> Self {
         Fetcher::Google(agent(true, proxy))
+    }
+
+    /// For a pretend run, which never reaches Google: a stand-in on this
+    /// computer answers in its place, or nothing does.
+    #[cfg(feature = "fake-phone")]
+    fn pretend(fake_google: Option<&str>, proxy: Option<ureq::Proxy>) -> Res<Self> {
+        let Some(at) = fake_google else {
+            return Ok(Fetcher::Nowhere);
+        };
+        let at: std::net::SocketAddr = at
+            .parse()
+            .map_err(|_| "--fake-google takes an address like 127.0.0.1:8080")?;
+        if !at.ip().is_loopback() {
+            return Err("--fake-google takes an address on this computer only".into());
+        }
+        Ok(Fetcher::StandIn(agent(false, proxy), at))
     }
 
     /// How long a body may stay silent before the try is ended.
@@ -659,10 +890,14 @@ impl Pieces {
 
 /// Carry out what one try at the download asks: the kept bytes first, then
 /// the requests, the body into `file`. Every decision is `download`'s.
+/// `watch` is told how far it is, and may end the transfer between pieces,
+/// also one that stands still: the core then finds fewer bytes than the
+/// file has, as when a transfer broke off.
 fn fetch(
     download: &mut FactoryDownload,
     fetcher: &Fetcher,
     path: &Path,
+    watch: &mut dyn Watch,
 ) -> Result<(), FetchFailure> {
     let storage = |e: io::Error| FetchFailure::Storage(format!("{}: {e}", path.display()));
     let mut file = fs::OpenOptions::new()
@@ -719,11 +954,15 @@ fn fetch(
                 file.seek(SeekFrom::Start(at)).map_err(storage)?;
                 let idle = fetcher.body_idle();
                 let body = Pieces::of(response.into_body().into_reader());
-                let mut shown = None;
-                loop {
-                    let piece = match body.next(idle) {
+                // Waited for in short turns, so that `watch` can end a
+                // transfer that stands still before the silence runs out
+                let turn = idle.min(Duration::from_millis(200));
+                let mut heard = Instant::now();
+                while watch.go_on("download") {
+                    let piece = match body.next(turn) {
                         Piece::Bytes(piece) => piece,
                         Piece::End => break,
+                        Piece::Silent if heard.elapsed() < idle => continue,
                         // What arrived so far is in the file, for the next try
                         Piece::Silent => {
                             return Err(FetchFailure::Stalled {
@@ -732,17 +971,14 @@ fn fetch(
                         }
                         Piece::Broke(why) => return Err(FetchFailure::Network(why)),
                     };
+                    heard = Instant::now();
                     // The core takes no byte past the file's size
                     if !download.body(&piece) {
                         break;
                     }
                     file.write_all(&piece).map_err(storage)?;
                     let (done, total) = download.progress();
-                    let tenth = done * 10 / total.max(1);
-                    if shown != Some(tenth) {
-                        shown = Some(tenth);
-                        println!("    {done} of {total} bytes");
-                    }
+                    watch.progress("download", done, total);
                 }
                 return file.flush().map_err(storage);
             }
@@ -758,6 +994,7 @@ fn download_factory_zip(
     proxied: bool,
     work_dir: Option<&Path>,
     name: &str,
+    watch: &mut dyn Watch,
 ) -> Res<()> {
     let dir = match work_dir {
         Some(dir) => dir.to_path_buf(),
@@ -772,16 +1009,16 @@ fn download_factory_zip(
     let path = if whole.is_file() { &whole } else { &part };
     let have = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut download = flow.factory_download(have)?;
-    println!(
-        "    downloading {name} into {}{}",
+    watch.note(&format!(
+        "downloading {name} into {}{}",
         dir.display(),
         if proxied {
             ", through the proxy named with --proxy"
         } else {
             ""
         }
-    );
-    let failure = fetch(&mut download, fetcher, path).err();
+    ));
+    let failure = fetch(&mut download, fetcher, path, watch).err();
     match flow.factory_download_done(download, failure)? {
         DownloadEnd::Verified => {
             if path != &whole {
@@ -808,32 +1045,45 @@ fn download_factory_zip(
     Ok(())
 }
 
-/// Hand the flow a file the owner saved, read a piece at a time.
-fn take_factory_zip(flow: &mut Flow, path: &Path) -> Res<()> {
+/// Hand the flow a file the owner saved, read a piece at a time. `false`:
+/// there is no such file, and the flow was handed nothing. A check that
+/// `watch` ends early is dropped, and the flow's step stays as it was.
+fn take_factory_zip(flow: &mut Flow, path: &Path, watch: &mut dyn Watch) -> Res<bool> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let size = match fs::metadata(path) {
         Ok(meta) if meta.is_file() => meta.len(),
-        _ => {
-            println!("    There is no file {}", path.display());
-            return Ok(());
-        }
+        _ => return Ok(false),
     };
     if let Some(mut check) = flow.factory_zip(name, size)? {
-        println!("    checking {name}");
+        watch.note(&format!("checking {name}"));
         // Streamed: a megabyte at a time, never the whole file
         let mut file = File::open(path)?;
         let mut buf = vec![0u8; 1 << 20];
         loop {
+            if !watch.go_on("check") {
+                return Ok(true);
+            }
             let n = file.read(&mut buf)?;
             if n == 0 {
                 break;
             }
             check.update(&buf[..n]);
+            let (done, total) = check.progress();
+            watch.progress("check", done, total);
         }
         flow.factory_zip_done(check)?;
+    }
+    Ok(true)
+}
+
+/// As the terminal does it: a file that is not there is said, and the step
+/// stays open.
+fn take_typed_zip(flow: &mut Flow, path: &Path) -> Res<()> {
+    if !take_factory_zip(flow, path, &mut Terminal::default())? {
+        println!("    There is no file {}", path.display());
     }
     Ok(())
 }
@@ -906,7 +1156,7 @@ fn run_flow<T: Transport>(
                         "Press Enter to try the download again, or type where you saved the file yourself: ",
                     )?;
                     if !own.is_empty() {
-                        take_factory_zip(&mut flow, Path::new(&own))?;
+                        take_typed_zip(&mut flow, Path::new(&own))?;
                         continue;
                     }
                 }
@@ -918,6 +1168,7 @@ fn run_flow<T: Transport>(
                     factory.proxied,
                     factory.work_dir.as_deref(),
                     name.ok_or("the flow names no file to download")?,
+                    &mut Terminal::default(),
                 )?;
             }
             "take-file" => {
@@ -925,7 +1176,7 @@ fn run_flow<T: Transport>(
                     Some(path) => path,
                     None => PathBuf::from(typed.ask("Where did you save the file? ")?),
                 };
-                take_factory_zip(&mut flow, &path)?;
+                take_typed_zip(&mut flow, &path)?;
             }
             "answers" => flow.answers(&ask_answers(&mut typed)?)?,
             "dry-run" => {
@@ -936,7 +1187,12 @@ fn run_flow<T: Transport>(
                 };
                 let release = flow.release().ok_or("the flow has no release")?.clone();
                 if let Some(mut session) = block_on(flow.dry_run(transport))? {
-                    match block_on(walk_images(&mut session, &release, &bundle.dir)) {
+                    match block_on(walk_images(
+                        &mut session,
+                        &release,
+                        &bundle.dir,
+                        &mut Terminal::default(),
+                    )) {
                         Ok(_) => {
                             flow.dry_run_done(session)?;
                         }
@@ -944,7 +1200,44 @@ fn run_flow<T: Transport>(
                     }
                 }
             }
-            _ => return Ok(screen.state == "done"),
+            // What will be written was listed: the owner types the phone's
+            // codename, and the core takes that or stops
+            "confirm" => {
+                let answer = typed.ask("Codename: ")?;
+                flow.confirm_install(&answer)?;
+            }
+            "write" => {
+                let Some((transport, _)) = connect()? else {
+                    println!("    No phone in Fastboot Mode answered.");
+                    typed.ask("Press Enter to look again: ")?;
+                    continue;
+                };
+                let release = flow.release().ok_or("the flow has no release")?.clone();
+                // The one session that can write is the flow's
+                if let Some(mut session) = block_on(flow.begin_write(transport))? {
+                    match block_on(walk_images(
+                        &mut session,
+                        &release,
+                        &bundle.dir,
+                        &mut Terminal::default(),
+                    )) {
+                        Ok(true) => {
+                            flow.write_done(session)?;
+                        }
+                        Ok(false) => {
+                            let gone = Error::Transport(
+                                "the release's files are no longer where the dry run read them"
+                                    .into(),
+                            );
+                            flow.write_failed(session, &gone)?;
+                        }
+                        Err(e) => {
+                            flow.write_failed(session, &e)?;
+                        }
+                    }
+                }
+            }
+            _ => return Ok(matches!(screen.state, "done" | "installed")),
         }
     }
 }
@@ -969,20 +1262,7 @@ fn cmd_fake(
     proxy: Option<ureq::Proxy>,
 ) -> Res<bool> {
     use fake::{FakePhone, SERIAL};
-    // A pretend run never reaches Google: a stand-in on this computer
-    // answers in its place, or nothing does
-    factory.fetcher = match fake_google {
-        Some(at) => {
-            let at: std::net::SocketAddr = at
-                .parse()
-                .map_err(|_| "--fake-google takes an address like 127.0.0.1:8080")?;
-            if !at.ip().is_loopback() {
-                return Err("--fake-google takes an address on this computer only".into());
-            }
-            Fetcher::StandIn(agent(false, proxy), at)
-        }
-        None => Fetcher::Nowhere,
-    };
+    factory.fetcher = Fetcher::pretend(fake_google, proxy)?;
     let phone = FakePhone::scenario(scenario).ok_or_else(|| {
         format!(
             "no pretend phone '{scenario}'; there are: {}",
@@ -994,6 +1274,7 @@ fn cmd_fake(
     let trusted = TrustedKeys::new(&[fingerprint.trim()])?;
     println!("A pretend phone ({scenario}), held in memory. No USB device is opened.");
     let mut looks = 0;
+    // The record is printed however the run ended
     let done = run_flow(&bundle, &trusted, options, factory, || {
         looks += 1;
         // A locked pretend phone is unlocked by its pretend owner after the
@@ -1005,7 +1286,7 @@ fn cmd_fake(
             });
         }
         Ok(Some((phone.clone(), PhoneId::of_serial(SERIAL).unwrap())))
-    })?;
+    });
     let log = phone.log();
     let (asked, other) = (phone.unlock_questions(), phone.not_reads().len());
     println!(
@@ -1014,7 +1295,16 @@ fn cmd_fake(
         log.len() - asked - other,
         phone.written().len()
     );
-    Ok(done)
+    if other > 0 {
+        println!(
+            "Those others, in the order it received them (partitions written: {}):",
+            phone.written().join(", ")
+        );
+        for command in phone.not_reads() {
+            println!("    {command}");
+        }
+    }
+    done
 }
 
 #[cfg(not(feature = "fake-phone"))]
@@ -1029,7 +1319,37 @@ fn cmd_fake(
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S --dry-run [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT]";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
+
+/// What `help` says about [`SLOTS_MATCH`].
+const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written.";
+
+/// `omamobile-install help`: the commands, and what `--write` does to a
+/// phone, in the core's words.
+fn cmd_help() {
+    println!("{USAGE}\n");
+    println!("  verify DIR           check a downloaded release: signature, rules, every file. No phone.");
+    println!("  sparse IMG OUTDIR    cut a root image into the sparse images a flash would send. No phone.");
+    println!("  devices              list phones in Fastboot Mode (USB; reads only).");
+    println!("  install DIR --serial S --dry-run");
+    println!(
+        "                       the install flow up to its dry run. It asks the phone questions"
+    );
+    println!("                       and writes nothing.");
+    println!("  install DIR --serial S --write");
+    wrap(
+        WRITE_HELP,
+        "                       ",
+        "                       ",
+    );
+    println!("\n  install needs --dry-run or --write, one of them: there is no default.");
+    println!("\n  install ... {SLOTS_MATCH} VERSION");
+    wrap(
+        SLOTS_MATCH_HELP,
+        "                       ",
+        "                       ",
+    );
+}
 
 fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
     // Decode a small .zst repeatedly: the same loop as the browser self-test
@@ -1052,6 +1372,10 @@ fn bench_zstd(file: &str, rounds: &str) -> Res<()> {
 /// The maintainer's override for the bootloader-slot stop, in a dry run
 /// only. Deliberately not in [`USAGE`].
 const SLOT_OVERRIDE: &str = "--maintainer-skip-bootloader-slot-check";
+/// The owner's statement for a phone that reports one bootloader slot's
+/// version: the other slot's was read from the phone and is VERSION. The
+/// core compares it with the phone ([`FlowOptions::bootloader_slots_match`]).
+const SLOTS_MATCH: &str = "--bootloader-slots-match";
 
 /// `Ok(false)`: the install flow stopped, and has said why.
 fn run() -> Res<bool> {
@@ -1063,8 +1387,9 @@ fn run() -> Res<bool> {
         ["sparse", image, out, max] => cmd_sparse(Path::new(image), Path::new(out), max.parse()?)?,
         ["bench-zstd", file, rounds] => bench_zstd(file, rounds)?,
         ["devices"] => block_on(cmd_devices())?,
+        ["help" | "--help" | "-h"] => cmd_help(),
         [command @ ("install" | "flow"), dir, rest @ ..] => {
-            let (mut serial, mut fake, mut dry_run) = (None, None, false);
+            let (mut serial, mut fake, mut dry_run, mut write) = (None, None, false, false);
             let (mut options, mut fake_google) = (FlowOptions::default(), None);
             let (mut own_file, mut work_dir, mut proxy) = (None, None, None);
             let mut it = rest.iter();
@@ -1073,8 +1398,22 @@ fn run() -> Res<bool> {
                     "--serial" => serial = it.next().copied(),
                     "--fake-phone" => fake = it.next().copied(),
                     "--dry-run" => dry_run = true,
+                    "--write" => write = true,
                     "--reinstall" => options.reinstall = true,
                     SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
+                    // The owner's statement about the other bootloader
+                    // slot, as tools/install-phone takes it: said once,
+                    // with the version that was read from the phone
+                    SLOTS_MATCH => {
+                        let version = it.next().copied().filter(|v| !v.is_empty());
+                        let Some(version) = version else {
+                            return Err(format!("{SLOTS_MATCH} takes the bootloader version that was read from the phone's other slot").into());
+                        };
+                        if options.bootloader_slots_match.is_some() {
+                            return Err(format!("{SLOTS_MATCH} is given once").into());
+                        }
+                        options.bootloader_slots_match = Some(version.to_string());
+                    }
                     "--factory-zip" => own_file = it.next().map(PathBuf::from),
                     "--work-dir" => work_dir = it.next().map(PathBuf::from),
                     // The one way a proxy is used: named here, by the owner
@@ -1096,6 +1435,13 @@ fn run() -> Res<bool> {
             if options.maintainer_skip_bootloader_slot_check && *command == "install" && !dry_run {
                 return Err(Box::new(Error::OverrideOutsideDryRun));
             }
+            if dry_run && write {
+                return Err(
+                    "--dry-run and --write are two different runs: give one of them".into(),
+                );
+            }
+            // The one switch that lets the flow write. It is never implied.
+            options.write = write;
             return match (*command, serial, fake) {
                 ("flow", None, Some(scenario)) => {
                     cmd_fake(dir, scenario, options, factory, fake_google, proxy)
@@ -1114,8 +1460,8 @@ fn run() -> Res<bool> {
                 (_, None, _) => {
                     Err("--serial SERIAL is required: the install is pinned to one phone".into())
                 }
-                (_, Some(_), _) if !dry_run => Err(Box::new(Error::Refused(
-                    "this version installs only with --dry-run: its flow ends at the dry run, and it has no step that writes to a phone".into(),
+                (_, Some(_), _) if !dry_run && !write => Err(Box::new(Error::Refused(
+                    "install needs --dry-run or --write, and has no default. --dry-run asks the phone questions and writes nothing. --write erases the phone's userdata and writes slot B: 'omamobile-install help' says exactly what".into(),
                 ))),
                 (_, Some(serial), _) => cmd_install(dir, serial, options, factory),
             };
@@ -1126,6 +1472,12 @@ fn run() -> Res<bool> {
 }
 
 fn main() -> ExitCode {
+    // The JSON mode owns standard output: nothing below may print there
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("json") {
+        let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+        return json::run(&rest);
+    }
     match run() {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(2),

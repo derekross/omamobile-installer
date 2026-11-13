@@ -1,0 +1,37 @@
+{
+  "state": "confirm",
+  "stop": null,
+  "retry": null,
+  "title": "This is what the installer will write",
+  "notice": null,
+  "body": [
+    "The Pixel 7 Pro (cheetah) is unlocked and runs from slot a; bootloader fake-1.0, baseband fake-radio-1.0.",
+    "Google's factory image for build TEST.260101.001 is the right file (cheetah-test.260101.001-factory-31c2322a.zip).",
+    "Your answers: user alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set.",
+    "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:"
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [
+    "boot_b: images/boot.img, 16384 bytes (the partition holds 16384 bytes)",
+    "init_boot_b: images/init_boot.img, 8192 bytes (the partition holds 8192 bytes)",
+    "vendor_boot_b: images/vendor_boot.img, 4096 bytes (the partition holds 16384 bytes)",
+    "vendor_kernel_boot_b: images/vendor_kernel_boot.img, 12288 bytes (the partition holds 32768 bytes)",
+    "dtbo_b: images/dtbo.img, 4096 bytes (the partition holds 8192 bytes)",
+    "userdata: omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst, 2097152 bytes unpacked, sent in 6 pieces (the partition holds 8388608 bytes). ERASES userdata",
+    "then: make slot B the active slot (set_active:b)",
+    "then: restart the phone (reboot)"
+  ],
+  "footer": [
+    "userdata will be ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again.",
+    "Slot B's boot partitions, listed above, are overwritten.",
+    "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.",
+    "This version of the installer cannot put your answers on the phone: it has no way yet to write them into the system image. So the phone starts Omarchy Mobile with no user account, no PIN or password and no Wi-Fi set up, and there is nothing to unlock it with. An install made with this version shows that the install itself works; it does not give you a phone you can use.",
+    "To go ahead, type the phone's codename: cheetah",
+    "Anything else stops the install here, with nothing written."
+  ],
+  "action": "confirm"
+}
