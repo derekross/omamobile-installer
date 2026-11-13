@@ -1071,11 +1071,14 @@ dependencies = [
 name = "omamobile-installer-cli"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "nusb",
  "omamobile-installer-core",
  "omamobile-installer-usb",
+ "omamobile-link",
  "pollster",
  "rustix",
+ "serde",
  "serde_json",
  "ureq",
 ]

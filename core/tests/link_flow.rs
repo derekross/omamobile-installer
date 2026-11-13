@@ -505,3 +505,43 @@ fn every_screen_of_the_link_is_plain_and_names_its_action() {
     let s = r.link.screen();
     assert_eq!((s.state, s.action), ("ready", "none"));
 }
+
+/// Writes a signed test bundle whose root image offers the install link to
+/// fixtures/selftest-link/, for the tool's pretend runs, the desktop app's
+/// tests and recorded screens, which can't make keys. Its images, root
+/// image and factory zip are the same bytes as fixtures/selftest's, and are
+/// links to those files. Run by hand:
+/// `cargo test -p omamobile-installer-core --test link_flow -- --ignored`
+#[test]
+#[ignore = "regenerates fixtures/selftest-link"]
+fn write_the_link_fixture() {
+    let b = link_bundle();
+    b.verify().unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+    let (dir, plain) = (root.join("selftest-link"), root.join("selftest"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    std::fs::create_dir_all(dir.join("factory")).unwrap();
+    let put = |name: &str, data: &[u8]| std::fs::write(dir.join(name), data).unwrap();
+    let same = |name: &str, data: &[u8], up: &str| {
+        assert_eq!(std::fs::read(plain.join(name)).unwrap(), data, "{name}");
+        std::os::unix::fs::symlink(format!("{up}selftest/{name}"), dir.join(name)).unwrap();
+    };
+    put("SHA256SUMS", &b.sums);
+    put("SHA256SUMS.sig", &b.sig);
+    put("test-key.gpg", &b.keyring);
+    put("test-key.fingerprint", b.fingerprint.as_bytes());
+    put("manifest.json", &b.manifest_json);
+    put("MANIFEST", &b.manifest_txt);
+    put("device.conf", &b.device_conf);
+    put("factory-builds.json", &b.index_json);
+    same("root.img.zst", &b.root_zst, "../");
+    for (name, data) in &b.images {
+        same(&format!("images/{name}.img"), data, "../../");
+    }
+    same(
+        &format!("factory/{}", b.factory_zip_name),
+        &b.factory_zip,
+        "../../",
+    );
+}

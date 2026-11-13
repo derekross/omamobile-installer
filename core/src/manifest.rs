@@ -395,11 +395,13 @@ impl Manifest {
         let install_link = match raw.install_link {
             None => None,
             Some(l) if l.protocol == omamobile_link::PROTOCOL => Some(l.protocol),
-            Some(l) => return err(format!(
+            Some(l) => {
+                return err(format!(
                 "install_link.protocol is {}; this installer speaks the install link's protocol {}",
                 l.protocol,
                 omamobile_link::PROTOCOL
-            )),
+            ))
+            }
         };
 
         Ok(Manifest {

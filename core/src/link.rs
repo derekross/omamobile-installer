@@ -61,6 +61,19 @@ const READ_MS: u64 = 500;
 /// A data payload no larger than this is asked for on the computer side: the
 /// phone answers with the smaller of this and its own (1 MiB by default).
 pub const MAX_DATA: u32 = omamobile_link::frame::DEFAULT_MAX_DATA;
+/// The link's USB interface (§4): vendor class, subclass 0x6f, protocol
+/// 0x01, and this string. Found by the interface, never by vendor and
+/// product: `1d6b:0104` is also what the phone shows without the link.
+pub const USB_CLASS: u8 = 0xff;
+pub const USB_SUBCLASS: u8 = 0x6f;
+pub const USB_PROTOCOL: u8 = 0x01;
+pub const USB_INTERFACE: &str = "Omarchy Mobile install link";
+/// A write the phone has not taken in this long is a lost link (§5.7).
+pub const WRITE_WAIT_MS: u64 = 30_000;
+/// The read buffer for one frame at [`MAX_DATA`] (§5.1, D6).
+pub fn read_buffer_len() -> usize {
+    omamobile_link::frame::read_buffer_len(MAX_DATA)
+}
 /// The installer's name in `hello`.
 pub const INSTALLER: &str = "omamobile-install";
 
