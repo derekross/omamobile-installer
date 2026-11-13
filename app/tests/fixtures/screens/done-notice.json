@@ -8,6 +8,7 @@
     "The Pixel 7 Pro (cheetah) is unlocked and runs from slot a; bootloader fake-1.0, baseband fake-radio-1.0.",
     "Google's factory image for build TEST.260101.001 is the right file (cheetah-test.260101.001-factory-31c2322a.zip).",
     "User alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set.",
+    "An install would put these answers into the place the system image keeps for them, so the phone sets up your account at its first start.",
     "The release's images were not fetched for this dry run, so the list is the signed plan's. An install would send these writes, and only these:"
   ],
   "quote": null,

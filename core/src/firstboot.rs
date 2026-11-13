@@ -1,37 +1,52 @@
 // SPDX-License-Identifier: MIT
 //! The owner's answers as the files a first start reads: what Omarchy
 //! Mobile's `tools/install-phone` writes into its local copy of the root
-//! image before it flashes it.
+//! image before it flashes it, and how this installer puts them on the
+//! phone without one (docs/DESIGN.md §12, the decision of 2026-11-13).
 //!
-//! **Nothing in this crate puts these files on a phone yet.** install-phone
-//! writes them into the ext4 image with `debugfs`; the core has no ext4
-//! writer and runs no other program (docs/DESIGN.md, "Open: the owner's
-//! answers in the root image"). This module is everything up to that step:
-//! the exact bytes, with the password already hashed, so that whichever way
-//! is chosen has only the writing left to do.
+//! install-phone writes the files into the ext4 image with `debugfs`. The
+//! core has no ext4 writer and runs no other program, and it streams the
+//! image rather than keeping a copy. So the release's root image keeps a
+//! place for each file: it is there already, one 4096-byte block holding
+//! comments only, and the signed manifest says where its bytes are in the
+//! raw image ([`crate::manifest::Placeholder`]). [`RootAnswers`] is the
+//! answers as those blocks, and [`crate::install::UserdataStream`] swaps
+//! them in as the image goes past; the session checks every block it sends
+//! there. No file-system structure changes, and ext4's checksums cover its
+//! metadata, not file data.
 //!
 //! - `/etc/omamobile/firstboot.conf` (mode 0600, root): `KEY=value` lines
 //!   that `omamobile-firstboot` reads as data and deletes. It holds the
 //!   password's hash and any Wi-Fi password.
+//! - `/etc/omamobile/boot-update.conf` (mode 0644): `AUTO_WRITE=` with the
+//!   descriptor's `BOOT_UPDATE_AUTO_WRITE` (default yes), as install-phone
+//!   writes it: the phone's kernel updates then reach slot B by themselves.
 //! - `/root/.ssh/authorized_keys` (mode 0600, in a directory of mode 0700),
-//!   when the owner gave an SSH public key.
+//!   when the owner gave an SSH public key: [`files`] makes it, but the
+//!   image keeps no place for it, and neither front end asks for a key. Nor
+//!   is the key appended to slot B's ramdisk image, as install-phone does:
+//!   that would change an image the release signed.
 //!
-//! Not made here: `/etc/omamobile/boot-update.conf` with `AUTO_WRITE=yes`,
-//! which install-phone also writes. It lets the phone write slot B's boot
-//! images by itself on a kernel update, and Omarchy Mobile's rules name
-//! install-phone as the one tool that writes it; whether this installer
-//! does is the maintainer's decision. Nor the same key appended to slot B's
-//! ramdisk image: that changes an image the release signed.
+//! A placeholder is filled with the file's text and then padding: one
+//! comment line, `#` and spaces up to the last byte, which is a newline
+//! (with two bytes left `#\n`, with one `\n`, with none nothing). Every
+//! reader of the two files skips comment lines, so the padding is never
+//! read as an answer; Omarchy Mobile's `rootfs/placeholders fill` is the
+//! same rule.
 //!
 //! The password is hashed here with sha512-crypt, the `$6$` scheme that
 //! `openssl passwd -6` gives install-phone and that firstboot requires
 //! (Ulrich Drepper, "Unix crypt using SHA-256 and SHA-512", public domain).
 //! The salt comes from the front end: the core has no source of randomness.
-use crate::flow::OwnerAnswers;
+use crate::bundle::VerifiedRelease;
+use crate::flow::{AnswersSummary, OwnerAnswers};
+use crate::hash::sha256_hex;
+use crate::manifest::{PLACEHOLDER_LEN, PLACEHOLDER_PATHS};
 use crate::{Error, Result};
 use sha2::{Digest, Sha512};
 
-pub const FIRSTBOOT_CONF: &str = "/etc/omamobile/firstboot.conf";
+pub const FIRSTBOOT_CONF: &str = PLACEHOLDER_PATHS[0];
+pub const BOOT_UPDATE_CONF: &str = PLACEHOLDER_PATHS[1];
 pub const AUTHORIZED_KEYS: &str = "/root/.ssh/authorized_keys";
 
 /// One file for the root image: where, with which mode (owner and group
@@ -276,6 +291,158 @@ pub fn files(answers: &OwnerAnswers, extras: &Extras<'_>, salt: &str) -> Result<
         });
     }
     Ok(out)
+}
+
+/// `text` padded to a placeholder's length: the text, then one comment
+/// line of spaces to the last byte. `text` must end with a newline.
+pub fn pad_placeholder(text: &[u8], len: usize) -> Result<Vec<u8>> {
+    if text.len() > len {
+        return Err(Error::Refused(format!(
+            "the answers are {} bytes, more than the {len} the system image keeps for them",
+            text.len()
+        )));
+    }
+    if text.last().is_some_and(|b| *b != b'\n') {
+        return Err(Error::Refused("the answers must end with a newline".into()));
+    }
+    let mut out = Vec::with_capacity(len);
+    out.extend_from_slice(text);
+    match len - text.len() {
+        0 => {}
+        1 => out.push(b'\n'),
+        rem => {
+            out.push(b'#');
+            out.resize(len - 1, b' ');
+            out.push(b'\n');
+            debug_assert_eq!(out.len(), text.len() + rem);
+        }
+    }
+    Ok(out)
+}
+
+/// One block of the raw root image to replace: what the release built
+/// there (its SHA-256) and the bytes that go there instead.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Region {
+    pub(crate) path: &'static str,
+    pub(crate) offset: u64,
+    pub(crate) original_sha256: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// The owner's answers as the blocks of one release's root image they go
+/// into: `firstboot.conf` and, where the image keeps a place for it,
+/// `boot-update.conf`. Made by [`root_answers`] from answers that passed
+/// [`OwnerAnswers::check`], for a release whose manifest lists its
+/// placeholders. It holds the password's hash and any Wi-Fi password, and
+/// shows neither in its debug output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RootAnswers {
+    pub(crate) release: String,
+    /// In the order of their offsets.
+    pub(crate) regions: Vec<Region>,
+    summary: AnswersSummary,
+    auto_write: Option<bool>,
+}
+
+impl core::fmt::Debug for RootAnswers {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RootAnswers")
+            .field(
+                "files",
+                &self
+                    .regions
+                    .iter()
+                    .map(|r| (r.path, r.offset))
+                    .collect::<Vec<_>>(),
+            )
+            .field("username", &self.summary.username)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RootAnswers {
+    /// What the answers say, without the secrets.
+    pub fn summary(&self) -> &AnswersSummary {
+        &self.summary
+    }
+    /// The `AUTO_WRITE` that goes to `boot-update.conf`, or `None` when the
+    /// image keeps no place for that file.
+    pub fn auto_write(&self) -> Option<bool> {
+        self.auto_write
+    }
+    /// The files that are filled, in the image's order.
+    pub fn paths(&self) -> Vec<&'static str> {
+        self.regions.iter().map(|r| r.path).collect()
+    }
+    /// Each file's block as it goes into the raw image: its path, its
+    /// offset there, and its bytes (which hold the password's hash and any
+    /// Wi-Fi password).
+    pub fn blocks(&self) -> impl Iterator<Item = (&'static str, u64, &[u8])> {
+        self.regions
+            .iter()
+            .map(|r| (r.path, r.offset, &r.bytes[..]))
+    }
+}
+
+/// The answers for `release`'s root image. `salt`: from [`salt_from`],
+/// fresh for each install. Refused for a release whose root image keeps no
+/// place for them (one made before the placeholders).
+pub fn root_answers(
+    release: &VerifiedRelease,
+    answers: &OwnerAnswers,
+    salt: &str,
+) -> Result<RootAnswers> {
+    let root = &release.manifest().root_image;
+    let Some(fb) = root.placeholder(FIRSTBOOT_CONF) else {
+        return Err(Error::Refused(
+            "this release's system image keeps no place for the owner's answers".into(),
+        ));
+    };
+    let len = PLACEHOLDER_LEN as usize;
+    let conf = files(answers, &Extras::default(), salt)?
+        .into_iter()
+        .find(|f| f.path == FIRSTBOOT_CONF)
+        .map(|f| f.content)
+        .unwrap_or_default();
+    let mut regions = vec![Region {
+        path: FIRSTBOOT_CONF,
+        offset: fb.offset,
+        original_sha256: fb.sha256.clone(),
+        bytes: pad_placeholder(&conf, len)?,
+    }];
+    let mut auto_write = None;
+    if let Some(bu) = root.placeholder(BOOT_UPDATE_CONF) {
+        let yes = release.rules().boot_update_auto_write;
+        let text = format!(
+            "# Written by the Omarchy Mobile installer: a release install takes kernel updates through\n# omamobile-boot-update's pacman hook (docs/RELEASES.md §5.3). AUTO_WRITE=no stops it.\nAUTO_WRITE={}\n",
+            if yes { "yes" } else { "no" }
+        );
+        regions.push(Region {
+            path: BOOT_UPDATE_CONF,
+            offset: bu.offset,
+            original_sha256: bu.sha256.clone(),
+            bytes: pad_placeholder(text.as_bytes(), len)?,
+        });
+        auto_write = Some(yes);
+    }
+    regions.sort_by_key(|r| r.offset);
+    // What replaces a placeholder must not look like one: the session tells
+    // the two apart by their bytes
+    if regions
+        .iter()
+        .any(|r| sha256_hex(&r.bytes) == r.original_sha256)
+    {
+        return Err(Error::Refused(
+            "the answers came out as the placeholder itself".into(),
+        ));
+    }
+    Ok(RootAnswers {
+        release: release.id().to_string(),
+        regions,
+        summary: answers.summary(),
+        auto_write,
+    })
 }
 
 #[cfg(test)]

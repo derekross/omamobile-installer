@@ -22,8 +22,9 @@
 //!   before it is kept, compared or put on a screen.
 //! - [`flow`]: the install as one state machine for every front end, with
 //!   the write path behind a typed confirmation;
-//! - [`firstboot`]: the owner's answers as the files a first start reads.
-//!   Nothing puts them on a phone yet.
+//! - [`firstboot`]: the owner's answers as the files a first start reads,
+//!   and as the blocks of the root image's placeholders that
+//!   [`install::UserdataStream`] swaps in (docs/DESIGN.md §12).
 //!
 //! Nothing here does I/O on its own: bytes come in from the caller, and the
 //! only ways out are the transport trait and, for Google's factory image, a

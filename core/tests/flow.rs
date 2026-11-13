@@ -129,7 +129,7 @@ fn flow_from(mut flow: Flow, bundle: &TestBundle, phone: &FakePhone, until: &str
             "factory-image" => {
                 give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap()
             }
-            "answers" => flow.answers(&answers()).unwrap(),
+            "answers" => flow.answers(&answers(), "testsalt0123").unwrap(),
             _ => unreachable!(),
         }
     }
@@ -300,7 +300,7 @@ fn a_release_that_fails_verification_stops_before_anything() {
         assert!(look(&mut flow, &phone).is_err());
         assert!(flow.no_phone().is_err());
         assert!(flow.factory_zip(&bundle.factory_zip_name, 1).is_err());
-        assert!(flow.answers(&answers()).is_err());
+        assert!(flow.answers(&answers(), "testsalt0123").is_err());
         assert!(block_on(flow.dry_run(phone.clone())).is_err());
         assert_eq!(flow.screen().state, "stopped");
         assert_eq!(flow.screen().stop, Some("release-not-verified"));
@@ -408,7 +408,7 @@ fn nothing_happens_before_the_warning_is_accepted() {
     assert!(flow
         .factory_zip(&bundle.factory_zip_name, bundle.factory_zip.len() as u64)
         .is_err());
-    assert!(flow.answers(&answers()).is_err());
+    assert!(flow.answers(&answers(), "testsalt0123").is_err());
     assert!(block_on(flow.dry_run(phone.clone())).is_err());
     assert!(
         phone.log().is_empty(),
@@ -868,7 +868,7 @@ fn the_maintainers_override_passes_the_one_slot_stop_in_a_dry_run_and_says_so() 
     assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
     give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap();
     assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
-    flow.answers(&answers()).unwrap();
+    flow.answers(&answers(), "testsalt0123").unwrap();
     assert_eq!(flow.screen().notice.as_deref(), Some(SLOT_CHECK_SKIPPED));
 
     // The dry run: a session that holds every write back, and records the skip
@@ -1120,7 +1120,7 @@ fn a_phone_on_slot_b_stops_unless_it_is_a_reinstall() {
     look(&mut flow, &phone).unwrap();
     flow.decline_google_terms().unwrap();
     give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap();
-    flow.answers(&answers()).unwrap();
+    flow.answers(&answers(), "testsalt0123").unwrap();
     let session = block_on(flow.dry_run(phone.clone())).unwrap().unwrap();
     flow.dry_run_done(session).unwrap();
     assert!(matches!(flow.step(), Step::Done(plan) if plan.current_slot == "b"));
@@ -1389,7 +1389,7 @@ fn a_factory_zip_with_a_wrong_name_size_or_digest_is_not_taken() {
     assert!(flow.screen().problem.unwrap().contains("SHA-256 differs"));
     assert!(flow.factory_zip_verified().is_none());
     // Nothing later opens on a refused file
-    assert!(flow.answers(&answers()).is_err());
+    assert!(flow.answers(&answers(), "testsalt0123").is_err());
     assert!(block_on(flow.dry_run(phone.clone())).is_err());
 
     // A check made by another install is not this one's
@@ -1840,7 +1840,7 @@ fn a_screen_is_plain_data_for_any_front_end() {
             "factory-image" => {
                 give(&mut flow, &bundle.factory_zip_name, &bundle.factory_zip).unwrap()
             }
-            "answers" => flow.answers(&answers()).unwrap(),
+            "answers" => flow.answers(&answers(), "testsalt0123").unwrap(),
             _ => {}
         }
     }

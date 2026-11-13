@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "A user name, a PIN or password to unlock the phone (digits only gives a PIN pad), the phone's name, the time zone and, if you like, a Wi-Fi network.",
-    "This version of the installer checks your answers and keeps them nowhere: it has no way yet to put them on the phone."
+    "An install puts these into the system image, for the phone's first start. This dry run checks them, and checks where in the system image they would go; it writes nothing."
   ],
   "quote": null,
   "steps": [],

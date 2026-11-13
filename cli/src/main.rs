@@ -228,6 +228,15 @@ fn cmd_verify(dir: &Path) -> Res<()> {
         m.root_image.partition.name(),
         m.root_image.name
     );
+    if m.root_image.placeholders.is_empty() {
+        println!("  the root image keeps no place for the owner's answers: this installer does not install it");
+    }
+    for p in &m.root_image.placeholders {
+        println!(
+            "  the owner's answers go into {} ({} bytes at {} of the unpacked root image)",
+            p.path, p.length, p.offset
+        );
+    }
     Ok(())
 }
 
@@ -492,6 +501,15 @@ fn local_timezone() -> String {
                 .map(|(_, z)| z.to_string())
         })
         .unwrap_or_else(|| "UTC".into())
+}
+
+/// A salt for the password's hash, from this computer's random source: the
+/// core has none of its own (`Flow::answers`).
+pub(crate) fn fresh_salt() -> Res<String> {
+    let mut bytes = [0u8; 12];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| format!("this computer gave no random bytes for the password's hash ({e})"))?;
+    Ok(omamobile_installer_core::firstboot::salt_from(&bytes))
 }
 
 fn ask_answers(typed: &mut Typed) -> Res<OwnerAnswers> {
@@ -1179,7 +1197,7 @@ fn run_flow<T: Transport>(
                 };
                 take_typed_zip(&mut flow, &path)?;
             }
-            "answers" => flow.answers(&ask_answers(&mut typed)?)?,
+            "answers" => flow.answers(&ask_answers(&mut typed)?, &fresh_salt()?)?,
             "dry-run" => {
                 let Some((transport, _)) = connect()? else {
                     println!("    No phone in Fastboot Mode answered.");

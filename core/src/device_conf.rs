@@ -82,6 +82,21 @@ impl DeviceConf {
         }
     }
 
+    /// `BOOT_UPDATE_AUTO_WRITE`: what a release install records as
+    /// `AUTO_WRITE` in `/etc/omamobile/boot-update.conf`, so the phone's
+    /// kernel updates reach slot B by themselves. `yes` unless the
+    /// descriptor says `no`, as `tools/install-phone` reads it; anything else
+    /// is refused.
+    pub fn boot_update_auto_write(&self) -> Result<bool> {
+        match self.get("BOOT_UPDATE_AUTO_WRITE") {
+            None | Some("yes") => Ok(true),
+            Some("no") => Ok(false),
+            Some(other) => Err(Error::DeviceConf(format!(
+                "BOOT_UPDATE_AUTO_WRITE is yes or no, not {other}"
+            ))),
+        }
+    }
+
     /// `AVB_FOOTERS` as (image, partition size in bytes).
     pub fn avb_footers(&self) -> Result<Vec<(String, u64)>> {
         let mut out = Vec::new();

@@ -47,6 +47,7 @@
 //! A session that stops partway says how far it got ([`Session::reach`]),
 //! from what the phone confirmed: the flow's stop is worded from that.
 use crate::bundle::{RootImageCheck, VerifiedImage, VerifiedRelease, VerifiedRootImage};
+use crate::firstboot::RootAnswers;
 use crate::flow::WriteToken;
 use crate::hash::sha256_hex;
 use crate::manifest::{Manifest, Partition};
@@ -584,6 +585,11 @@ pub struct Session<T: Transport> {
     /// core has none of its own.
     clock: Option<Box<dyn Fn() -> core::time::Duration>>,
     reach: WriteReach,
+    /// The owner's answers for the root image's placeholders, from the flow
+    /// ([`Self::set_answers`]), and for each of their blocks whether a
+    /// piece this session took carried them.
+    answers: Option<RootAnswers>,
+    answers_sent: Vec<bool>,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -791,7 +797,80 @@ impl<T: Transport> Session<T> {
             pieces: Vec::new(),
             clock: None,
             reach: WriteReach::Nothing,
+            answers: None,
+            answers_sent: Vec::new(),
         })
+    }
+
+    /// The owner's answers for this release's root image, before `userdata`
+    /// begins. Only the flow hands them in, from what the owner answered in
+    /// this run. From then on every piece of the root image is checked
+    /// where they go: a piece that covers one of their blocks must carry
+    /// them there, and `userdata` is not finished until each block was sent.
+    pub(crate) fn set_answers(&mut self, answers: RootAnswers) -> Result<()> {
+        if !matches!(self.state, State::Boot(_)) {
+            return Err(Error::Refused(
+                "the answers go in before userdata is begun".into(),
+            ));
+        }
+        if answers.release != self.release.id() {
+            return Err(Error::Refused(
+                "the answers were made for another release".into(),
+            ));
+        }
+        self.answers_sent = vec![false; answers.regions.len()];
+        self.answers = Some(answers);
+        Ok(())
+    }
+
+    /// A phone written without the answers starts with no account and
+    /// nothing to unlock it with: a session that writes takes the root
+    /// image only with them, and only from a release whose image has a
+    /// place for them.
+    fn answers_ready(&self) -> Result<()> {
+        if self.is_dry_run() {
+            return Ok(());
+        }
+        if self.release.manifest().root_image.placeholders.is_empty() {
+            return Err(Error::Refused(
+                "this release's system image keeps no place for the owner's answers: nothing is written".into(),
+            ));
+        }
+        if self.answers.is_none() {
+            return Err(Error::Refused(
+                "the owner's answers were not given to this install: nothing is written".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The answers this session puts into the root image, if any.
+    pub fn answers(&self) -> Option<&RootAnswers> {
+        self.answers.as_ref()
+    }
+
+    /// What a piece of the root image writes where the answers go: their
+    /// bytes, or nothing; anything else is refused before it is sent.
+    fn check_answers_in(&mut self, segment: &[u8]) -> Result<()> {
+        let Some(answers) = &self.answers else {
+            return Ok(());
+        };
+        for (i, r) in answers.regions.iter().enumerate() {
+            let first = r.offset / sparse::BLOCK as u64;
+            for (n, want) in r.bytes.chunks(sparse::BLOCK).enumerate() {
+                match sparse::block_in(segment, first + n as u64)? {
+                    sparse::BlockIn::Skipped => {}
+                    sparse::BlockIn::Raw(got) if got == want => self.answers_sent[i] = true,
+                    _ => {
+                        return Err(Error::Refused(format!(
+                            "a piece of the system image carries something else than the owner's answers where {} goes",
+                            r.path
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The phone's size for each boot image's partition, in the plan's
@@ -844,6 +923,8 @@ impl<T: Transport> Session<T> {
                 "userdata's size is checked before the first write".into(),
             ));
         }
+        // Before the first write, so a session without them writes nothing
+        self.answers_ready()?;
         let size = self.userdata_size().await?;
         if image_len > size {
             return Err(Error::Phone(format!(
@@ -1000,6 +1081,9 @@ impl<T: Transport> Session<T> {
                 "boot images are written first, once each".into(),
             ));
         };
+        // Not even slot B's boot images without the answers: the install
+        // they begin could only end in a phone with no account
+        self.answers_ready()?;
         if image.release != self.release.id() {
             return Err(Error::Refused(
                 "the image was verified against another release".into(),
@@ -1046,6 +1130,8 @@ impl<T: Transport> Session<T> {
                 "the root image is {image_len} bytes, not the size that was checked against userdata before the first write"
             )));
         }
+        // Again here, for a front end that never asked before the writes
+        self.answers_ready()?;
         let size = self.userdata_size().await?;
         if image_len > size {
             return Err(Error::Phone(format!(
@@ -1091,6 +1177,9 @@ impl<T: Transport> Session<T> {
                 cover.written_blocks,
                 sparse::MAX_PIECE_BLOCKS
             )));
+        }
+        if let Err(e) = self.check_answers_in(segment) {
+            return self.fail(e);
         }
         let partition = self.release.manifest().root_image.partition.clone();
         // Recorded before it is sent: if the answer never comes, this is
@@ -1149,6 +1238,12 @@ impl<T: Transport> Session<T> {
                 if let Err(e) = streamed.finish() {
                     return self.fail(Error::Checksum(format!(
                         "the root image that was sent to the phone is not the one that was checked before the first write ({e}): slot B is not made active"
+                    )));
+                }
+                if let Some(i) = self.answers_sent.iter().position(|sent| !sent) {
+                    let path = self.answers.as_ref().map_or("", |a| a.regions[i].path);
+                    return self.fail(Error::Refused(format!(
+                        "no piece of the system image carried the owner's answers for {path}: slot B is not made active"
                     )));
                 }
                 self.state = State::UserdataDone;

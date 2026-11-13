@@ -1071,6 +1071,7 @@ dependencies = [
 name = "omamobile-installer-cli"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "nusb",
  "omamobile-installer-core",
  "omamobile-installer-usb",
@@ -1105,6 +1106,7 @@ dependencies = [
 name = "omamobile-installer-web"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "js-sys",
  "nusb",
  "omamobile-installer-core",

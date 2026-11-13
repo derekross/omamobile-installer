@@ -78,7 +78,7 @@ fn begin_write_opens_the_writing_session_when_every_condition_holds() {
     let mut flow = at_the_write(&bundle, &phone);
     let session = block_on(flow.begin_write(phone.clone()))
         .unwrap()
-        .expect("a session");
+        .unwrap_or_else(|| panic!("a session: {:?}", flow.step));
     assert!(!session.is_dry_run());
     assert_eq!(session.may_flash().len(), 6);
     assert!(phone.changes().is_empty());
@@ -143,6 +143,70 @@ fn a_session_writes_only_with_a_token() {
     .unwrap();
     assert!(!writing.is_dry_run());
     assert_eq!(writing.may_flash().len(), 6);
+    writing
+        .set_answers(
+            crate::firstboot::root_answers(&release, &support::drive::answers(), "testsalt0123")
+                .unwrap(),
+        )
+        .unwrap();
     block_on(support::drive::walk(&mut writing, &bundle, &release)).unwrap();
     assert_eq!(phone.written().len(), 6);
+}
+
+/// A session that writes takes the root image only with the owner's
+/// answers, and only from a release whose image keeps a place for them: it
+/// refuses before its first write, so the phone gets nothing at all. A dry
+/// run walks without them.
+#[test]
+fn the_session_that_writes_refuses_userdata_without_the_answers() {
+    let id = support::drive::id();
+    let with_places = TestBundle::new();
+    let without = TestBundle::build(
+        |m| {
+            m["root_image"]
+                .as_object_mut()
+                .unwrap()
+                .remove("placeholders");
+        },
+        |c| c,
+    );
+    for (bundle, why) in [
+        (&with_places, "the owner's answers were not given"),
+        (&without, "keeps no place for the owner's answers"),
+    ] {
+        let release = bundle.verify().unwrap();
+        let phone = FakePhone::scenario("ready").unwrap();
+        let mut writing = block_on(Session::connect_writing(
+            phone.clone(),
+            &release,
+            &id,
+            PhoneOptions::default(),
+            WriteToken(()),
+        ))
+        .unwrap();
+        let err = block_on(writing.preflight_userdata(bundle.root_raw.len() as u64)).unwrap_err();
+        assert!(
+            matches!(&err, Error::Refused(s) if s.contains(why)),
+            "{err}"
+        );
+        let err = block_on(support::drive::walk(&mut writing, bundle, &release)).unwrap_err();
+        assert!(
+            matches!(&err, Error::Refused(s) if s.contains(why)),
+            "{err}"
+        );
+        // Not even the first boot image is written
+        assert!(phone.written().is_empty(), "{:?}", phone.written());
+        assert!(phone.changes().is_empty());
+
+        let phone = FakePhone::scenario("ready").unwrap();
+        let mut dry = block_on(Session::connect_pinned(
+            phone.clone(),
+            &release,
+            &id,
+            PhoneOptions::default(),
+        ))
+        .unwrap();
+        block_on(support::drive::walk(&mut dry, bundle, &release)).unwrap();
+        assert!(phone.written().is_empty());
+    }
 }
