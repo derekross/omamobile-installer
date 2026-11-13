@@ -1,0 +1,13 @@
+frame: host-07-answers
+answers, id 7
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 6
+len: 388
+offset: 0
+payload sha256: d4d112b658f9997ee790a2698a75605eb9f7830aa022673357a358c89d7c4112
+pad byte: no
+frame bytes: 444
+frame sha256: 6a7c0084cb328030341b22248125176f5cd46c6da66aba77320f697ac6549df0
+payload: {"t":"answers","id":7,"username":"owner","password_hash":"$6$saltsalt$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","credential":"pin","hostname":"phone","timezone":"Europe/Berlin","wifi_ssid":"<SSID>","wifi_psk":"a passphrase","ssh_keys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA owner@computer"],"full_name":"An Owner","email":"owner@example.org"}

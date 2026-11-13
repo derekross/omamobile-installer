@@ -88,5 +88,20 @@
   "the file chooser gave no file on this computer": "der Dateiauswahldialog lieferte keine Datei auf diesem Computer",
   "the last %1 of %2": "die letzten %1 von %2",
   "there is no session bus": "es gibt keinen Sitzungsbus",
-  "xdg-desktop-portal did not answer": "xdg-desktop-portal hat nicht geantwortet"
+  "xdg-desktop-portal did not answer": "xdg-desktop-portal hat nicht geantwortet",
+  "Setup": "Einrichtung",
+  "Pair with the phone": "Mit dem Telefon koppeln",
+  "Choose a folder…": "Ordner wählen…",
+  "Waiting for the phone": "Warten auf das Telefon",
+  "The phone sets itself up": "Das Telefon richtet sich ein",
+  "Copying the radio partitions": "Funkpartitionen werden kopiert",
+  "Sending the factory image": "Factory-Image wird gesendet",
+  "The phone checks the file": "Das Telefon prüft die Datei",
+  "The phone installs its firmware": "Das Telefon installiert seine Firmware",
+  "An SSH public key for the phone (optional)": "Ein öffentlicher SSH-Schlüssel für das Telefon (optional)",
+  "Your full name, for git (optional)": "Ihr vollständiger Name, für git (optional)",
+  "Your email address, for git (optional)": "Ihre E-Mail-Adresse, für git (optional)",
+  "Choose a new, empty folder for the radio backup": "Wählen Sie einen neuen, leeren Ordner für die Funk-Sicherung",
+  "No folder chooser is available on this desktop. The command line can go on from here: omamobile-install link --backup-dir FOLDER": "Auf diesem Desktop ist keine Ordnerauswahl verfügbar. Die Befehlszeile kann hier weitermachen: omamobile-install link --backup-dir ORDNER",
+  "Six-digit code": "Sechsstelliger Code"
 }

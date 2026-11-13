@@ -1,0 +1,13 @@
+frame: phone-17-factory-ready
+factory-ready, answering id 15
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 16
+len: 87
+offset: 0
+payload sha256: fd4305ecb5a3fae06276af46e74579c6d9b1f54400de42373eac2b6c477d8337
+pad byte: no
+frame bytes: 143
+frame sha256: d62fd4525ecaf0580e9c7e4f31d0d59b366af12a2077549e42ceb0ce4e436d0f
+payload: {"t":"factory-ready","re":15,"offset":67108864,"ack_every":67108864,"window":134217728}

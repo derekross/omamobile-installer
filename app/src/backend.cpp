@@ -11,6 +11,8 @@
 #include <QStandardPaths>
 #include <QTimeZone>
 
+#include <utility>
+
 #include "filepicker.h"
 
 namespace {
@@ -48,7 +50,13 @@ Backend::Backend(FilePicker *picker, QObject *parent) : QObject(parent), m_picke
     connect(&m_process, &QProcess::finished, this, &Backend::exited);
 
     if (m_picker) {
-        connect(m_picker, &FilePicker::picked, this, &Backend::takeFile);
+        connect(m_picker, &FilePicker::picked, this, [this](const QString &path) {
+            if (std::exchange(m_pickingFolder, false))
+                backupDir(path);
+            else
+                takeFile(path);
+        });
+        connect(m_picker, &FilePicker::cancelled, this, [this] { m_pickingFolder = false; });
         connect(m_picker, &FilePicker::failed, this, [this](const QString &reason) {
             setPickerError(tr("The file chooser could not be opened (%1). You can drop the file on this window instead.").arg(reason));
         });
@@ -341,10 +349,27 @@ void Backend::handle(const QByteArray &raw) {
         const QString answered = m_pending;
         // Whatever was asked for is answered: a write that was in hand is over.
         m_writeInHand = false;
+        const QString before = state();
         m_screen = screen.toVariantMap();
+        // The phone works by itself: a new screen of the step, and the step
+        // goes on, with its progress
+        if (action() == "wait") {
+            // Another step's progress is not this one's
+            if (state() != before)
+                clearProgress();
+            // Busy before anyone hears of the screen: a listener that lets
+            // the event loop run may see the next screen arrive meanwhile
+            setBusy(true);
+            emit screenChanged();
+            return;
+        }
         clearProgress();
         emit screenChanged();
         setBusy(false);
+        // The write ran through and the release offers the install link:
+        // the app goes on to the phone's first start by itself
+        if (action() == "link" && !m_withdrawn)
+            startLink();
         // The codename was taken and the core's screen now asks for the
         // writes: they follow at once, as on the command line. The owner's
         // go-ahead was the codename; the app adds no second question.
@@ -412,6 +437,9 @@ void Backend::handle(const QByteArray &raw) {
             return;
         }
         setActionError(message.value("message").toString());
+    } else if (type == "pretend") {
+        // A pretend build's word on what its pretend phone shows
+        m_pretendShows = message.value("shows").toString();
     } else if (type == "bye") {
         m_leaving = true;
     } else {
@@ -554,6 +582,26 @@ bool Backend::takeFile(const QString &path) {
     return sendFor({"download", "take-file"}, {{"type", "take-file"}, {"path", QFileInfo(path).absoluteFilePath()}});
 }
 
+bool Backend::startLink() { return sendFor({"link"}, {{"type", "link"}}); }
+bool Backend::pair(const QString &code) { return sendFor({"pair"}, {{"type", "pair"}, {"code", code}}); }
+bool Backend::retry() { return sendFor({"retry"}, {{"type", "retry"}}); }
+bool Backend::backupDir(const QString &path) {
+    if (path.isEmpty())
+        return false;
+    return sendFor({"backup-dir"}, {{"type", "backup-dir"}, {"path", QFileInfo(path).absoluteFilePath()}});
+}
+void Backend::pickBackupFolder() {
+    if (m_busy || action() != "backup-dir")
+        return;
+    setPickerError({});
+    if (!m_picker) {
+        setPickerError(tr("No folder chooser is available on this desktop. The command line can go on from here: omamobile-install link --backup-dir FOLDER"));
+        return;
+    }
+    m_pickingFolder = true;
+    m_picker->openFolder(tr("Choose a new, empty folder for the radio backup"));
+}
+
 bool Backend::takeFileUrl(const QUrl &url) {
     return url.isLocalFile() && takeFile(url.toLocalFile());
 }
@@ -564,6 +612,10 @@ bool Backend::submitAnswers(const QVariantMap &answers) {
     QJsonObject message{{"type", "answers"}};
     for (const char *field : {"username", "password", "password_again", "hostname", "timezone", "wifi_ssid", "wifi_psk"})
         message.insert(QLatin1String(field), answers.value(QLatin1String(field)).toString());
+    // What the install link carries besides (protocol 4): left out when empty
+    for (const char *field : {"ssh_key", "full_name", "email"})
+        if (!answers.value(QLatin1String(field)).toString().isEmpty())
+            message.insert(QLatin1String(field), answers.value(QLatin1String(field)).toString());
     return sendFor({"answers"}, message);
 }
 
@@ -581,6 +633,12 @@ bool Backend::primaryAction() {
         return dryRun();
     if (current == "write")
         return write();
+    if (current == "retry")
+        return retry();
+    if (current == "backup-dir" && !m_busy) {
+        pickBackupFolder();
+        return true;
+    }
     if (current == "take-file" && !m_busy) {
         pickFile();
         return true;

@@ -27,6 +27,16 @@ void PortalFilePicker::listen(const QString &path) {
 }
 
 void PortalFilePicker::open(const QString &title) {
+    ask(title, false);
+}
+
+// The portal's `directory` option (version 3 of the interface) makes the
+// same chooser pick a folder.
+void PortalFilePicker::openFolder(const QString &title) {
+    ask(title, true);
+}
+
+void PortalFilePicker::ask(const QString &title, bool folder) {
     if (m_open)
         return;
     auto bus = QDBusConnection::sessionBus();
@@ -44,6 +54,8 @@ void PortalFilePicker::open(const QString &title) {
     listen(QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2").arg(sender, token));
 
     QVariantMap options{{"handle_token", token}, {"multiple", false}, {"modal", true}};
+    if (folder)
+        options.insert("directory", true);
     QDBusMessage call = QDBusMessage::createMethodCall(Service, Path, Chooser, "OpenFile");
     // No parent window handle: exporting one is Wayland-protocol work the
     // app does not need for a single chooser.

@@ -40,6 +40,12 @@
 //! and with them the question the page asked about it: there is no build
 //! of this module for which the answer could be yes. The self-test's own
 //! install against the pretend phone is therefore a dry run too.
+// The install link's screens and transport: the preview build only.
+#[cfg(feature = "link-preview")]
+mod link;
+#[cfg(feature = "link-preview")]
+mod link_webusb;
+
 use omamobile_installer_core::bundle::{self, ReleaseFiles, RootImageCheck, VerifiedRelease};
 use omamobile_installer_core::download::{FactoryDownload, FetchFailure, FetchNext, FetchResponse};
 #[cfg(feature = "selftest")]

@@ -64,10 +64,15 @@ class Backend : public QObject {
     Q_PROPERTY(QString toolVersion READ toolVersion NOTIFY toolChanged)
     Q_PROPERTY(int toolProtocol READ toolProtocol NOTIFY toolChanged)
     Q_PROPERTY(QString systemTimeZone READ systemTimeZone CONSTANT)
+    // After the write: the phone works by itself (the core's action `wait`),
+    // and the tool sends each new screen. The app hands in nothing then.
+    Q_PROPERTY(bool phoneWorking READ phoneWorking NOTIFY screenChanged)
+    // What a pretend phone's screen shows, in a pretend build: for the tests.
+    Q_PROPERTY(QString pretendShows READ pretendShows NOTIFY screenChanged)
 
 public:
     // The protocol this app speaks (docs/APP.md).
-    static constexpr int Protocol = 3;
+    static constexpr int Protocol = 4;
     // The tool's name, beside the app's binary or on PATH.
     static constexpr const char *ToolName = "omamobile-install";
     // Names another tool, for the tests.
@@ -130,6 +135,8 @@ public:
     QString toolVersion() const { return m_toolVersion; }
     int toolProtocol() const { return m_toolProtocol; }
     QString systemTimeZone() const;
+    bool phoneWorking() const { return action() == "wait"; }
+    QString pretendShows() const { return m_pretendShows; }
 
     // Starts the tool and the install flow. Call once the event loop runs.
     Q_INVOKABLE void start();
@@ -166,6 +173,16 @@ public:
     // Sent by itself once the codename was taken (the core's screen then
     // names it); by the person only when that try found no phone.
     Q_INVOKABLE bool write();
+    // After the write, the install link: sent by itself when the core's
+    // `installed` screen asks for it, so the owner sees the first start.
+    Q_INVOKABLE bool startLink();
+    // The code the phone's screen shows, as typed.
+    Q_INVOKABLE bool pair(const QString &code);
+    // Shows the folder chooser; the folder picked goes to backupDir().
+    Q_INVOKABLE void pickBackupFolder();
+    // Where the radio backup goes: an absolute path to a new, empty folder.
+    Q_INVOKABLE bool backupDir(const QString &path);
+    Q_INVOKABLE bool retry();
     // The window is going: nothing more is sent by the app itself (the
     // writes that would follow a codename still on its way are not).
     Q_INVOKABLE void withdraw() { m_withdrawn = true; }
@@ -232,6 +249,9 @@ private:
     bool m_unreadWrite = false;
     int m_writeWait = 30 * 60 * 1000;
     QString m_releaseDirectory;
+    // The chooser was opened for the backup's folder, not for a file.
+    bool m_pickingFolder = false;
+    QString m_pretendShows;
 
     QVariantMap m_screen;
     bool m_busy = false;
