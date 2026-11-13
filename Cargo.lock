@@ -1084,6 +1084,8 @@ dependencies = [
 name = "omamobile-installer-core"
 version = "0.0.1"
 dependencies = [
+ "omamobile-installer-core",
+ "omamobile-link",
  "pgp",
  "pollster",
  "rand",

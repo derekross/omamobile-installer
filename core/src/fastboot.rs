@@ -811,6 +811,13 @@ impl<T: Transport> Session<T> {
         &self.client.flashable
     }
     /// How far this session's writes got. In a dry run: nothing, always.
+    /// The serial number the session pinned and read again before each
+    /// write. For the flow alone: the install link's serial proof is
+    /// compared against it after the restart (INSTALL-LINK-PLAN §2.5).
+    pub(crate) fn serial(&self) -> &str {
+        &self.serial
+    }
+
     pub fn reach(&self) -> WriteReach {
         self.reach
     }
