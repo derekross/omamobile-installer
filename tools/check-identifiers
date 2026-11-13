@@ -77,7 +77,9 @@ PATTERNS=(
 
 errors=$(mktemp)
 scratch=
-pictures=
+# Made here, not where it is first used: a scan at the end of a pipe runs in
+# a shell of its own, whose directory this one's trap would not remove
+pictures=$(mktemp -d)
 trap 'rm -rf "$errors" "$scratch" "$pictures"' EXIT
 
 # bytes FILE OFFSET COUNT: that many bytes of the file from that offset
@@ -125,7 +127,6 @@ scan() {
     [[ -f $file && -r $file ]] || { echo "check-identifiers: can't read $file" >&2; exit 2; }
   done
   # A PNG picture is read without its pixel data; every other file whole
-  [[ -n $pictures ]] || pictures=$(mktemp -d)
   for file in "${files[@]}"; do
     n=$((n + 1))
     if without_pixels "$file" >"$pictures/$n" 2>/dev/null; then

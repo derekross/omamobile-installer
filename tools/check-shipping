@@ -155,7 +155,7 @@ once "the JSON mode begins its flow with the switch its own --write set" \
 once "the JSON mode's switch comes from its arguments, in one line" \
   'may_write: args.write,' cli/src/json.rs
 none "the JSON mode sets the flow's write switch nowhere else" \
-  '^\s*write: (?!self\.may_write,|bool,)|may_write *=[^=]' cli/src/json.rs
+  '^\s*write: (?!self\.may_write,|bool,)|may_write *=[^=]|may_write\s*:(?!\s*(args\.write,|bool,))' cli/src/json.rs
 none "no message of the JSON mode is read for a write switch" \
   'get\("write"\)|"write" *=> *(true|.*as_bool)|message\["write"\]' cli/src/json.rs
 # The owner's statement about the other bootloader slot, and the
@@ -191,7 +191,8 @@ none "the page's script calls nothing of the direct session" \
 # it is sent. It passes --write on only when it was itself started with
 # --write, has no message that carries the switch, and names neither the
 # slot statement, the override nor a pretend phone
-app_write=$(grep -n -- '--write' app/src/*.cpp app/src/*.h app/src/*.qml /dev/null | grep -vE '^[^:]+:[0-9]+: *(//|")' |
+# (cli.cpp's lines are its usage text, which names the argument and passes nothing)
+app_write=$(grep -n -- '--write' app/src/*.cpp app/src/*.h app/src/*.qml /dev/null | grep -vE '^app/src/cli\.cpp:|^[^:]+:[0-9]+: *//' |
   sed -E 's/^([^:]+):[0-9]+: */\1: /' || true)
 wanted='app/src/backend.cpp: arguments << "--write";
 app/src/main.cpp: } else if (argument == "--write") {'
@@ -200,14 +201,34 @@ if [[ $app_write == "$wanted" ]]; then
 else
   bad "the app names --write somewhere else than its argument and the tool's" "$app_write"
 fi
-once "the app passes --write only when it was started with it, and never for a probe" \
-  'if (m_write && !probeOnly)' app/src/backend.cpp
+guarded=$(grep -B1 -F 'arguments << "--write";' app/src/backend.cpp | head -1)
+if [[ $guarded == *"if (m_write && !probeOnly)" ]]; then
+  ok "the app passes --write only when it was started with it, and never for a probe"
+else
+  bad "the line that passes --write to the tool is not under the app's own switch" "$guarded"
+fi
+none "the app's usage text aside, cli.cpp passes nothing to the tool" 'arguments|<< *"--' app/src/cli.cpp
 once "the app's write switch is set from its own --write and nothing else" \
   'backend.setWrite(write);' app/src/main.cpp
+once "the app's switch starts off" 'bool write = false;' app/src/main.cpp
+turned_on=$(grep -hB1 -E '\bwrite *= *true' app/src/*.cpp app/src/*.h | tr -s ' ' | tr '\n' '|')
+if [[ $turned_on == ' } else if (argument == "--write") {| write = true;|' ]]; then
+  ok "the app's switch is set true in one line, the one that reads --write"
+else
+  bad "the app's write switch is set true somewhere else than where --write is read" "$turned_on"
+fi
+none "the app's switch is given nothing but true or false" \
+  '\bwrite *=(?! *(true|false);)(?!=)' app/src/main.cpp
+setters=$(grep -hoE 'setWrite\([^)]*\)|m_write *= *[^;=]+;' app/src/*.cpp app/src/*.h | sort | tr '\n' ' ')
+if [[ $setters == "m_write = false; m_write = write; setWrite(bool write) setWrite(write) " ]]; then
+  ok "the app's switch has one setter, called once, and no other line gives it a value"
+else
+  bad "the app's write switch is given a value somewhere else" "$setters"
+fi
 none "nothing in the window sets the app's write switch" \
   'setWrite|\.write *= *true|writes *= *true' app/src/*.qml
 none "no message the app sends carries a write switch" \
-  '\{"write", *(true|m_write)|"writes" *,' <(grep -n 'send(' app/src/backend.cpp)
+  '"write" *, *(true|m_write|write)\b|"writes" *,' app/src/*.cpp app/src/*.h
 none "the app names no bootloader-slot statement, no override, no serial number and no pretend phone" \
   'slots[-_]match|maintainer|--serial|fake[-_]phone|fake[-_]google|fake[-_]unplug' app/src/*.cpp app/src/*.h app/src/*.qml
 
