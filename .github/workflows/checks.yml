@@ -36,7 +36,7 @@ jobs:
         run: rustup show
       - name: Format
         run: cargo fmt --all --check
-      - name: The sources of what ships hold one way to write (install --write) and no pretend phone
+      - name: The sources of what ships hold one way to write (the tool's --write) and no pretend phone
         run: tools/check-shipping
       - name: Lints (errors fail; warnings are listed)
         run: cargo clippy --locked
