@@ -163,6 +163,9 @@ public:
     // Sent by itself once the codename was taken (the core's screen then
     // names it); by the person only when that try found no phone.
     Q_INVOKABLE bool write();
+    // The window is going: nothing more is sent by the app itself (the
+    // writes that would follow a codename still on its way are not).
+    Q_INVOKABLE void withdraw() { m_withdrawn = true; }
 
     // The screen's main action, for the button and for Space. `answers` and
     // `none` are the window's: a form to hand in, a window to close.
@@ -221,6 +224,9 @@ private:
     bool m_write = false;
     bool m_writeInHand = false;
     bool m_inputClosed = false;
+    bool m_withdrawn = false;
+    // The app stopped reading the tool while the tool was writing.
+    bool m_unreadWrite = false;
     int m_writeWait = 30 * 60 * 1000;
     QString m_releaseDirectory;
 

@@ -1681,6 +1681,11 @@ private slots:
         QTRY_VERIFY(!backend.writing());
         w.settle();
         QVERIFY(!w.shown("writeHold"));
+        // It says that the tool has left, and that it does not know how
+        // the write ended; it no longer says to wait for it.
+        QVERIFY2(backend.toolErrorDetail().contains("has left now") && backend.toolErrorDetail().contains("does not know what is on the phone"),
+                 qPrintable(backend.toolErrorDetail()));
+        QCOMPARE(w.text("toolErrorDetail"), backend.toolErrorDetail());
         // What the window says is still the failure: it guesses nothing
         // about how the write ended.
         QCOMPARE(backend.toolErrorKind(), QString("malformed"));
@@ -1690,6 +1695,24 @@ private slots:
         QVERIFY(w.click("primaryButton"));
         QVERIFY(at(backend, "warning"));
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void aWindowThatIsGoingSendsNoWriteByItself() {
+        // Quit was confirmed while the codename was still on its way to the
+        // tool: the screen that answers it must not be followed by the writes.
+        standIn("flow");
+        Backend backend;
+        backend.setWrite(true);
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+        QSignalSpy sent(&backend, &Backend::sent);
+        QVERIFY(backend.confirmInstall("cheetah"));
+        backend.withdraw();
+        QVERIFY(at(backend, "write"));
+        QTest::qWait(150);
+        QCOMPARE(sent.count(), 1);
+        QVERIFY(!backend.writing());
+        QVERIFY(backend.sentLines().isEmpty());
     }
 
     void aWriteThatFindsNoPhoneIsTriedAgainByHand() {

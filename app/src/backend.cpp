@@ -153,6 +153,8 @@ void Backend::reset() {
     m_busy = false;
     m_writeInHand = false;
     m_inputClosed = false;
+    m_withdrawn = false;
+    m_unreadWrite = false;
     m_hasProgress = false;
     m_sentLines.clear();
     emit sentLinesChanged();
@@ -244,6 +246,7 @@ void Backend::fail(const QString &kind, const QString &line, const QString &deta
     if (m_writeInHand && m_process.state() != QProcess::NotRunning) {
         const QString still = tr("The installer's tool was writing to the phone when this happened. The app has not ended it: it finishes the write and then leaves. Keep the phone connected.");
         m_toolErrorDetail = m_toolErrorDetail.isEmpty() ? still : m_toolErrorDetail + "\n" + still;
+        m_unreadWrite = true;
     }
     stopTool();
     clearProgress();
@@ -256,6 +259,14 @@ void Backend::exited(int code, QProcess::ExitStatus status) {
     if (m_writeInHand) {
         m_writeInHand = false;
         emit busyChanged();
+    }
+    // The tool the app could not read while it wrote has left. How its
+    // write ended was in what the app did not read, and the app does not
+    // make it up: it says that it does not know.
+    if (m_unreadWrite) {
+        m_unreadWrite = false;
+        m_toolErrorDetail += "\n" + tr("The installer's tool has left now. The app could not read how the write ended, so it does not know what is on the phone.");
+        emit toolErrorChanged();
     }
     if (m_leaving || !m_toolErrorKind.isEmpty())
         return;
@@ -331,7 +342,7 @@ void Backend::handle(const QByteArray &raw) {
         // The codename was taken and the core's screen now asks for the
         // writes: they follow at once, as on the command line. The owner's
         // go-ahead was the codename; the app adds no second question.
-        if (answered == "confirm" && action() == "write")
+        if (answered == "confirm" && action() == "write" && !m_withdrawn)
             write();
     } else if (type == "sent") {
         if (!message.value("command").isString()) {

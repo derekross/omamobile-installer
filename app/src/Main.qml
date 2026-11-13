@@ -586,6 +586,7 @@ ApplicationWindow {
                             text: qsTr("Quit")
                             onClicked: {
                                 win.quitting = true
+                                backend.withdraw()
                                 win.close()
                             }
                         }
