@@ -10,11 +10,20 @@ The one other origin the page may fetch from is https://dl.google.com, for
 Google's factory image, once the person has accepted Google's terms.
 
   web/serve.py [PORT]             as above
+  web/serve.py [PORT] --dir NAME  another build than web/dist: its directory
+                                  beside this file (the write preview's
+                                  dist-preview, or its test build's)
   web/serve.py [PORT] --stand-in  for a self-test build: a stand-in for
                                   Google's server on another port of this
                                   computer takes dl.google.com's place in the
                                   policy, so the page can reach nothing of
                                   Google's. It serves fixtures/selftest/factory.
+  web/serve.py [PORT] --releases ORIGIN
+                                  for a self-test build: ORIGIN (a stand-in for
+                                  the release server on this computer,
+                                  web/test/release-server.mjs) takes
+                                  pkgs.omamobile.org's place in the policy, and
+                                  the page finds it at /releases-stand-in.json
 """
 import functools
 import http.server
@@ -26,12 +35,14 @@ import threading
 HERE = pathlib.Path(__file__).resolve().parent
 
 
-def csp(fetch_from):
+def csp(fetch_from, releases):
     return "; ".join([
         "default-src 'none'",
         "script-src 'self' 'wasm-unsafe-eval'",
         "style-src 'self'",
-        f"connect-src 'self' {fetch_from}",   # the real page adds https://pkgs.omamobile.org
+        # Google's server, for a flow that offers its download (none that
+        # ships), and the release server, which the page downloads from
+        f"connect-src 'self' {fetch_from} {releases}",
         "img-src 'self'",
         "base-uri 'none'",
         "form-action 'none'",
@@ -45,9 +56,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map, ".wasm": "application/wasm", ".js": "text/javascript"}
     fetch_from = "https://dl.google.com"
     stand_in = None  # its origin, when there is one
+    releases = "https://pkgs.omamobile.org"
+    releases_stand_in = None
 
     def end_headers(self):
-        self.send_header("Content-Security-Policy", csp(self.fetch_from))
+        self.send_header("Content-Security-Policy", csp(self.fetch_from, self.releases))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
@@ -59,6 +72,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Where a self-test build's page finds the stand-in for Google's server
         if self.path == "/google-stand-in.json" and self.stand_in:
             body = json.dumps({"origin": self.stand_in}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/releases-stand-in.json" and self.releases_stand_in:
+            body = json.dumps({"origin": self.releases_stand_in}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -146,13 +167,27 @@ class StandIn(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if a != "--stand-in"]
+    served = "dist"
+    if "--dir" in args:
+        at = args.index("--dir")
+        served = args[at + 1]
+        if pathlib.PurePath(served).name != served:
+            sys.exit("--dir takes the name of a directory beside this file")
+        del args[at:at + 2]
+    if "--releases" in args:
+        at = args.index("--releases")
+        origin = args[at + 1]
+        if not origin.startswith("http://127.0.0.1:") or not origin[len("http://127.0.0.1:"):].isdigit():
+            sys.exit("--releases takes a stand-in on this computer: http://127.0.0.1:PORT")
+        Handler.releases = Handler.releases_stand_in = origin
+        del args[at:at + 2]
     port = int(args[0]) if args else 8765
     if "--stand-in" in sys.argv[1:]:
         google = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StandIn)
         Handler.stand_in = f"http://127.0.0.1:{google.server_address[1]}"
         Handler.fetch_from = Handler.stand_in
         threading.Thread(target=google.serve_forever, daemon=True).start()
-    handler = functools.partial(Handler, directory=str(HERE / "dist"))
+    handler = functools.partial(Handler, directory=str(HERE / served))
     with http.server.ThreadingHTTPServer(("127.0.0.1", port), handler) as server:
         print(f"http://127.0.0.1:{port}/", flush=True)
         server.serve_forever()

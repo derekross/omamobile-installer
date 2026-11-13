@@ -11,10 +11,15 @@
 #                                   (cargo build --release --locked, no features) and web/dist
 #                                   (web/build.sh, no argument); and the desktop
 #                                   app, app/build/omainstall, if app/bin/build made one
+#   tools/check-shipping --preview  the sources, and the web page's write preview as built:
+#                                   web/dist-preview (web/build.sh web-write-preview). The
+#                                   other way round: it must hold the page's write path, and
+#                                   say so, and hold no pretend phone and no test key
 #
-# Neither mode runs the command-line tool or opens a USB device. The built
-# tool is read as bytes. The page's module is loaded in node, which has no
-# USB, and asked what it exports.
+# No mode runs the command-line tool or opens a USB device. The built tool
+# is read as bytes. The page's module is loaded in node, which has no USB,
+# and asked what it exports; of the preview's module one function is called,
+# the one that returns the sentence the build says of itself.
 #
 # --control names a tool built with the `fake-phone` feature (the tests
 # leave one at target/debug/omamobile-install): the strings looked for in
@@ -44,19 +49,43 @@
 # When the page is given a write path, by the maintainer's decision, its
 # checks are changed the same way; they are not to be loosened to let
 # something through.
+#
+# The page's write preview (docs/WEB-WRITE.md) is not that decision. It is
+# a second build of the page, made only with the cargo feature
+# `web-write-preview` and into its own directory, for an attended test. The
+# page that ships is checked as before, and in addition for the preview:
+# its two source files are compiled only with the feature, nothing outside
+# them names them without it, the feature is no default, the directory that
+# every build's page is copied from holds none of its scripts, and the
+# shipping module and page hold none of its code, its exports or its words.
+# The preview has no session of its own either: its one way to a write is
+# the flow's `begin_write`, like the command-line tool's.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 export LC_ALL=C
 control=
 built=0
+preview=0
 while (( $# )); do
   case $1 in
     --built) built=1 ;;
+    --preview) preview=1 ;;
     --control) control=${2:?--control takes a file}; shift ;;
-    *) echo "usage: tools/check-shipping [--built [--control FAKE_PHONE_TOOL]]" >&2; exit 2 ;;
+    *) echo "usage: tools/check-shipping [--built [--control FAKE_PHONE_TOOL]] [--preview]" >&2; exit 2 ;;
   esac
   shift
 done
+# The write preview's sources: compiled, and copied into a build, only for
+# the cargo feature of that name. Everything else under web/ is the page
+# that ships (and its self-test)
+preview_feature='web-write-preview'
+preview_rs=(web/src/webusb.rs web/src/write_preview.rs)
+shipping_rs=()
+for f in web/src/*.rs; do
+  case " ${preview_rs[*]} " in *" $f "*) ;; *) shipping_rs+=("$f") ;; esac
+done
+preview_page=(web/preview/index.html web/preview/preview.js web/preview/write-walk.js)
+preview_tests=(web/preview/test/*)
 
 fail=0
 ok() { printf 'ok - %s\n' "$1"; }
@@ -80,6 +109,7 @@ once() {
 feature='enable-''writes'
 none "nothing names the web page's old write switch" "$feature|enable_writes" \
   web/Cargo.toml web/src/*.rs web/static/* web/build.sh web/selftest.sh web/serve.py \
+  "${preview_page[@]}" "${preview_tests[@]}" web/preview-test.sh \
   cli/Cargo.toml core/Cargo.toml usb/Cargo.toml .cargo/config.toml .github/workflows/*.yml
 
 # A session that writes takes a token only the flow's module can make. The
@@ -127,7 +157,7 @@ gated=$(grep -B1 -n '^mod tests;' core/src/flow.rs | grep -c '#\[cfg(test)\]' ||
   bad "core/src/flow.rs has a tests module that is not behind cfg(test)"
 # Nowhere else is a token made or a writing session opened: not elsewhere
 # in the core, and not in a front end (where neither would compile)
-elsewhere=$(grep -rnE 'WriteToken\(\(\)\)|connect_writing' core/src cli/src web/src usb/src web/static |
+elsewhere=$(grep -rnE 'WriteToken\(\(\)\)|connect_writing' core/src cli/src web/src usb/src web/static web/preview |
   grep -vE '^core/src/flow\.rs:|^core/src/flow/tests\.rs:|^core/src/fastboot\.rs:[0-9]+: *(///|//|pub\(crate\) async fn connect_writing\()' || true)
 if [[ -z $elsewhere ]]; then ok "no token is made and no writing session opened anywhere else"
 else bad "a write token or a writing session outside the flow" "$elsewhere"; fi
@@ -136,12 +166,12 @@ else bad "a write token or a writing session outside the flow" "$elsewhere"; fi
 # opens
 none "the command-line tool opens no session of its own and names no session options" \
   'Session::connect|connect_pinned|connect_writing|PhoneOptions|WriteToken' cli/src/*.rs
-switches=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' cli/src/*.rs core/src/*.rs usb/src/*.rs web/src/*.rs /dev/null |
+switches=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' cli/src/*.rs core/src/*.rs usb/src/*.rs "${shipping_rs[@]}" /dev/null |
   sed -E 's/^([^:]+):[0-9]+: */\1: /' || true)
 wanted='cli/src/json.rs: "--write" => out.write = true,
 cli/src/main.rs: options.write = write;'
 if [[ $switches == "$wanted" ]]; then
-  ok "the flow's write switch is set by the command-line tool alone, in install's arguments and in json's, from --write"
+  ok "in what ships, the flow's write switch is set by the command-line tool alone, in install's arguments and in json's, from --write"
 else
   bad "the flow's write switch is set somewhere else than the command-line tool's two lines" "$switches"
 fi
@@ -166,12 +196,12 @@ none "the JSON mode cannot state the other bootloader slot's version or skip its
 # The page: it begins every flow as a dry run and reaches none of the
 # flow's write steps
 none "the page and its script reach none of the flow's write steps" \
-  'confirm_install|begin_write|write_done|write_failed|write_path' web/src/*.rs web/static/*
+  'confirm_install|begin_write|write_done|write_failed|write_path' "${shipping_rs[@]}" web/static/*
 once "the page begins every flow with the write switch off" "write: false," web/src/lib.rs
 # The owner's statement about the other bootloader slot is the command
 # line's: typed there, by the owner. The page's source never names it
-none "the page cannot state the other bootloader slot's version for its owner" \
-  'bootloader_slots_match|slots[-_]match' web/src/*.rs web/static/*
+none "the page cannot state the other bootloader slot's version for its owner, in any build" \
+  'bootloader_slots_match|slots[-_]match' web/src/*.rs web/static/* "${preview_page[@]}" "${preview_tests[@]}"
 once "the command-line tool takes that statement from one argument" \
   'options.bootloader_slots_match = Some(' cli/src/main.rs
 # The page: no session that writes, in any build. Its self-test walks an
@@ -274,7 +304,84 @@ for pair in "cli/Cargo.toml|fake-phone" "web/Cargo.toml|selftest"; do
   else ok "$file turns on the core's pretend-link only with its $feature_name feature"; fi
 done
 
+# The page's write preview: a second build, never the one that ships
+for file in "${preview_rs[@]}"; do
+  name=$(basename "$file" .rs)
+  mods=$(grep -c "^mod $name;" web/src/lib.rs || true)
+  gated=$(grep -B1 -n "^mod $name;" web/src/lib.rs | grep -c "#\[cfg(feature = \"$preview_feature\")\]" || true)
+  if [[ -f $file && $mods == 1 && $gated == 1 ]]; then ok "$file is compiled only with the $preview_feature feature"
+  else bad "$file is compiled without the $preview_feature feature ($mods mod $name, $gated behind the feature)"; fi
+done
+# Outside those two files, a line that names something of them stands
+# directly under the feature's cfg (comments aside). The install link's two
+# files are left out: they are behind link-preview, which only the preview
+# turns on, and their WebUSB transport is the link's own (WebUsbLink)
+outside_link=()
+for f in "${shipping_rs[@]}"; do
+  case $f in web/src/link.rs | web/src/link_webusb.rs) ;; *) outside_link+=("$f") ;; esac
+done
+loose=$(awk -v gate="#[cfg(feature = \"$preview_feature\")]" '
+  { line = $0; sub(/^[ \t]+/, "", line) }
+  line ~ /^\/\// { next }
+  /webusb::|write_preview::|WebUsb/ && before != gate { print FILENAME ":" FNR ": " $0 }
+  { before = line }
+' "${outside_link[@]}")
+if [[ -z $loose ]]; then ok "the page's module names nothing of the write preview without its feature"
+else bad "the page's module names something of the write preview outside the feature" "$loose"; fi
+none "the write preview's feature is no default" \
+  "^default *=.*$preview_feature" web/Cargo.toml cli/Cargo.toml core/Cargo.toml usb/Cargo.toml
+once "the write preview's feature is declared once, in the page's crate" "$preview_feature = [" web/Cargo.toml
+# Its one way to a write is the flow's, as for the command-line tool
+none "the write preview opens no session of its own and names no session options" \
+  'Session::connect|connect_pinned|PhoneOptions' "${preview_rs[@]}"
+none "the write preview has no command and no partition name of its own" \
+  '"(getvar|download|flash|erase|format|oem|flashing|set_active|reboot|continue|boot)[: "]' "${preview_rs[@]}"
+opens=$(grep -c '\.begin_write(' web/src/write_preview.rs || true)
+switch=$(grep -nP '\bwrite *: *true|\.write *= *(?!false)' "${preview_rs[@]}" /dev/null || true)
+if [[ $opens == 1 && $switch == "web/src/write_preview.rs:"*"options.write = true;" ]]; then
+  ok "the write preview sets the flow's write switch in one line and asks the flow for its writing session in one place"
+else
+  bad "the write preview sets the write switch or asks for a writing session in more than one place, or in none" "$opens begin_write" "$switch"
+fi
+once "the write preview begins its flows from the options of the page that ships" \
+  "let mut options = super::page_options(reinstall);" web/src/write_preview.rs
+# Its scripts: not in the directory every build's page is copied from
+strays=$(ls web/static | grep -vxE 'app\.js|index\.html|release-fetch\.js|style\.css' || true)
+if [[ -z $strays ]]; then ok "the page that ships is four files, and none is the write preview's"
+else bad "web/static holds more than the page that ships" "$strays"; fi
+none "the page that ships loads no script but its own, and names none of the write preview's" \
+  'preview\.js|write-walk|page-run|fake-usb|web_write|session_(open|boot|root|finish)|images_(check|root)' web/static/*
+tags=$(grep -c '<script' web/static/index.html || true)
+if [[ $tags == 1 ]] && grep -qF '<script type="module" src="app.js"></script>' web/static/index.html; then
+  ok "the page that ships has one script tag, its own"
+else bad "the page that ships has $tags script tags, or its one is not app.js"; fi
+# The page's download of the release (web/static/release-fetch.js): files
+# from the release server, kept in the browser and checked by the module. It
+# reaches no phone, and fetches from the one server it names
+none "the page's download script reaches no phone and names no flow step" \
+  'navigator\.usb|requestDevice|request_phone|read_phone|dry_run|transfer(In|Out)|Phone\b|InstallFlow' web/static/release-fetch.js
+once "the page's download script names one release server" \
+  'export const RELEASES = "https://pkgs.omamobile.org/releases/";' web/static/release-fetch.js
+none "the page's download script names no other server" \
+  'https?://(?!pkgs\.omamobile\.org/releases/)' web/static/release-fetch.js
+none "the write preview's page offers no override and runs no command" \
+  'maintainer|slot_override|flashing unlock|fake_phone' "${preview_page[@]}"
+once "a build that is not the write preview copies none of its scripts" \
+  'cp "$here"/preview/index.html "$here"/preview/*.js "$dist/"' web/build.sh
+none "the self-test of the page that ships is not built with the write preview" \
+  "$preview_feature" web/selftest.sh
+# One preview build: the write preview holds the install link's preview too
+if grep -qE "^$preview_feature *= *\[" web/Cargo.toml && sed -n "/^$preview_feature *= *\[/,/\]/p" web/Cargo.toml | grep -qF '"link-preview"'; then
+  ok "the $preview_feature feature turns on link-preview: one preview build holds both"
+else bad "the $preview_feature feature does not turn on link-preview"; fi
+
 # ---- What was built -------------------------------------------------------
+
+# What only a build with the write preview holds: the sentence it says of
+# itself, its exports, and its transport's words
+preview_marks=("this build can write to a phone" "web_write_preview" "begin_write_preview" "session_root_feed"
+  "the connection to the phone ended earlier" "timed out waiting for the phone")
+preview_glue='preview|web_write|session_(open|boot|root_feed|finish|abandon|progress)|images_(check_boot|root_(begin|update|done))'
 
 if (( built )); then
   # What only a build with the pretend phone holds: its serial numbers, its
@@ -331,6 +438,14 @@ if (( built )); then
       'confirm_install|begin_write|write_done|write_failed' "$glue" web/dist/*.js web/dist/*.html
     none "the shipping page's glue has nothing of the install link" \
       'LinkPreview|linkpreview|pretend_shows|pretend_report' "$glue"
+    found=()
+    for mark in "${preview_marks[@]}"; do if holds "$wasm" "$mark"; then found+=("$mark"); fi; done
+    if (( ${#found[@]} )); then bad "the shipping page's module holds the write preview" "${found[@]}"
+    else ok "the shipping page's module holds nothing of the write preview: not its transport, not its steps, not its words"; fi
+    none "the shipping page's glue has nothing of the write preview" "$preview_glue" "$glue"
+    strays=$(cd web/dist && find . -type f ! -path './pkg/*' ! -path './release/*' | sort | tr '\n' ' ')
+    if [[ $strays == "./app.js ./index.html ./release-fetch.js ./style.css " ]]; then ok "the shipping page is its four files, the module and the release's files"
+    else bad "the shipping page holds other files than its own" "$strays"; fi
     if grep -qF 'cannot write to a phone' web/dist/index.html; then ok "the shipping page says it cannot write to a phone"
     else bad "the shipping page does not say that it cannot write to a phone"; fi
     if ! command -v node >/dev/null; then
@@ -351,13 +466,85 @@ const statics = Object.getOwnPropertyNames(glue.InstallFlow).filter((n) => /self
 const direct = names.filter((n) => /^(connect|Install|RootProof|writes_enabled)$/.test(n));
 // The install link's preview: no class of it in the page as it ships
 const link = names.filter((n) => /link/i.test(n));
-console.log(JSON.stringify({ direct, extra, statics, link, names }));
+const steps = Object.getOwnPropertyNames(glue.InstallFlow.prototype);
+const preview = [...names, ...steps, ...Object.getOwnPropertyNames(glue.InstallFlow)].filter((n) => /preview|web_write|confirm_install|session_|images_/i.test(n));
+console.log(JSON.stringify({ direct, extra, statics, link, preview, names }));
 JS
       answer=$(node "$scratch/ask.mjs" "$PWD/$wasm" 2>&1) || true
-      if [[ $answer == '{"direct":[],"extra":[],"statics":[],"link":[],"names":['*'"InstallFlow"'* ]]; then
-        ok "the shipping page's module, loaded, exports the flow, no direct session, no pretend phone, no self-test and nothing of the install link"
+      if [[ $answer == '{"direct":[],"extra":[],"statics":[],"link":[],"preview":[],"names":['*'"InstallFlow"'* ]]; then
+        ok "the shipping page's module, loaded, exports the flow, no direct session, no pretend phone, no self-test, nothing of the install link and nothing of the write preview"
       else
-        bad "the shipping page's module, loaded, exports a direct session or a pretend phone, or did not load" "$answer"
+        bad "the shipping page's module, loaded, exports a direct session, a pretend phone or the write preview, or did not load" "$answer"
+      fi
+    fi
+  fi
+fi
+
+# ---- The write preview, as built ------------------------------------------
+
+# The other way round: this build must hold the page's write path, and say
+# so, or the checks above that look for it in the shipping build prove
+# nothing. It is still no build for a pretend phone or a test key.
+if (( preview )); then
+  marks=("FAKESERIAL0001" "ANOTHERPHONE0002" "fake-1.0" "test-key.gpg" "A pretend phone (")
+  holds() { grep -qaF -- "$2" "$1"; }
+  dist=web/dist-preview
+  glue=$dist/pkg/omamobile_installer_web.js
+  wasm=$dist/pkg/omamobile_installer_web_bg.wasm
+  if [[ ! -f $glue || ! -f $wasm || ! -f $dist/index.html ]]; then
+    bad "there is no write preview in $dist to read (web/build.sh $preview_feature)"
+  else
+    missing=()
+    for mark in "${preview_marks[@]}"; do if ! holds "$wasm" "$mark"; then missing+=("$mark"); fi; done
+    if (( ${#missing[@]} )); then bad "the write preview's module does not hold the write preview" "${missing[@]}"
+    else ok "the write preview's module holds its transport, its steps and what it says of itself"; fi
+    found=()
+    for mark in "${marks[@]}"; do if holds "$wasm" "$mark"; then found+=("$mark"); fi; done
+    if (( ${#found[@]} )); then bad "the write preview's module holds the pretend phone" "${found[@]}"
+    else ok "the write preview's module holds nothing of the pretend phone or the test key"; fi
+    none "the write preview's glue has no pretend phone, no self-test and no override" \
+      'fake_phone|selftest|slot_override|maintainer|slots_match' "$glue"
+    strays=$(cd "$dist" && find . -type f ! -path './pkg/*' ! -path './release/*' | sort | tr '\n' ' ')
+    if [[ $strays == "./app.js ./index.html ./preview.js ./release-fetch.js ./style.css ./write-walk.js " ]]; then ok "the write preview is the page's files and its own three, with none of its tests"
+    else bad "the write preview holds other files than the page's and its own" "$strays"; fi
+    if grep -qF 'this build can write to a phone' "$dist/index.html" && grep -qF 'It has never been run against a real phone' "$dist/index.html" &&
+      ! grep -qF 'cannot write to a phone' "$dist/index.html"; then
+      ok "the write preview's first page says that it can write to a phone and has never met a real one"
+    else bad "the write preview's first page does not say plainly what it is"; fi
+    tags=$(grep -c '<script' "$dist/index.html" || true)
+    if [[ $tags == 1 ]] && grep -qF '<script type="module" src="preview.js"></script>' "$dist/index.html"; then
+      ok "the write preview's first page loads its own script, which loads the page's"
+    else bad "the write preview's first page has $tags script tags, or its one is not preview.js"; fi
+    if ! command -v node >/dev/null; then
+      bad "node is needed to load the write preview's module and ask what it exports"
+    else
+      scratch2=$(mktemp -d)
+      trap 'rm -rf "${scratch:-}" "$scratch2"' EXIT
+      cp "$glue" "$scratch2/glue.mjs"
+      cat >"$scratch2/ask.mjs" <<'JS'
+import { readFileSync } from "node:fs";
+const glue = await import("./glue.mjs");
+glue.initSync({ module: readFileSync(process.argv[2]) });
+const names = Object.keys(glue).sort();
+const steps = Object.getOwnPropertyNames(glue.InstallFlow.prototype);
+const makers = Object.getOwnPropertyNames(glue.InstallFlow);
+// The install link's preview, in the same build: its flow and its steps
+const linkSteps = glue.LinkPreview ? Object.getOwnPropertyNames(glue.LinkPreview.prototype) : [];
+const has = ["request_phone", "web_write_preview", "LinkPreview"].every((n) => names.includes(n)) &&
+  ["screen", "run", "pair", "retry"].every((n) => linkSteps.includes(n)) &&
+  makers.includes("begin_write_preview") &&
+  ["confirm_install", "images_check_boot", "images_root_begin", "images_root_update", "images_root_done",
+    "session_open", "session_boot", "session_root_feed", "session_finish", "session_abandon"].every((n) => steps.includes(n));
+const extra = [...names, ...steps, ...makers, ...linkSteps].filter((n) => /fake|selftest|pretend|slot|override|maintainer|unlock|command|partition|token/i.test(n));
+// The one call: a sentence, made of nothing but the module's own words
+const says = glue.web_write_preview();
+console.log(JSON.stringify({ has, extra, says }));
+JS
+      answer=$(node "$scratch2/ask.mjs" "$PWD/$wasm" 2>&1) || true
+      if [[ $answer == '{"has":true,"extra":[],"says":"This is a write preview, made for an attended test and not for use. Unlike the page that ships, this build can write to a phone'*'It has never been run against a real phone."}' ]]; then
+        ok "the write preview's module, loaded, exports the chooser, the flow's write steps, the install link's flow and what it says of itself, and no pretend phone, self-test, override or slot statement"
+      else
+        bad "the write preview's module, loaded, lacks the write steps or exports something it must not, or did not load" "$answer"
       fi
     fi
   fi

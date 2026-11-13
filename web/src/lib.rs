@@ -40,19 +40,36 @@
 //! and with them the question the page asked about it: there is no build
 //! of this module for which the answer could be yes. The self-test's own
 //! install against the pretend phone is therefore a dry run too.
+//!
+//! That is true of the page as it ships and of its self-test build. One
+//! build is different, and it is not a build that ships: with the cargo
+//! feature `web-write-preview` (off by default; `tools/check-shipping`
+//! fails if anything of it is in the shipping module) two more files are
+//! compiled in, `webusb.rs` and `write_preview.rs`: the page's own WebUSB
+//! transport, with the wait the core sets for an answer, and the flow's
+//! write steps for the page. They add no second way to a write: the
+//! session that writes is still the one the flow opens in its one step for
+//! that, and every command still leaves through the core's one gate
+//! (docs/WEB-WRITE.md).
+//!
+//! The preview build holds the install link's screens and its WebUSB
+//! transport too (`link.rs`, `link_webusb.rs`, the feature `link-preview`,
+//! which `web-write-preview` turns on): one preview build for both. Nothing
+//! in it reaches the link from a write yet; the self-test's pretend phone
+//! does (docs/WEB-WRITE.md, docs/DESIGN.md §14).
 // The install link's screens and transport: the preview build only.
 #[cfg(feature = "link-preview")]
 mod link;
 #[cfg(feature = "link-preview")]
 mod link_webusb;
-
 use omamobile_installer_core::bundle::{self, ReleaseFiles, RootImageCheck, VerifiedRelease};
 use omamobile_installer_core::download::{FactoryDownload, FetchFailure, FetchNext, FetchResponse};
 #[cfg(feature = "selftest")]
 use omamobile_installer_core::fastboot::Session;
-use omamobile_installer_core::fastboot::{
-    PhoneId, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
-};
+use omamobile_installer_core::fastboot::{PhoneId, Transport};
+// The chooser of the page as it ships; the write preview has its own
+#[cfg(not(feature = "web-write-preview"))]
+use omamobile_installer_core::fastboot::{USB_CLASS, USB_PROTOCOL, USB_SUBCLASS};
 use omamobile_installer_core::flow::{
     AnswersInput, DownloadEnd, FactoryZipCheck, Flow, FlowOptions, OwnerAnswers,
 };
@@ -60,6 +77,7 @@ use omamobile_installer_core::signature::TrustedKeys;
 use omamobile_installer_usb::UsbTransport;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
+#[cfg(not(feature = "web-write-preview"))]
 use wasm_bindgen_futures::JsFuture;
 
 fn js<E: core::fmt::Display>(e: E) -> JsError {
@@ -135,13 +153,23 @@ impl RootCheck {
             .ok_or_else(|| JsError::new("already finished"))?;
         check.finish().map(|_| ()).map_err(js)
     }
+    /// The same as [`Self::finish`], under the name the page's download
+    /// script calls (`web/static/release-fetch.js`): `tools/check-shipping`
+    /// keeps `.finish(` out of the page's scripts, for the direct session
+    /// that once had one.
+    pub fn done(&mut self) -> Result<(), JsError> {
+        self.finish()
+    }
 }
 
 /// Where a phone is: a USB device the person picked in the browser's
 /// chooser, or, in a self-test build, the tests' pretend phone in memory.
 #[derive(Clone)]
 enum Link {
+    #[cfg_attr(feature = "web-write-preview", allow(dead_code))]
     Usb(nusb::Device),
+    #[cfg(feature = "web-write-preview")]
+    WebUsb(web_sys::UsbDevice),
     #[cfg(feature = "selftest")]
     Fake(fake::FakePhone),
 }
@@ -149,6 +177,8 @@ enum Link {
 /// The transport for either kind of [`Link`].
 enum AnyTransport {
     Usb(UsbTransport),
+    #[cfg(feature = "web-write-preview")]
+    WebUsb(webusb::WebUsbTransport),
     #[cfg(feature = "selftest")]
     Fake(fake::FakePhone),
 }
@@ -157,6 +187,8 @@ impl Transport for AnyTransport {
     async fn send(&mut self, data: &[u8]) -> omamobile_installer_core::Result<usize> {
         match self {
             AnyTransport::Usb(t) => t.send(data).await,
+            #[cfg(feature = "web-write-preview")]
+            AnyTransport::WebUsb(t) => t.send(data).await,
             #[cfg(feature = "selftest")]
             AnyTransport::Fake(t) => t.send(data).await,
         }
@@ -164,6 +196,8 @@ impl Transport for AnyTransport {
     async fn recv(&mut self) -> omamobile_installer_core::Result<Vec<u8>> {
         match self {
             AnyTransport::Usb(t) => t.recv().await,
+            #[cfg(feature = "web-write-preview")]
+            AnyTransport::WebUsb(t) => t.recv().await,
             #[cfg(feature = "selftest")]
             AnyTransport::Fake(t) => t.recv().await,
         }
@@ -181,6 +215,8 @@ impl Phone {
     async fn open(&self) -> Result<AnyTransport, JsError> {
         Ok(match &self.link {
             Link::Usb(device) => AnyTransport::Usb(UsbTransport::open(device).await.map_err(js)?),
+            #[cfg(feature = "web-write-preview")]
+            Link::WebUsb(device) => webusb::open(device).await?,
             #[cfg(feature = "selftest")]
             Link::Fake(phone) => AnyTransport::Fake(phone.clone()),
         })
@@ -205,6 +241,7 @@ impl Phone {
 
 /// Show the browser's USB chooser, filtered to fastboot interfaces. Must be
 /// called from a click. The page never sees a device the person didn't pick.
+#[cfg(not(feature = "web-write-preview"))]
 #[wasm_bindgen]
 pub async fn request_phone() -> Result<Phone, JsError> {
     let usb = web_sys::window()
@@ -262,6 +299,10 @@ pub struct InstallFlow {
     /// The self-test bundle's images are built in, to walk through a dry run.
     #[cfg(feature = "selftest")]
     built_in: bool,
+    /// The write preview's own state: which files were checked, and the
+    /// session the flow opened for it.
+    #[cfg(feature = "web-write-preview")]
+    preview: write_preview::Preview,
 }
 
 #[wasm_bindgen]
@@ -300,6 +341,8 @@ impl InstallFlow {
             download: None,
             #[cfg(feature = "selftest")]
             built_in: false,
+            #[cfg(feature = "web-write-preview")]
+            preview: write_preview::Preview::default(),
         }
     }
 
@@ -525,6 +568,13 @@ macro_rules! fx {
     };
 }
 
+// The write preview: the page's own WebUSB transport and the flow's write
+// steps. Not in the page as it ships (docs/WEB-WRITE.md).
+#[cfg(feature = "web-write-preview")]
+mod webusb;
+#[cfg(feature = "web-write-preview")]
+mod write_preview;
+
 #[cfg(feature = "selftest")]
 const BUILT_IN_IMAGES: [&[u8]; 5] = [
     fx!("images/boot.img"),
@@ -648,6 +698,8 @@ impl InstallFlow {
             check: None,
             download: None,
             built_in: true,
+            #[cfg(feature = "web-write-preview")]
+            preview: write_preview::Preview::default(),
         })
     }
 }
@@ -657,6 +709,42 @@ impl InstallFlow {
 #[wasm_bindgen]
 pub fn selftest_factory_zip() -> Vec<u8> {
     fx!("factory/cheetah-test.260101.001-factory-31c2322a.zip").to_vec()
+}
+
+/// A release's small files checked as [`verify_release`] checks them, but
+/// trusted by a test key: the one `fixtures/selftest` was signed with, or
+/// the one `fingerprint` names. Self-test builds only, for the tests of the
+/// page's download (web/test) against a stand-in for the release server.
+#[cfg(feature = "selftest")]
+#[wasm_bindgen]
+pub fn selftest_verify_release(
+    fingerprint: Option<String>,
+    sha256sums: &[u8],
+    sha256sums_sig: &[u8],
+    keyring: &[u8],
+    manifest_json: &[u8],
+    manifest_txt: &[u8],
+    device_conf: &[u8],
+) -> Result<Release, JsError> {
+    let files = ReleaseFiles {
+        sha256sums,
+        sha256sums_sig,
+        keyring,
+        manifest_json,
+        manifest_txt,
+        device_conf,
+    };
+    let fingerprint = match fingerprint {
+        Some(f) => f,
+        None => core::str::from_utf8(fx!("test-key.fingerprint"))
+            .map_err(js)?
+            .trim()
+            .to_string(),
+    };
+    let trusted = TrustedKeys::new(&[fingerprint]).map_err(js)?;
+    Ok(Release {
+        inner: bundle::verify_release(&files, &trusted).map_err(js)?,
+    })
 }
 
 /// Walk the built-in bundle's images through a dry-run session.

@@ -15,9 +15,39 @@ openpgp = ["omamobile-installer-core/openpgp"]
 # browser can run an install against it. Never in a release build.
 selftest = ["link-preview", "omamobile-installer-core/pretend-link"]
 # The install link's screens and its WebUSB transport (web/src/link.rs,
-# web/src/link_webusb.rs): the preview build only (web/build.sh preview, and
-# the self-test's). Never in the page as it ships (tools/check-shipping).
-link-preview = ["dep:omamobile-link"]
+# web/src/link_webusb.rs): the write preview's build only (web-write-preview
+# turns it on), and the self-test's. Never in the page as it ships
+# (tools/check-shipping).
+link-preview = [
+    "dep:omamobile-link",
+    "web-sys/UsbConfiguration",
+    "web-sys/UsbInterface",
+    "web-sys/UsbAlternateInterface",
+    "web-sys/UsbEndpoint",
+    "web-sys/UsbEndpointType",
+    "web-sys/UsbDirection",
+    "web-sys/UsbInTransferResult",
+    "web-sys/UsbTransferStatus",
+    "web-sys/Blob",
+]
+# The page's write path, for an attended preview and its tests only, with
+# the install link's screens (link-preview) in the same build: the
+# page's own WebUSB transport (web/src/webusb.rs) and the flow's write steps
+# (web/src/write_preview.rs). Never a default, and never in the page as it
+# ships: tools/check-shipping fails if the shipping module holds any of it
+# (docs/WEB-WRITE.md).
+web-write-preview = [
+    "link-preview",
+    "web-sys/UsbConfiguration",
+    "web-sys/UsbInterface",
+    "web-sys/UsbAlternateInterface",
+    "web-sys/UsbEndpoint",
+    "web-sys/UsbDirection",
+    "web-sys/UsbEndpointType",
+    "web-sys/UsbInTransferResult",
+    "web-sys/UsbOutTransferResult",
+    "web-sys/UsbTransferStatus",
+]
 
 [dependencies]
 omamobile-installer-core = { path = "../core", default-features = false }
@@ -31,4 +61,4 @@ omamobile-link = { path = "../link", optional = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Navigator", "Window", "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions", "UsbConfiguration", "UsbInterface", "UsbAlternateInterface", "UsbEndpoint", "UsbEndpointType", "UsbDirection", "UsbInTransferResult", "UsbTransferStatus", "Blob"] }
+web-sys = { version = "0.3", features = ["Navigator", "Window", "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions"] }
