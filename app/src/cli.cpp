@@ -13,8 +13,10 @@
 
 QString Cli::usage() {
     return QStringLiteral(
-        "usage: omainstall [open [--reinstall] [RELEASE_DIR]]   the window\n"
-        "       omainstall check [--json]                       find the installer's tool; say its version and protocol\n"
+        "usage: omainstall [open [--reinstall] [RELEASE_DIR]]           the window, for a dry run: nothing is written to a phone\n"
+        "       omainstall open --write [--reinstall] RELEASE_DIR       the window, for an install: after the dry run it lists what\n"
+        "                                                               it will write, and writes once the phone's codename is typed\n"
+        "       omainstall check [--json]                               find the installer's tool; say its version and protocol\n"
         "       omainstall --version | --help\n");
 }
 

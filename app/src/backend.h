@@ -35,6 +35,15 @@ class Backend : public QObject {
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     // The message that made it busy ("download", "take-file", ...), or nothing.
     Q_PROPERTY(QString pending READ pending NOTIFY busyChanged)
+    // The flow of this run may write to a phone: the window was started with
+    // --write, and the tool was started with it and said so in its hello.
+    Q_PROPERTY(bool writes READ writes NOTIFY toolChanged)
+    // The writes are under way: the one action that is never cut off.
+    Q_PROPERTY(bool writing READ writing NOTIFY busyChanged)
+    // What the session that writes said it sent, as the tool put it: each
+    // command the phone received, a line for each piece of userdata, and at
+    // the end the tool's account of the pieces. Kept until a new run.
+    Q_PROPERTY(QStringList sentLines READ sentLines NOTIFY sentLinesChanged)
     Q_PROPERTY(bool hasProgress READ hasProgress NOTIFY progressChanged)
     Q_PROPERTY(QString progressWhat READ progressWhat NOTIFY progressChanged)
     Q_PROPERTY(double progressDone READ progressDone NOTIFY progressChanged)
@@ -58,7 +67,7 @@ class Backend : public QObject {
 
 public:
     // The protocol this app speaks (docs/APP.md).
-    static constexpr int Protocol = 1;
+    static constexpr int Protocol = 2;
     // The tool's name, beside the app's binary or on PATH.
     static constexpr const char *ToolName = "omamobile-install";
     // Names another tool, for the tests.
@@ -79,6 +88,13 @@ public:
 
     // What the person said up front, before start().
     void setReinstall(bool reinstall) { m_reinstall = reinstall; }
+    // The flow may write. Said once, when the window is started (`omainstall
+    // open --write`), and passed on as the tool's own --write: there is no
+    // message for it, and nothing in the window sets it.
+    void setWrite(bool write) { m_write = write; }
+    // How long shutdown() waits for a tool that is writing before it gives
+    // up on it. Long: a write that is cut off leaves a phone half written.
+    void setWriteWait(int milliseconds) { m_writeWait = milliseconds; }
     void setReleaseDirectory(const QString &directory) { m_releaseDirectory = directory; }
     void setHelloTimeout(int milliseconds) { m_helloTimer.setInterval(milliseconds); }
 
@@ -90,6 +106,9 @@ public:
         const QString retry = m_screen.value("retry").toString();
         return action() == "none" && (retry == "whenever" || retry == "after-fix");
     }
+    bool writes() const { return m_write; }
+    bool writing() const { return m_busy && m_pending == "write"; }
+    QStringList sentLines() const { return m_sentLines; }
     bool busy() const { return m_busy; }
     QString pending() const { return m_busy ? m_pending : QString(); }
     bool hasProgress() const { return m_hasProgress; }
@@ -132,6 +151,15 @@ public:
     Q_INVOKABLE bool takeFileUrl(const QUrl &url);
     Q_INVOKABLE bool submitAnswers(const QVariantMap &answers);
     Q_INVOKABLE bool dryRun();
+    // What the owner typed where the core asks for the phone's codename, as
+    // typed. The core takes the codename and stops for anything else.
+    Q_INVOKABLE bool confirmInstall(const QString &typed);
+    // The owner does not go ahead: nothing typed is handed in, and the
+    // core's own stop follows, with nothing written.
+    Q_INVOKABLE bool declineInstall();
+    // Sent by itself once the codename was taken (the core's screen then
+    // names it); by the person only when that try found no phone.
+    Q_INVOKABLE bool write();
 
     // The screen's main action, for the button and for Space. `answers` and
     // `none` are the window's: a form to hand in, a window to close.
@@ -157,6 +185,7 @@ signals:
     void pickerErrorChanged();
     void toolErrorChanged();
     void toolChanged();
+    void sentLinesChanged();
     // The tool said hello with a protocol this app speaks.
     void ready();
     // Every line written to the tool, as written. For the tests.
@@ -186,12 +215,15 @@ private:
     bool m_greeted = false;
     bool m_leaving = false;
     bool m_reinstall = false;
+    bool m_write = false;
+    int m_writeWait = 30 * 60 * 1000;
     QString m_releaseDirectory;
 
     QVariantMap m_screen;
     bool m_busy = false;
     QString m_pending;
     bool m_hasProgress = false;
+    QStringList m_sentLines;
     QString m_progressWhat;
     double m_progressDone = 0;
     double m_progressTotal = 0;

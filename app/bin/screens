@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Walks a whole pretend install in the window, offscreen, and saves one
+# picture for each screen into docs/screens/ (or the directory given). The
+# phone is the tool's pretend phone and Google's server a stand-in in the
+# test: no phone, no USB, nothing from the internet. The accent is the
+# fallback one and everything typed is made up, so the pictures hold nothing
+# of this computer or its owner.
+#
+#   app/bin/screens [DIR]
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+OUT="${1:-$ROOT/docs/screens}"
+mkdir -p "$OUT"
+OUT="$(CDPATH= cd -- "$OUT" && pwd)"
+# The pictures of an earlier walk, whose names may have changed since
+rm -f "${OUT:?}"/*.png
+OMAINSTALL_SCREENS="$OUT" "$ROOT/bin/test" theScreensOfAPretendInstall
+ls "$OUT"

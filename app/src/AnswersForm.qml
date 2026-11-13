@@ -9,7 +9,9 @@ import QtQuick.Layouts
 
 ColumnLayout {
     id: form
-    spacing: 4
+    // Room for a field's label, which sits on its upper edge once the field
+    // has text, and for the core's line under the field before it.
+    spacing: 12
 
     // A field took the focus: the view scrolls it into sight.
     signal focused(Item field)

@@ -26,15 +26,17 @@ ApplicationWindow {
     property bool helpVisible: false
     property bool confirmQuit: false
     property bool quitting: false
+    // Someone tried to close the window while the phone is being written.
+    property bool writeHold: false
 
     readonly property string action: backend.action
     readonly property bool toolFailed: backend.toolError !== ""
     readonly property bool choosingPhone: backend.phones.length > 0
-    readonly property bool overlayOpen: helpVisible || confirmQuit || choosingPhone
+    readonly property bool overlayOpen: helpVisible || confirmQuit || choosingPhone || writeHold
     // A step is in hand: the tool was given something and has not answered.
     readonly property bool stepRunning: backend.busy && backend.hasScreen
     readonly property bool knownAction: ["acknowledge", "read-phone", "accept-terms", "download", "take-file",
-                                         "answers", "dry-run", "none"].indexOf(action) >= 0
+                                         "answers", "dry-run", "confirm", "write", "none"].indexOf(action) >= 0
     readonly property bool wantsFile: action === "download" || action === "take-file"
     // The keys below must not take a letter meant for a field, or Space and
     // Enter meant for the button that has the focus.
@@ -42,13 +44,14 @@ ApplicationWindow {
     readonly property bool onControl: activeFocusItem instanceof AbstractButton
     readonly property bool keysFree: !typing && !overlayOpen
 
+    // A run that may write has one stage more, after the dry run.
     readonly property var stages: [
         { label: qsTr("Warning"), states: ["warning"] },
         { label: qsTr("Phone"), states: ["phone", "unlock"] },
         { label: qsTr("Factory image"), states: ["google-terms", "factory-image"] },
         { label: qsTr("About you"), states: ["answers"] },
         { label: qsTr("Dry run"), states: ["dry-run", "done"] }
-    ]
+    ].concat(backend.writes ? [{ label: qsTr("Install"), states: ["confirm", "write", "installed"] }] : [])
     readonly property int stage: {
         for (let i = 0; i < stages.length; i++)
             if (stages[i].states.indexOf(backend.state) >= 0)
@@ -67,6 +70,10 @@ ApplicationWindow {
         case "take-file": return qsTr("Choose the file…")
         case "answers": return qsTr("Go on")
         case "dry-run": return qsTr("Run the dry run")
+        case "confirm": return qsTr("Erase the phone and install")
+        // Reached by hand only when the writes could not begin (no phone
+        // answered): the app sends them itself once the codename is taken.
+        case "write": return backend.busy ? "" : qsTr("Look for the phone again")
         case "none": return qsTr("Close")
         }
         return ""
@@ -78,6 +85,7 @@ ApplicationWindow {
         case "acknowledge": return qsTr("Stop here")
         case "accept-terms": return qsTr("I will download it myself")
         case "download": return backend.pending === "download" ? qsTr("Cancel") : qsTr("Choose a file I saved…")
+        case "confirm": return qsTr("Do not install")
         }
         // Offered where the core says a new run can get past the stop, and
         // nowhere else: the app does not read the stop's sentences.
@@ -92,6 +100,8 @@ ApplicationWindow {
         case "download": return qsTr("Downloading")
         case "check": return qsTr("Checking the file")
         case "dry-run": return qsTr("Running the dry run")
+        case "verify": return qsTr("Checking the release's files")
+        case "write": return qsTr("Writing to the phone")
         }
         return qsTr("Working")
     }
@@ -103,6 +113,8 @@ ApplicationWindow {
             return
         else if (action === "answers")
             screenView.submitAnswers()
+        else if (action === "confirm")
+            backend.confirmInstall(codenameField.text)
         else if (action === "none")
             win.close()
         else
@@ -115,6 +127,8 @@ ApplicationWindow {
             backend.decline()
         else if (action === "accept-terms")
             backend.declineTerms()
+        else if (action === "confirm")
+            backend.declineInstall()
         else if (action === "download" && backend.pending === "download")
             backend.cancelDownload()
         else if (action === "download")
@@ -124,14 +138,29 @@ ApplicationWindow {
     }
 
     // Closing asks first while a step is running: a download or a look at
-    // the phone would be cut off.
+    // the phone would be cut off. While the phone is being written the
+    // window does not close at all: there is no asking that makes a write
+    // that was cut off safe.
     onClosing: function(close) {
-        if (stepRunning && !quitting) {
+        if (backend.writing) {
+            close.accepted = false
+            confirmQuit = false
+            writeHold = true
+        } else if (stepRunning && !quitting) {
             close.accepted = false
             confirmQuit = true
         }
     }
     onConfirmQuitChanged: if (confirmQuit) keepGoing.forceActiveFocus()
+    onWriteHoldChanged: if (writeHold) holdOk.forceActiveFocus()
+    // The write is over: the notice has nothing left to say.
+    Connections {
+        target: backend
+        function onBusyChanged() {
+            if (!backend.writing)
+                win.writeHold = false
+        }
+    }
 
     Shortcut { sequence: "?"; context: Qt.ApplicationShortcut; enabled: !win.typing; onActivated: win.helpVisible = !win.helpVisible }
     Shortcut { sequence: "Q"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: win.close() }
@@ -147,6 +176,8 @@ ApplicationWindow {
         onActivated: {
             if (win.helpVisible)
                 win.helpVisible = false
+            else if (win.writeHold)
+                win.writeHold = false
             else if (win.confirmQuit)
                 win.confirmQuit = false
             else if (win.choosingPhone)
@@ -211,14 +242,15 @@ ApplicationWindow {
                     implicitWidth: previewText.implicitWidth + 16
                     implicitHeight: previewText.implicitHeight + 6
                     radius: Math.min(4, theme.radius)
-                    color: "transparent"
-                    border.color: theme.accent
+                    color: backend.writes ? "#2b1614" : "transparent"
+                    border.color: backend.writes ? "#ff7b72" : theme.accent
                     border.width: 1
                     Text {
                         id: previewText
+                        objectName: "mode"
                         anchors.centerIn: parent
-                        text: qsTr("Preview")
-                        color: theme.accent
+                        text: backend.writes ? qsTr("Install") : qsTr("Dry run")
+                        color: backend.writes ? "#ff9a92" : theme.accent
                         font.pixelSize: 12
                         font.bold: true
                     }
@@ -226,7 +258,9 @@ ApplicationWindow {
                 Text {
                     objectName: "banner"
                     Layout.fillWidth: true
-                    text: qsTr("This version cannot write to a phone. It ends at a dry run.")
+                    text: backend.writes
+                          ? qsTr("This run can write to a phone. It writes only after it has listed what it will write and you have typed the phone's codename.")
+                          : qsTr("This run cannot write to a phone. It ends at a dry run.")
                     color: "#a8a8b2"
                     font.pixelSize: 13
                     wrapMode: Text.Wrap
@@ -419,14 +453,32 @@ ApplicationWindow {
                     ActionButton {
                         id: secondaryButton
                         objectName: "secondaryButton"
-                        visible: win.secondaryLabel !== ""
+                        visible: win.secondaryLabel !== "" && !backend.writing
                         text: win.secondaryLabel
                         enabled: !backend.busy || backend.pending === "download" || win.toolFailed
                         onClicked: win.secondary()
                     }
                     Item { Layout.fillWidth: true }
+                    // Where the core asks for the phone's codename. Beside
+                    // the button and always in sight, however long the list
+                    // above it is. What is typed is handed in as typed: the
+                    // core decides what it is worth.
+                    TextField {
+                        id: codenameField
+                        objectName: "codename"
+                        visible: win.action === "confirm" && !win.toolFailed
+                        Layout.preferredWidth: 250
+                        Material.roundedScale: Math.min(4, theme.radius)
+                        placeholderText: qsTr("The phone's codename")
+                        font.family: "monospace"
+                        inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
+                        enabled: !backend.busy
+                        onAccepted: win.primary()
+                        // Gone with the step, like the answers.
+                        onVisibleChanged: text = ""
+                    }
                     Text {
-                        visible: primaryButton.visible && primaryButton.enabled
+                        visible: primaryButton.visible && primaryButton.enabled && !codenameField.visible
                         text: "Space"
                         color: "#77777f"
                         font.family: "monospace"
@@ -438,7 +490,8 @@ ApplicationWindow {
                         visible: win.primaryLabel !== ""
                         primary: true
                         text: win.primaryLabel
-                        enabled: !backend.busy || win.toolFailed
+                        // The codename is typed first: an empty field is no go-ahead.
+                        enabled: (!backend.busy && (win.action !== "confirm" || codenameField.text !== "")) || win.toolFailed
                         onClicked: win.primary()
                     }
                 }
@@ -543,6 +596,50 @@ ApplicationWindow {
                             text: qsTr("Keep going")
                             onClicked: win.confirmQuit = false
                         }
+                    }
+                }
+            }
+        }
+
+        // The window was asked to close while the phone is being written.
+        Rectangle {
+            objectName: "writeHold"
+            visible: win.writeHold
+            anchors.fill: parent
+            color: "#d90e0e10"
+
+            MouseArea { anchors.fill: parent }
+            Rectangle {
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 64, 480)
+                height: holdColumn.implicitHeight + 56
+                radius: theme.radius
+                color: "#17171a"
+                border.color: "#ff7b72"
+                border.width: 1
+
+                ColumnLayout {
+                    id: holdColumn
+                    anchors.fill: parent
+                    anchors.margins: 28
+                    spacing: 18
+
+                    Text {
+                        objectName: "writeHoldText"
+                        Layout.fillWidth: true
+                        text: qsTr("The installer is writing to the phone. This window stays open until that has ended.")
+                        color: "#e6e6ea"
+                        font.pixelSize: 18
+                        font.bold: true
+                        wrapMode: Text.Wrap
+                    }
+                    ActionButton {
+                        id: holdOk
+                        objectName: "writeHoldOk"
+                        Layout.alignment: Qt.AlignRight
+                        primary: true
+                        text: qsTr("Keep going")
+                        onClicked: win.writeHold = false
                     }
                 }
             }

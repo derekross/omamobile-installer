@@ -47,10 +47,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     bool reinstall = false;
+    // The one switch that lets this window's run write to a phone. It is
+    // never implied, and nothing in the window sets it.
+    bool write = false;
     QString release;
     for (const QString &argument : arguments.mid(1)) {
         if (argument == "--reinstall") {
             reinstall = true;
+        } else if (argument == "--write") {
+            write = true;
         } else if (!argument.startsWith('-') && release.isEmpty()) {
             release = argument;
         } else {
@@ -79,6 +84,7 @@ int main(int argc, char *argv[]) {
     PortalFilePicker picker;
     Backend backend(&picker);
     backend.setReinstall(reinstall);
+    backend.setWrite(write);
     backend.setReleaseDirectory(release);
 
     QQmlApplicationEngine engine;

@@ -57,7 +57,7 @@ const QString Zip = Release + "/factory/" + ZipName;
 // release, and nothing else. No USB device is opened: a tool built with the
 // pretend phone and started with --fake-phone has no way to one.
 struct RealTool {
-    explicit RealTool(const QString &phones, const QString &google = {}) {
+    explicit RealTool(const QString &phones, const QString &google = {}, const QString &extra = {}) {
         const QString tool = qEnvironmentVariable("OMAINSTALL_REAL_TOOL");
         QFile script(directory.filePath("omamobile-install"));
         if (tool.isEmpty() || !script.open(QIODevice::WriteOnly))
@@ -65,6 +65,9 @@ struct RealTool {
         QString line = QStringLiteral("exec '%1' \"$@\" --fake-phone '%2' --work-dir '%3'").arg(tool, phones, directory.filePath("work"));
         if (!google.isEmpty())
             line += QStringLiteral(" --fake-google '%1'").arg(google);
+        // What only a test adds besides: where the pretend phone's cable is pulled.
+        if (!extra.isEmpty())
+            line += " " + extra;
         // The tool's standard error holds the pretend phones' record.
         script.write(("#!/bin/sh\n" + line + " 2>>'" + directory.filePath("stderr") + "'\n").toUtf8());
         script.close();
@@ -101,6 +104,28 @@ struct RealTool {
         return runs > 0 ? QString() : "the tool's record has no count";
     }
 
+    // Everything the pretend phones received that is not a question, in
+    // order, over every run of the tool; and the partitions the last run's
+    // phone had been written to, as its record counts them.
+    QStringList notReads(int *partitions = nullptr) const {
+        QFile file(directory.filePath("stderr"));
+        QStringList out;
+        if (!file.open(QIODevice::ReadOnly))
+            return out;
+        const QStringList lines = QString::fromUtf8(file.readAll()).split('\n');
+        for (const QString &line : lines) {
+            const qsizetype arrow = line.indexOf(" <- ");
+            if (line.startsWith("pretend phone ") && arrow > 0) {
+                const QString command = line.mid(arrow + 4);
+                if (!command.startsWith("getvar:") && command != "flashing get_unlock_ability")
+                    out << command;
+            } else if (partitions && line.contains("partitions written: ")) {
+                *partitions = line.section("partitions written: ", 1).toInt();
+            }
+        }
+        return out;
+    }
+
     QTemporaryDir directory;
     bool ok = false;
 };
@@ -109,9 +134,10 @@ struct RealTool {
 // 127.0.0.1 in this process. Nothing here reaches Google.
 class Google : public QObject {
 public:
-    // The file; its first 20000 bytes and then nothing more; or a file of
-    // the right size with one byte changed.
-    enum Mode { Whole, Stalls, Wrong };
+    // The file; its first 20000 bytes and then nothing more; a file of the
+    // right size with one byte changed; its first 20000 bytes and then the
+    // connection closed; or no such file.
+    enum Mode { Whole, Stalls, Wrong, Breaks, Missing };
     explicit Google(Mode mode) : m_mode(mode) {
         QFile file(Zip);
         if (file.open(QIODevice::ReadOnly))
@@ -132,6 +158,8 @@ public:
     void goOn() { m_mode = Whole; }
     int asked = 0;
     QStringList paths;
+    // The first byte each request asked for (0: the whole file).
+    QList<qsizetype> froms;
 
 private:
     void answer(QTcpSocket *socket) {
@@ -145,7 +173,13 @@ private:
         static const QRegularExpression rest("\r\nrange: bytes=(\\d+)-\r\n", QRegularExpression::CaseInsensitiveOption);
         const QRegularExpressionMatch range = rest.match(QString::fromLatin1(head));
         const qsizetype from = range.hasMatch() ? range.captured(1).toLongLong() : 0;
+        froms << from;
         const auto n = [](qsizetype number) { return QByteArray::number(number); };
+        if (m_mode == Missing) {
+            socket->write("HTTP/1.1 404 Stand-in\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            socket->disconnectFromHost();
+            return;
+        }
         QByteArray reply = range.hasMatch()
                                ? "HTTP/1.1 206 Stand-in\r\nContent-Range: bytes " + n(from) + "-" + n(m_file.size() - 1) + "/" + n(m_file.size()) + "\r\n"
                                : QByteArray("HTTP/1.1 200 Stand-in\r\n");
@@ -154,6 +188,11 @@ private:
         if (m_mode == Stalls) {
             socket->write(m_file.mid(from, 20000));
             socket->flush();
+            return;
+        }
+        if (m_mode == Breaks) {
+            socket->write(m_file.mid(from, 20000));
+            socket->disconnectFromHost();
             return;
         }
         socket->write(m_file.mid(from));
@@ -177,6 +216,34 @@ void standIn(const QByteArray &mode) {
     qputenv("OMAINSTALL_TOOL", StandIn.toUtf8());
     qputenv("OMAINSTALL_STANDIN", mode);
     qunsetenv("OMAINSTALL_STANDIN_LOG");
+    qunsetenv("OMAINSTALL_STANDIN_DONE");
+}
+
+// The straight path of a run to the step in `until`, as the backend takes
+// it: for a stand-in or the real tool with a file handed in.
+bool goTo(Backend &backend, const char *until, const QString &zip) {
+    for (int step = 0; step < 12; ++step) {
+        if (!QTest::qWaitFor([&] { return !backend.busy() && backend.hasScreen(); }, 20000))
+            return false;
+        if (backend.state() == until)
+            return true;
+        const QString action = backend.action();
+        if (action == "acknowledge")
+            backend.acknowledge();
+        else if (action == "read-phone")
+            backend.readPhone();
+        else if (action == "accept-terms")
+            backend.declineTerms();
+        else if (action == "take-file")
+            backend.takeFile(zip);
+        else if (action == "answers")
+            backend.submitAnswers(GoodAnswers);
+        else if (action == "dry-run")
+            backend.dryRun();
+        else
+            return false;
+    }
+    return false;
 }
 
 QStringList fixtureNames() {
@@ -208,7 +275,8 @@ QString primaryLabel(const QString &action) {
     static const QHash<QString, QString> labels{
         {"acknowledge", "I have read this. Go on"}, {"read-phone", "Look at the phone"},
         {"accept-terms", "I accept. Download the file"}, {"download", "Download"},
-        {"take-file", "Choose the file…"}, {"answers", "Go on"}, {"dry-run", "Run the dry run"}, {"none", "Close"}};
+        {"take-file", "Choose the file…"}, {"answers", "Go on"}, {"dry-run", "Run the dry run"},
+        {"confirm", "Erase the phone and install"}, {"write", "Look for the phone again"}, {"none", "Close"}};
     return labels.value(action);
 }
 
@@ -322,13 +390,22 @@ private slots:
                 stops << screen.value("stop").toString();
         }
         // core/src/flow.rs: Screen::state, and Stop::id
-        for (const char *state : {"warning", "phone", "unlock", "google-terms", "factory-image", "answers", "dry-run", "done", "stopped"})
+        for (const char *state : {"warning", "phone", "unlock", "google-terms", "factory-image", "answers", "dry-run", "done",
+                                  "confirm", "write", "installed", "stopped"})
             QVERIFY2(states.contains(state), state);
-        for (const char *stop : {"release-not-verified", "no-build-index", "build-index-refused", "warning-declined",
-                                 "wrong-model", "phone-changed", "runs-from-slot-b", "bootloader-slots-unknown",
-                                 "bootloader-slots-differ", "baseband-unknown", "build-not-listed", "build-not-tested",
-                                 "factory-download-mismatch", "locked-at-dry-run", "build-changed", "dry-run-refused"})
-            QVERIFY2(stops.contains(stop), stop);
+        // Every id of docs/DESIGN.md §4
+        const QStringList ids{"release-not-verified", "no-build-index", "build-index-refused", "warning-declined",
+                              "wrong-model", "phone-changed", "runs-from-slot-b", "bootloader-slots-unknown",
+                              "bootloader-slots-differ", "bootloader-slots-stated-other", "baseband-unknown",
+                              "build-not-listed", "build-not-tested", "factory-download-mismatch", "locked-at-dry-run",
+                              "build-changed", "dry-run-refused", "override-in-an-install", "writes-not-for-this-device",
+                              "images-not-checked", "not-confirmed", "locked-at-write", "write-refused", "write-interrupted"};
+        for (const QString &stop : ids)
+            QVERIFY2(stops.contains(stop), qPrintable(stop));
+        // And none the list above does not know: a new stop in the core
+        // must be added here, and looked at in the window.
+        for (const QString &stop : std::as_const(stops))
+            QVERIFY2(ids.contains(stop), qPrintable(stop));
     }
 
     void everyScreenReachesQmlAsItWasSent_data() {
@@ -365,7 +442,7 @@ private slots:
         QCOMPARE(sent.count(), 2);
         QVERIFY(oneLine(sent.at(0).at(0).toByteArray()));
         QCOMPARE(json(sent.at(0).at(0).toByteArray()),
-                 (QJsonObject{{"type", "hello"}, {"protocol", 1}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
+                 (QJsonObject{{"type", "hello"}, {"protocol", 2}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
         QCOMPARE(json(sent.at(1).at(0).toByteArray()), (QJsonObject{{"type", "start"}, {"reinstall", false}}));
 
         Backend again;
@@ -408,6 +485,12 @@ private slots:
               {"timezone", "Europe/Paris"}, {"wifi_ssid", "a network"}, {"wifi_psk", "its password"}}},
             {"dry-run", [](Backend &b) { return b.dryRun(); }, {{"type", "dry-run"}}},
             {"dry-run", [](Backend &b) { return b.primaryAction(); }, {{"type", "dry-run"}}},
+            // What was typed, as typed: the core decides what it is worth.
+            {"confirm", [](Backend &b) { return b.confirmInstall("cheetah"); }, {{"type", "confirm"}, {"typed", "cheetah"}}},
+            {"confirm", [](Backend &b) { return b.confirmInstall(" Cheetah "); }, {{"type", "confirm"}, {"typed", " Cheetah "}}},
+            {"confirm", [](Backend &b) { return b.declineInstall(); }, {{"type", "confirm"}, {"typed", ""}}},
+            {"write", [](Backend &b) { return b.write(); }, {{"type", "write"}}},
+            {"write", [](Backend &b) { return b.primaryAction(); }, {{"type", "write"}}},
         };
         for (const Case &c : cases) {
             standIn(QByteArray("screen:") + c.screen);
@@ -440,8 +523,12 @@ private slots:
             {"download", [](Backend &b) { return b.cancelDownload(); }},
             {"answers", [&](Backend &b) { return b.submitAnswers(answers); }},
             {"dry-run", [](Backend &b) { return b.dryRun(); }},
+            {"confirm", [](Backend &b) { return b.confirmInstall("cheetah"); }},
+            {"confirm", [](Backend &b) { return b.declineInstall(); }},
+            {"write", [](Backend &b) { return b.write(); }},
         };
         for (const char *screen : {"warning", "phone", "google-terms", "factory-image-take-file", "answers", "dry-run", "done",
+                                   "confirm", "write", "installed", "stop-not-confirmed", "stop-write-interrupted-userdata",
                                    "stop-bootloader-slots-unknown"}) {
             standIn(QByteArray("screen:") + screen);
             Backend backend;
@@ -453,6 +540,12 @@ private slots:
                 if (backend.action() == action)
                     continue;
                 QVERIFY2(!act(backend), qPrintable(QString("%1 on %2").arg(action, screen)));
+            }
+            // At the confirmation nothing typed is no go-ahead, and the main
+            // action alone sends nothing: the codename is typed first.
+            if (backend.action() == "confirm") {
+                QVERIFY(!backend.confirmInstall(""));
+                QVERIFY(!backend.primaryAction());
             }
             // A stop and the last screen take nothing at all.
             if (backend.action() == "none") {
@@ -492,10 +585,20 @@ private slots:
         progress.clear();
         QVERIFY(backend.download());
         QCOMPARE(backend.pending(), QString("download"));
-        QTRY_VERIFY(backend.hasProgress());
-        QCOMPARE(backend.progressWhat(), QString("download"));
-        QCOMPARE(backend.progressTotal(), 49152.0);
+        // Read where it changes: on a busy machine the progress and the
+        // screen that ends it can arrive in one piece.
+        QString what;
+        double total = 0;
+        const auto watching = connect(&backend, &Backend::progressChanged, this, [&] {
+            if (backend.hasProgress()) {
+                what = backend.progressWhat();
+                total = backend.progressTotal();
+            }
+        });
         QVERIFY(next("answers"));
+        disconnect(watching);
+        QCOMPARE(what, QString("download"));
+        QCOMPARE(total, 49152.0);
         // The screen that ends an action ends its progress.
         QVERIFY(!backend.hasProgress());
         QVERIFY(progress.count() >= 2);
@@ -528,9 +631,10 @@ private slots:
             written += call.at(0).toByteArray();
         QCOMPARE(log.readAll(), written);
         QVERIFY(written.endsWith("{\"type\":\"quit\"}\n"));
-        // No message of the protocol can ask for a write, and the app passes
-        // no argument but the mode.
-        QVERIFY(!written.contains("write") && !written.contains("flash"));
+        // A window that was not started to write sends no confirm and no
+        // write, whatever was clicked on the way.
+        QVERIFY(!backend.writes());
+        QVERIFY(!written.contains("write") && !written.contains("confirm") && !written.contains("flash"));
     }
 
     void aLockedPhoneGetsTheUnlockStepsAndIsLookedAtAgain() {
@@ -699,7 +803,8 @@ private slots:
         QTest::newRow("a screen that lacks a field") << QByteArray("odd-screen") << "malformed" << "sent something this app cannot read" << "the screen has no \"footer\"";
         QTest::newRow("an unknown message") << QByteArray("unknown") << "malformed" << "sent something this app cannot read" << "a kind this app does not know";
         QTest::newRow("an unexpected exit") << QByteArray("exit") << "crashed" << "stopped unexpectedly (exit status 3)" << "stand-in: leaving, as the test asked";
-        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 1" << "";
+        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 2" << "";
+        QTest::newRow("another kind of run") << QByteArray("other-mode") << "mode" << "started a run that can write" << "";
         QTest::newRow("a fatal message") << QByteArray("fatal") << "fatal" << "reported that it failed" << "the release could not be read";
         QTest::newRow("no hello") << QByteArray("silent") << "silent" << "did not say hello" << "";
     }
@@ -724,7 +829,7 @@ private slots:
         QVERIFY(!backend.acknowledge());
         QVERIFY(!backend.primaryAction());
         QCOMPARE(sent.count(), before);
-        if (kind == "mismatch" || kind == "silent")
+        if (kind == "mismatch" || kind == "silent" || kind == "mode")
             QCOMPARE(before, 0);
 
         // "Try again" starts the tool afresh.
@@ -742,7 +847,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":1,\"tool\":\"t\",\"version\":\"0\"}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":2,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "printf '{\"type\":\"screen\",\"screen\":%s}\\n' \"$(tr -d '\\n' < '" + Tests.toUtf8() + "/fixtures/screens/phone.json')\"\n"
                      "read action\n"
@@ -902,11 +1007,18 @@ private slots:
         const QString retry = screen.value("retry").toString();
         const bool again = action == "none" && (retry == "whenever" || retry == "after-fix");
         QCOMPARE(backend.canStartAgain(), again);
-        QCOMPARE(w.shown("secondaryButton"), action == "acknowledge" || action == "accept-terms" || action == "download" || again);
+        QCOMPARE(w.shown("secondaryButton"),
+                 action == "acknowledge" || action == "accept-terms" || action == "download" || action == "confirm" || again);
         QCOMPARE(w.shown("answersLoader"), action == "answers");
+        // The codename is asked for where the core asks for it, and there
+        // the main action waits for it.
+        QCOMPARE(w.shown("codename"), action == "confirm");
+        QCOMPARE(w.find("primaryButton")->isEnabled(), action != "confirm");
+        QVERIFY(!w.shown("sent"));
         QVERIFY(!w.shown("toolError"));
         QVERIFY(!w.shown("unknownAction"));
         QVERIFY(w.text("banner").contains("cannot write to a phone"));
+        QCOMPARE(w.text("mode"), QString("Dry run"));
         // A stop and the last screen: the core's text and Close. A stop
         // that starting again can't pass, and the last screen, have no other.
         if (action == "none") {
@@ -952,6 +1064,34 @@ private slots:
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
     }
 
+    void theConfirmationFitsTheSmallestSize() {
+        // The two buttons and the field between them, at the smallest size.
+        standIn("screen:confirm");
+        Backend backend;
+        Window w(&backend);
+        QVERIFY(w.window);
+        w.window->resize(w.window->minimumSize());
+        backend.start();
+        QTRY_VERIFY(backend.hasScreen());
+        w.settle();
+        // Drawn once, so that the row is laid out with the field in it.
+        QVERIFY(!w.window->grabWindow().isNull());
+        const QString shots = qEnvironmentVariable("OMAINSTALL_SHOTS");
+        if (!shots.isEmpty())
+            QVERIFY(w.window->grabWindow().save(shots + "/smallest-confirm.png"));
+        const QQuickItem *primary = w.find("primaryButton"), *secondary = w.find("secondaryButton"), *field = w.find("codename");
+        QVERIFY(primary && secondary && field && field->isVisible());
+        const QRectF left = secondary->mapRectToScene(secondary->boundingRect());
+        // A text field's own bounding rectangle is its text's: its size is asked for.
+        const QRectF middle = field->mapRectToScene(QRectF(0, 0, field->width(), field->height()));
+        const QRectF right = primary->mapRectToScene(primary->boundingRect());
+        QVERIFY(left.left() >= 0 && right.right() <= 720 && right.bottom() <= 560 && middle.bottom() <= 560);
+        QVERIFY2(left.right() < middle.left() && middle.right() < right.left(), "the buttons and the field overlap");
+        // Wide enough for a codename and for its own label.
+        QVERIFY(middle.width() >= 200);
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
     void eachButtonSendsExactlyItsMessage() {
         struct Case {
             const char *screen;
@@ -967,6 +1107,9 @@ private slots:
             {"google-terms", "secondaryButton", {{"type", "decline-terms"}}},
             {"factory-image-download", "primaryButton", {{"type", "download"}, {"do", "start"}}},
             {"dry-run", "primaryButton", {{"type", "dry-run"}}},
+            // Not going ahead hands in nothing typed; the core stops for it.
+            {"confirm", "secondaryButton", {{"type", "confirm"}, {"typed", ""}}},
+            {"write", "primaryButton", {{"type", "write"}}},
         };
         for (const Case &c : cases) {
             standIn(QByteArray("screen:") + c.screen);
@@ -1260,12 +1403,12 @@ private slots:
         // action, and the app says why.
         QTemporaryDir directory;
         QJsonObject screen = fixture("dry-run");
-        screen.insert("action", "write");
+        screen.insert("action", "restore-android");
         const QString tool = directory.filePath("tool");
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":1,\"tool\":\"t\",\"version\":\"0\"}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":2,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "cat <<'END'\n"
                      + QJsonDocument(QJsonObject{{"type", "screen"}, {"screen", screen}}).toJson(QJsonDocument::Compact) + "\nEND\n"
@@ -1280,12 +1423,282 @@ private slots:
         w.settle();
         QSignalSpy sent(&backend, &Backend::sent);
         QVERIFY(w.shown("unknownAction"));
-        QVERIFY(w.text("unknownAction").contains("(write)"));
+        QVERIFY(w.text("unknownAction").contains("(restore-android)"));
         QVERIFY(!w.shown("primaryButton"));
         QCOMPARE(w.text("secondaryButton"), QString("Close"));
         QVERIFY(!backend.primaryAction());
         QVERIFY(!backend.dryRun());
         QCOMPARE(sent.count(), 0);
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    // ---- A run that writes, as the stand-in replays it ----------------------
+
+    void aRunWritesOnlyWhenTheWindowWasStartedForIt() {
+        // The app's one switch is passed on as the tool's own argument, and
+        // the tool's hello says which run it started.
+        standIn("screen:warning");
+        Backend dry;
+        dry.start();
+        QTRY_VERIFY(dry.hasScreen());
+        QVERIFY(!dry.writes());
+
+        Backend installs;
+        installs.setWrite(true);
+        installs.start();
+        QTRY_VERIFY(installs.hasScreen());
+        QVERIFY(installs.writes());
+        QCOMPARE(installs.toolError(), QString());
+
+        // A tool that started the other kind of run is stopped, and nothing
+        // is sent to it: neither a dry run that could write, nor an install
+        // that could not.
+        for (const bool write : {false, true}) {
+            standIn("other-mode");
+            Backend backend;
+            backend.setWrite(write);
+            QSignalSpy sent(&backend, &Backend::sent);
+            backend.start();
+            QTRY_COMPARE(backend.toolErrorKind(), QString("mode"));
+            QVERIFY2(backend.toolError().contains(write ? "cannot write" : "can write"), qPrintable(backend.toolError()));
+            QCOMPARE(sent.count(), 0);
+            QVERIFY(!backend.hasScreen());
+        }
+
+        // `check` only reads the hello: it never starts a tool for a write.
+        standIn("flow");
+        Backend probe;
+        probe.setWrite(true);
+        QSignalSpy ready(&probe, &Backend::ready);
+        probe.probe();
+        QTRY_COMPARE(ready.count(), 1);
+        QCOMPARE(probe.toolError(), QString());
+    }
+
+    void theWholeFlowThroughTheWrite() {
+        QTemporaryDir directory;
+        standIn("flow");
+        qputenv("OMAINSTALL_STANDIN_LOG", directory.filePath("log").toUtf8());
+        Backend backend;
+        backend.setWrite(true);
+        QSignalSpy sent(&backend, &Backend::sent);
+        QStringList whats;
+        connect(&backend, &Backend::progressChanged, this, [&] {
+            if (backend.hasProgress() && !whats.contains(backend.progressWhat()))
+                whats << backend.progressWhat();
+        });
+        backend.start();
+        // The dry run of a run that writes ends at the list of what will be
+        // written, not at "done".
+        QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+        QCOMPARE(backend.action(), QString("confirm"));
+        QVERIFY(backend.sentLines().isEmpty());
+        // Nothing typed is no go-ahead, and nothing is sent for it.
+        const int before = sent.count();
+        QVERIFY(!backend.confirmInstall(""));
+        QVERIFY(!backend.write());
+        QCOMPARE(sent.count(), before);
+
+        QVERIFY(backend.confirmInstall("cheetah"));
+        // The codename was taken: the writes follow by themselves, and the
+        // app is busy from the codename to the last screen.
+        QVERIFY(at(backend, "installed"));
+        QCOMPARE(json(sent.at(before).at(0).toByteArray()), (QJsonObject{{"type", "confirm"}, {"typed", "cheetah"}}));
+        QCOMPARE(json(sent.at(before + 1).at(0).toByteArray()), (QJsonObject{{"type", "write"}}));
+        QCOMPARE(sent.count(), before + 2);
+        QCOMPARE(backend.action(), QString("none"));
+        QVERIFY(!backend.writing());
+        QVERIFY(whats.contains("verify") && whats.contains("write"));
+        // What the tool said it sent, in its order and its words.
+        const QStringList lines = backend.sentLines();
+        QCOMPARE(lines.first(), QString("download:00004000"));
+        QCOMPARE(lines.at(1), QString("flash:boot_b"));
+        QCOMPARE(lines.filter("flash:userdata (piece ").size(), 3);
+        QCOMPARE(lines.filter("userdata, ").size(), 2);
+        QCOMPARE(lines.mid(lines.size() - 2), (QStringList{"set_active:b", "reboot"}));
+        // The last screen is the end, not a stop: nothing to start again.
+        QVERIFY(!backend.canStartAgain());
+
+        backend.shutdown();
+        QFile log(directory.filePath("log"));
+        QVERIFY(log.open(QIODevice::ReadOnly));
+        QByteArray written;
+        for (const auto &call : sent)
+            written += call.at(0).toByteArray();
+        QCOMPARE(log.readAll(), written);
+    }
+
+    void anythingButTheCodenameIsTheCoresStop() {
+        for (const QString &typed : {QString("yes"), QString()}) {
+            standIn("flow");
+            Backend backend;
+            backend.setWrite(true);
+            backend.start();
+            QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+            QSignalSpy sent(&backend, &Backend::sent);
+            // Typed and handed in as typed, or not going ahead at all.
+            QVERIFY(typed.isEmpty() ? backend.declineInstall() : backend.confirmInstall(typed));
+            QVERIFY(at(backend, "stopped"));
+            QCOMPARE(backend.screen().value("stop").toString(), QString("not-confirmed"));
+            // No write followed, and none can be asked for now.
+            QCOMPARE(sent.count(), 1);
+            QCOMPARE(json(sent.at(0).at(0).toByteArray()), (QJsonObject{{"type", "confirm"}, {"typed", typed}}));
+            QVERIFY(!backend.write());
+            QVERIFY(backend.sentLines().isEmpty());
+            QVERIFY(backend.canStartAgain());
+        }
+    }
+
+    void theConfirmationAndTheWriteInTheWindow() {
+        standIn("flow");
+        Backend backend;
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        w.settle();
+        // What the window is, before anything else, and one stage more.
+        QCOMPARE(w.text("mode"), QString("Install"));
+        QVERIFY(w.text("banner").contains("can write to a phone"));
+        QVERIFY(!w.text("banner").contains("cannot"));
+        QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+        w.settle();
+        const QJsonObject confirm = fixture("confirm");
+        QCOMPARE(w.text("title"), confirm.value("title").toString());
+        QCOMPARE(w.texts("planLine").size(), confirm.value("plan").toArray().size());
+        QCOMPARE(w.texts("footerLine").size(), confirm.value("footer").toArray().size());
+        // The main action waits for the codename; the other one is always there.
+        QQuickItem *field = w.find("codename");
+        QVERIFY(field && field->isVisible());
+        QCOMPARE(w.text("primaryButton"), QString("Erase the phone and install"));
+        QCOMPARE(w.text("secondaryButton"), QString("Do not install"));
+        QVERIFY(!w.find("primaryButton")->isEnabled());
+        QVERIFY(!w.click("primaryButton"));
+        QVERIFY(!w.shown("sent"));
+        QSignalSpy sent(&backend, &Backend::sent);
+        field->setProperty("text", "cheetah");
+        w.settle();
+        QVERIFY(w.find("primaryButton")->isEnabled());
+        QCOMPARE(sent.count(), 0);
+        QVERIFY(w.click("primaryButton"));
+        QCOMPARE(json(sent.at(0).at(0).toByteArray()), (QJsonObject{{"type", "confirm"}, {"typed", "cheetah"}}));
+        QVERIFY(at(backend, "installed"));
+        w.settle();
+        QCOMPARE(w.text("title"), fixture("installed").value("title").toString());
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        QVERIFY(!w.shown("secondaryButton"));
+        QVERIFY(!w.shown("codename"));
+        // The field is emptied with its step.
+        QCOMPARE(field->property("text").toString(), QString());
+        // What was sent stays on show, as the tool reported it.
+        QVERIFY(w.shown("sent"));
+        // After the writes: the whole record, line for line.
+        QCOMPARE(w.texts("sentLine"), backend.sentLines());
+        QVERIFY(!w.shown("sentCount"));
+        QVERIFY(backend.sentLines().contains("reboot"));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void theWindowStaysWhileThePhoneIsWritten() {
+        QTemporaryDir directory;
+        standIn("flow-long-write");
+        qputenv("OMAINSTALL_STANDIN_DONE", directory.filePath("done").toUtf8());
+        auto *backend = new Backend;
+        backend->setWrite(true);
+        {
+            Window w(backend);
+            QVERIFY(w.window);
+            backend->start();
+            QVERIFY(goTo(*backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+            QVERIFY(backend->confirmInstall("cheetah"));
+            QTRY_VERIFY(backend->writing());
+            QTRY_VERIFY(backend->sentLines().size() >= 2);
+            w.settle();
+            QVERIFY(w.shown("progress"));
+            QVERIFY(w.shown("sent"));
+            // While it writes: the newest lines, and how many there are.
+            const QStringList sentSoFar = backend->sentLines();
+            QCOMPARE(w.texts("sentLine"), sentSoFar.mid(qMax(0, sentSoFar.size() - 8)));
+            QCOMPARE(w.shown("sentCount"), sentSoFar.size() > 8);
+            // Nothing to press while it writes: no cancel, no second action.
+            QVERIFY(!w.shown("secondaryButton"));
+            QVERIFY(!w.shown("primaryButton") || !w.find("primaryButton")->isEnabled());
+            // Closing does not ask: the window stays, and says why.
+            w.window->close();
+            w.settle();
+            QVERIFY(w.window->isVisible());
+            QVERIFY(w.shown("writeHold"));
+            QVERIFY(!w.shown("quitDialog"));
+            QVERIFY(w.text("writeHoldText").contains("writing to the phone"));
+            QVERIFY(backend->writing());
+            QVERIFY(w.click("writeHoldOk"));
+            w.settle();
+            QVERIFY(!w.shown("writeHold"));
+            QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        }
+        // And if the app itself is ended meanwhile, the tool is not: the
+        // app waits for the write to run to its end before it lets go.
+        QVERIFY(backend->writing());
+        QVERIFY(!QFile::exists(directory.filePath("done")));
+        delete backend;
+        QVERIFY2(QFile::exists(directory.filePath("done")), "the tool was ended while it was writing");
+    }
+
+    void aWriteThatFindsNoPhoneIsTriedAgainByHand() {
+        standIn("flow-no-phone");
+        Backend backend;
+        backend.setWrite(true);
+        Window w(&backend);
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+        QSignalSpy sent(&backend, &Backend::sent);
+        QVERIFY(backend.confirmInstall("cheetah"));
+        // The writes were asked for once, by the app, and found no phone:
+        // the step stays, with the tool's words, and is not asked again
+        // without the person.
+        QVERIFY(QTest::qWaitFor([&] { return !backend.busy() && backend.actionError() != ""; }, 20000));
+        QCOMPARE(backend.state(), QString("write"));
+        QCOMPARE(sent.count(), 2);
+        w.settle();
+        QCOMPARE(w.text("actionError"), QString("No phone in Fastboot Mode answered."));
+        QCOMPARE(w.text("primaryButton"), QString("Look for the phone again"));
+        QVERIFY(!w.shown("secondaryButton"));
+        QTest::qWait(150);
+        QCOMPARE(sent.count(), 2);
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "installed"));
+        QCOMPARE(sent.count(), 3);
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void aWriteThatStopsPartwayIsTheCoresStopWithWhatWasSent() {
+        standIn("flow-unplugged");
+        Backend backend;
+        backend.setWrite(true);
+        Window w(&backend);
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QVERIFY(at(backend, "stopped"));
+        w.settle();
+        const QJsonObject stop = fixture("stop-write-interrupted-userdata");
+        QCOMPARE(backend.screen().value("stop").toString(), QString("write-interrupted"));
+        QCOMPARE(w.text("title"), stop.value("title").toString());
+        QStringList footer;
+        for (const auto &line : stop.value("footer").toArray())
+            footer << line.toString();
+        QCOMPARE(w.texts("footerLine"), footer);
+        // The record of what was sent stays under the core's account.
+        QVERIFY(w.shown("sent"));
+        QVERIFY(backend.sentLines().last().startsWith("userdata, sent and not confirmed: piece 2"));
+        QVERIFY(!backend.sentLines().contains("set_active:b"));
+        // The core says a new run can start; it begins with an empty record.
+        QCOMPARE(w.text("secondaryButton"), QString("Start again"));
+        standIn("screen:warning");
+        QVERIFY(w.click("secondaryButton"));
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.sentLines().isEmpty());
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
     }
 
@@ -1639,6 +2052,527 @@ private slots:
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
         backend.shutdown();
         QCOMPARE(tool.nothingButReads(), QString());
+    }
+
+    // ---- The real tool, in a run that writes ---------------------------------
+    //
+    // `omamobile-install json --write`, against the pretend phone only: the
+    // tool is built with it and started with --fake-phone, so there is no
+    // way from here to USB. Each test reads the pretend phone's own record.
+
+    void theRealToolACompleteInstall() {
+        Google google(Google::Whole);
+        RealTool tool("ready", google.address());
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        QStringList whats;
+        connect(&backend, &Backend::progressChanged, this, [&] {
+            if (backend.hasProgress() && !whats.contains(backend.progressWhat()))
+                whats << backend.progressWhat();
+        });
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.writes());
+        w.settle();
+        QCOMPARE(w.text("mode"), QString("Install"));
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "google-terms"));
+        // Google's terms are the owner's to accept: nothing was fetched
+        // before this click, which here is the test's.
+        QCOMPARE(google.asked, 0);
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "factory-image"));
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "answers"));
+        QCOMPARE(google.asked, 1);
+        QVERIFY(backend.submitAnswers(GoodAnswers));
+        QVERIFY(at(backend, "dry-run"));
+        QVERIFY(w.click("primaryButton"));
+        // The dry run of a run that writes: the list, and the question.
+        QVERIFY(at(backend, "confirm"));
+        QCOMPARE(backend.screen().value("title").toString(), QString("This is what the installer will write"));
+        const QStringList plan = backend.screen().value("plan").toStringList();
+        QCOMPARE(plan.size(), 8);
+        QVERIFY(plan.at(5).contains("ERASES userdata"));
+        QVERIFY(backend.screen().value("footer").toStringList().filter("userdata will be ERASED").size() == 1);
+        // Up to here the phone was only asked questions.
+        QVERIFY(tool.notReads().isEmpty());
+        w.settle();
+        QCOMPARE(w.texts("planLine"), plan);
+        QVERIFY(!w.find("primaryButton")->isEnabled());
+        w.find("codename")->setProperty("text", "cheetah");
+        w.settle();
+        QVERIFY(w.click("primaryButton"));
+        QVERIFY(at(backend, "installed"));
+        QCOMPARE(backend.screen().value("title").toString(), QString("Omarchy Mobile is written, and the phone is restarting"));
+        QVERIFY(whats.contains("verify") && whats.contains("write"));
+        QVERIFY(whats.indexOf("verify") < whats.indexOf("write"));
+        w.settle();
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        QVERIFY(!w.shown("secondaryButton"));
+        QVERIFY(w.shown("sent"));
+        QCOMPARE(backend.toolError(), QString());
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        const QStringList said = backend.sentLines();
+
+        backend.shutdown();
+        // What the pretend phone received: slot B's five boot images, the
+        // pieces of userdata, the slot and the restart, and nothing else.
+        int partitions = 0;
+        const QStringList received = tool.notReads(&partitions);
+        QCOMPARE(partitions, 6);
+        QStringList flashed;
+        for (const QString &command : received)
+            if (!command.startsWith("download:"))
+                flashed << command;
+        const qsizetype pieces = flashed.count("flash:userdata");
+        QVERIFY(pieces >= 1);
+        QStringList expected{"flash:boot_b", "flash:init_boot_b", "flash:vendor_boot_b", "flash:vendor_kernel_boot_b", "flash:dtbo_b"};
+        for (qsizetype i = 0; i < pieces; ++i)
+            expected << "flash:userdata";
+        expected << "set_active:b" << "reboot";
+        QCOMPARE(flashed, expected);
+        // And the window's record of it is the tool's: one line for each
+        // command of the boot images, one for each piece, the slot, the restart.
+        QCOMPARE(said.filter("flash:userdata (piece ").size(), pieces);
+        QCOMPARE(said.mid(0, 10), received.mid(0, 10));
+        QCOMPARE(said.mid(said.size() - 2), (QStringList{"set_active:b", "reboot"}));
+    }
+
+    void theRealToolAnInstallTheOwnerDoesNotGoAheadWith() {
+        // Cancelled at the last question, by the button and by a wrong word.
+        for (const QString &typed : {QString(), QString("Cheetah")}) {
+            RealTool tool("ready");
+            REAL_TOOL(tool);
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.setWrite(true);
+            Window w(&backend);
+            QVERIFY(w.window);
+            backend.start();
+            QVERIFY(goTo(backend, "confirm", Zip));
+            w.settle();
+            if (typed.isEmpty()) {
+                QCOMPARE(w.text("secondaryButton"), QString("Do not install"));
+                QVERIFY(w.click("secondaryButton"));
+            } else {
+                w.find("codename")->setProperty("text", typed);
+                w.settle();
+                QVERIFY(w.click("primaryButton"));
+            }
+            QVERIFY(at(backend, "stopped"));
+            QCOMPARE(backend.screen().value("stop").toString(), QString("not-confirmed"));
+            QCOMPARE(backend.screen().value("retry").toString(), QString("whenever"));
+            w.settle();
+            QCOMPARE(w.text("secondaryButton"), QString("Start again"));
+            QVERIFY(!w.shown("sent"));
+            QVERIFY(!w.shown("codename"));
+            QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+            backend.shutdown();
+            // Nothing was written: the phone was only asked questions.
+            QCOMPARE(tool.nothingButReads(), QString());
+        }
+    }
+
+    void theRealToolAPhoneUnpluggedMidWrite() {
+        // The pretend phone's cable is pulled as the second piece of
+        // userdata is sent.
+        RealTool tool("ready", {}, "--fake-unplug flash:userdata:2");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", Zip));
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QVERIFY(at(backend, "stopped"));
+        const QVariantMap screen = backend.screen();
+        QCOMPARE(screen.value("stop").toString(), QString("write-interrupted"));
+        QCOMPARE(screen.value("title").toString(), QString("The install stopped partway"));
+        // The core's account of how far the writes got, drawn as sent.
+        const QStringList footer = screen.value("footer").toStringList();
+        QVERIFY2(footer.first().contains("while it was writing userdata"), qPrintable(footer.first()));
+        w.settle();
+        QCOMPARE(w.texts("footerLine"), footer);
+        QCOMPARE(w.texts("body"), screen.value("body").toStringList());
+        // And the tool's record: the piece that was sent and not confirmed.
+        QVERIFY(w.shown("sent"));
+        QVERIFY2(backend.sentLines().last().startsWith("userdata, sent and not confirmed: piece 2"), qPrintable(backend.sentLines().last()));
+        QVERIFY(!backend.sentLines().contains("set_active:b") && !backend.sentLines().contains("reboot"));
+        QCOMPARE(backend.toolError(), QString());
+        // A new run can start at any time, the core says.
+        QCOMPARE(screen.value("retry").toString(), QString("whenever"));
+        QCOMPARE(w.text("secondaryButton"), QString("Start again"));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        const QStringList received = tool.notReads();
+        QCOMPARE(received.count("flash:userdata"), 1);
+        QVERIFY(received.contains("flash:dtbo_b"));
+        QVERIFY(!received.contains("set_active:b") && !received.contains("reboot"));
+    }
+
+    void theRealToolADownloadThatFailsAndOneThatGoesOn() {
+        // The connection breaks after 20000 bytes: the step stays open, and
+        // the next try asks for the rest only.
+        {
+            Google google(Google::Breaks);
+            RealTool tool("ready", google.address());
+            REAL_TOOL(tool);
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(at(backend, "warning"));
+            QVERIFY(backend.acknowledge());
+            QVERIFY(at(backend, "phone"));
+            QVERIFY(backend.readPhone());
+            QVERIFY(at(backend, "google-terms"));
+            QVERIFY(backend.acceptTerms());
+            QVERIFY(at(backend, "factory-image"));
+            QVERIFY(backend.download());
+            QVERIFY(at(backend, "factory-image"));
+            QVERIFY2(backend.screen().value("problem").toString().contains("20000 of 49152 bytes had arrived"),
+                     qPrintable(backend.screen().value("problem").toString()));
+            QCOMPARE(backend.action(), QString("download"));
+            w.settle();
+            QVERIFY(w.shown("problem"));
+            QCOMPARE(w.text("primaryButton"), QString("Download"));
+            google.goOn();
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "answers"));
+            QCOMPARE(google.froms, (QList<qsizetype>{0, 20000}));
+            QFile got(tool.directory.filePath("work/factory/" + ZipName)), wanted(Zip);
+            QVERIFY(got.open(QIODevice::ReadOnly) && wanted.open(QIODevice::ReadOnly));
+            QCOMPARE(got.readAll(), wanted.readAll());
+            QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+            backend.shutdown();
+            QVERIFY(tool.notReads().isEmpty());
+        }
+        // The server has no such file: the download can't be made, the core
+        // says why, and the step asks for the owner's own file instead.
+        Google google(Google::Missing);
+        RealTool tool("ready", google.address());
+        REAL_TOOL(tool);
+        FakePicker picker;
+        Backend backend(&picker);
+        backend.setReleaseDirectory(Release);
+        backend.setWrite(true);
+        Window w(&backend);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        QVERIFY(at(backend, "google-terms"));
+        QVERIFY(backend.acceptTerms());
+        QVERIFY(at(backend, "factory-image"));
+        QVERIFY(backend.download());
+        QVERIFY(at(backend, "factory-image"));
+        QCOMPARE(backend.action(), QString("take-file"));
+        w.settle();
+        QCOMPARE(w.text("primaryButton"), QString("Choose the file…"));
+        QCOMPARE(w.texts("body"), backend.screen().value("body").toStringList());
+        // The installer downloads no more in this run: a download is refused.
+        QVERIFY(!backend.download());
+        QVERIFY(w.click("primaryButton"));
+        QCOMPARE(picker.opened, 1);
+        emit picker.picked(Zip);
+        QVERIFY(at(backend, "answers"));
+        QCOMPARE(google.asked, 1);
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        QVERIFY(tool.notReads().isEmpty());
+    }
+
+    void theRealToolStopsForAPhoneThatTellsOneBootloaderSlotAlsoWhenItWrites() {
+        // The Pixel 7 Pro's case. What passes this stop is the owner's
+        // statement on the tool's command line (docs/DESIGN.md §6): the app
+        // has no control for it, hands out no way round, and shows the stop.
+        RealTool tool("one-slot");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(Release);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        QSignalSpy sent(&backend, &Backend::sent);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        QVERIFY(at(backend, "stopped"));
+        const QVariantMap screen = backend.screen();
+        QCOMPARE(screen.value("stop").toString(), QString("bootloader-slots-unknown"));
+        QCOMPARE(screen.value("retry").toString(), QString("stops-again"));
+        w.settle();
+        QCOMPARE(w.text("title"), screen.value("title").toString());
+        QCOMPARE(w.texts("body"), screen.value("body").toStringList());
+        QCOMPARE(w.texts("footerLine"), screen.value("footer").toStringList());
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        QVERIFY(!w.shown("secondaryButton"));
+        QVERIFY(!w.shown("codename"));
+        // Nothing the app sent, in the whole run, names a slot or a version.
+        for (const auto &call : sent) {
+            const QByteArray line = call.at(0).toByteArray();
+            QVERIFY2(!line.contains("slot") && !line.contains("bootloader") && !line.contains("fake-1.0"), line.constData());
+        }
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
+    }
+
+    // ---- The screens of a pretend install, as pictures ------------------------
+    //
+    // The window walked through a whole install against the real tool and
+    // its pretend phone, with one picture for each screen it shows on the
+    // way, and for the stops a person is most likely to meet. bin/screens
+    // saves them under docs/screens (OMAINSTALL_SCREENS); a plain test run
+    // makes them in a scratch directory, so that the walk itself is tested.
+    // The accent is the fallback one, and everything typed is made up.
+
+    void theScreensOfAPretendInstall() {
+        if (!RealTool::built())
+            QSKIP("SKIPPED: no real tool (bin/test found no cargo to build omamobile-install with).");
+        QTemporaryDir scratch;
+        // The form starts with this computer's time zone: the pictures get a
+        // made-up one, as everything else in them is.
+        const QByteArray zone = qgetenv("TZ");
+        qputenv("TZ", "Europe/Paris");
+        const auto restore = qScopeGuard([&] { zone.isNull() ? qunsetenv("TZ") : qputenv("TZ", zone); });
+        const QString wanted = qEnvironmentVariable("OMAINSTALL_SCREENS");
+        const QString out = wanted.isEmpty() ? scratch.path() : wanted;
+        QVERIFY(QDir().mkpath(out));
+        QStringList saved;
+        // One picture of the window as it is; a screen longer than the
+        // window gets one more for each further page of it.
+        // `midway`: taken as it is this instant, while a step runs. Nothing
+        // more is read from the tool first, or the step would be over.
+        auto shoot = [&](const Window &w, const QString &name, bool midway = false) {
+            if (midway) {
+                if (!w.window->grabWindow().save(out + "/" + name + ".png"))
+                    return false;
+                saved << name;
+                return true;
+            }
+            // Whatever still moves (a label that floats up, a bar) comes to rest.
+            QTest::qWait(400);
+            QQuickItem *view = w.find("screenView");
+            if (view && view->isVisible())
+                view->setProperty("contentY", 0);
+            w.settle();
+            if (!w.window->grabWindow().save(out + "/" + name + ".png"))
+                return false;
+            saved << name;
+            if (!view || !view->isVisible())
+                return true;
+            const qreal page = view->height(), whole = view->property("contentHeight").toReal();
+            for (int n = 2; (n - 2) * page * 0.85 < whole - page - 1 && n < 6; ++n) {
+                view->setProperty("contentY", qMin(whole - page, (n - 1) * page * 0.85));
+                w.settle();
+                if (!w.window->grabWindow().save(out + "/" + name + "-" + QString::number(n) + ".png"))
+                    return false;
+                saved << name + "-" + QString::number(n);
+            }
+            view->setProperty("contentY", 0);
+            return true;
+        };
+
+        // The install: a download that breaks off and goes on, answers the
+        // core objects to and then takes, the dry run, the codename, the
+        // writes, the end.
+        {
+            Google google(Google::Breaks);
+            RealTool tool("ready", google.address());
+            QVERIFY(tool.ok);
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.setWrite(true);
+            Window w(&backend);
+            QVERIFY(w.window);
+            backend.start();
+            QVERIFY(at(backend, "warning"));
+            QVERIFY(shoot(w, "01-warning"));
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "phone"));
+            QVERIFY(shoot(w, "02-phone"));
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "google-terms"));
+            QVERIFY(shoot(w, "03-google-terms"));
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "factory-image"));
+            QVERIFY(shoot(w, "04-factory-image"));
+            // While it downloads: the picture is taken as the bytes arrive.
+            bool downloading = false;
+            const auto during = connect(&backend, &Backend::progressChanged, this, [&] {
+                if (!downloading && backend.hasProgress() && backend.progressDone() > 0) {
+                    downloading = true;
+                    shoot(w, "05-factory-image-downloading", true);
+                }
+            });
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "factory-image"));
+            disconnect(during);
+            QVERIFY(downloading);
+            QVERIFY(shoot(w, "06-factory-image-download-broke-off"));
+            google.goOn();
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "answers"));
+            QVERIFY(shoot(w, "07-answers"));
+            const QList<std::pair<const char *, const char *>> typed{
+                {"answer_username", "Alex"}, {"answer_password", "481516"}, {"answer_password_again", "481517"},
+                {"answer_hostname", "alex-phone"}, {"answer_wifi_ssid", "a made-up network"}, {"answer_wifi_psk", "not a real password"}};
+            for (const auto &[field, text] : typed)
+                w.find(field)->setProperty("text", text);
+            w.find("answer_timezone")->setProperty("text", "Europe/Paris");
+            QVERIFY(w.click("primaryButton"));
+            QTRY_VERIFY(!backend.busy());
+            QCOMPARE(backend.state(), QString("answers"));
+            QVERIFY(backend.problems().size() >= 2);
+            QVERIFY(shoot(w, "08-answers-the-cores-objections"));
+            w.find("answer_username")->setProperty("text", "alex");
+            w.find("answer_password_again")->setProperty("text", "481516");
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "dry-run"));
+            QVERIFY(shoot(w, "09-dry-run"));
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "confirm"));
+            QVERIFY(shoot(w, "10-confirm"));
+            w.find("codename")->setProperty("text", "cheetah");
+            QVERIFY(shoot(w, "11-confirm-codename-typed"));
+            // While it writes: as the last boot image has been sent.
+            bool writing = false;
+            const auto meanwhile = connect(&backend, &Backend::sentLinesChanged, this, [&] {
+                if (!writing && backend.sentLines().size() == 10) {
+                    writing = true;
+                    shoot(w, "12-write", true);
+                }
+            });
+            QVERIFY(w.click("primaryButton"));
+            QVERIFY(at(backend, "installed"));
+            disconnect(meanwhile);
+            QVERIFY(writing);
+            QVERIFY(shoot(w, "13-installed"));
+            QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+            backend.shutdown();
+            int partitions = 0;
+            tool.notReads(&partitions);
+            QCOMPARE(partitions, 6);
+        }
+        // The stops, each from its own run.
+        struct Stop {
+            const char *name;
+            const char *phones;
+            const char *extra;
+            const char *typed;
+            const char *stop;
+        };
+        const QList<Stop> stops{
+            {"20-stop-one-bootloader-slot", "one-slot", "", "", "bootloader-slots-unknown"},
+            {"21-stop-not-confirmed", "ready", "", "", "not-confirmed"},
+            {"22-stop-write-interrupted", "ready", "--fake-unplug flash:userdata:2", "cheetah", "write-interrupted"},
+            {"23-stop-runs-from-slot-b", "slot-b", "", "", "runs-from-slot-b"},
+            {"24-stop-build-not-tested", "untested-build", "", "", "build-not-tested"},
+        };
+        for (const Stop &stop : stops) {
+            RealTool tool(stop.phones, {}, stop.extra);
+            QVERIFY(tool.ok);
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            if (goTo(backend, "confirm", Zip))
+                QVERIFY(*stop.typed ? backend.confirmInstall(stop.typed) : backend.declineInstall());
+            QVERIFY2(at(backend, "stopped"), stop.name);
+            QCOMPARE(backend.screen().value("stop").toString(), QString(stop.stop));
+            QVERIFY(shoot(w, stop.name));
+            QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+        }
+        // A locked phone, in a run that installs; a download that can't be
+        // made; two phones; and the shortcuts.
+        {
+            RealTool tool("locked");
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(goTo(backend, "unlock", Zip));
+            QVERIFY(shoot(w, "30-unlock"));
+        }
+        {
+            Google google(Google::Missing);
+            RealTool tool("ready", google.address());
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(at(backend, "warning"));
+            QVERIFY(backend.acknowledge());
+            QVERIFY(at(backend, "phone"));
+            QVERIFY(backend.readPhone());
+            QVERIFY(at(backend, "google-terms"));
+            QVERIFY(backend.acceptTerms());
+            QVERIFY(at(backend, "factory-image"));
+            QVERIFY(backend.download());
+            QVERIFY(at(backend, "factory-image"));
+            QVERIFY(shoot(w, "31-factory-image-download-not-possible"));
+        }
+        {
+            RealTool tool("ready,slot-b");
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(goTo(backend, "phone", Zip));
+            QVERIFY(backend.readPhone());
+            QTRY_VERIFY(!backend.busy() && backend.phones().size() == 2);
+            QVERIFY(shoot(w, "32-which-phone"));
+            backend.dismissPhones();
+            w.window->setProperty("helpVisible", true);
+            QVERIFY(shoot(w, "33-shortcuts"));
+            w.window->setProperty("helpVisible", false);
+        }
+        // A run that was not started to write, to its last screen.
+        {
+            RealTool tool("ready");
+            Backend backend;
+            backend.setReleaseDirectory(Release);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(goTo(backend, "done", Zip));
+            QVERIFY(shoot(w, "34-dry-run-only-done"));
+        }
+        // Closing while the phone is written: the stand-in holds a write
+        // open long enough to ask.
+        {
+            standIn("flow-long-write");
+            Backend backend;
+            backend.setWrite(true);
+            Window w(&backend);
+            backend.start();
+            QVERIFY(goTo(backend, "confirm", "/somewhere/cheetah-test.260101.001-factory-31c2322a.zip"));
+            QVERIFY(backend.confirmInstall("cheetah"));
+            QTRY_VERIFY(backend.writing() && backend.sentLines().size() >= 2);
+            w.window->close();
+            QVERIFY(shoot(w, "35-closing-while-the-phone-is-written"));
+            QVERIFY(at(backend, "installed"));
+        }
+        QVERIFY2(saved.size() >= 24, qPrintable(saved.join(" ")));
+        // No picture is empty.
+        for (const QString &name : std::as_const(saved))
+            QVERIFY2(QFileInfo(out + "/" + name + ".png").size() > 4000, qPrintable(name));
     }
 
     // ---- Theme and language ------------------------------------------------

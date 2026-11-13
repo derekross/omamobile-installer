@@ -359,7 +359,7 @@ Flickable {
             id: formLoader
             objectName: "answersLoader"
             Layout.fillWidth: true
-            Layout.topMargin: 4
+            Layout.topMargin: 10
             // Kept while the step is the same, so what was typed stays; gone
             // with the step, and the secrets with it.
             active: backend.action === "answers"
@@ -383,6 +383,63 @@ Flickable {
                 Repeater {
                     model: view.screen.footer || []
                     Para { objectName: "footerLine"; Layout.fillWidth: true; text: modelData; color: "#c4c4cc" }
+                }
+            }
+        }
+
+        // What the session that writes sent, as the tool reported it: the
+        // commands themselves, in order. Not a sentence of the app's. While
+        // the writes run, the newest few; afterwards the whole record, which
+        // scrolls with the page.
+        Rectangle {
+            id: sentBox
+            objectName: "sent"
+            readonly property int newest: 8
+            readonly property var lines: backend.writing ? backend.sentLines.slice(-newest) : backend.sentLines
+            visible: backend.sentLines.length > 0
+            Layout.fillWidth: true
+            implicitHeight: sentColumn.implicitHeight + 28
+            radius: theme.radius
+            color: "#17171a"
+            border.color: "#34343a"
+            border.width: 1
+
+            ColumnLayout {
+                id: sentColumn
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 4
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: 2
+                    Text {
+                        Layout.fillWidth: true
+                        text: qsTr("Sent to the phone")
+                        color: "#a8a8b2"
+                        font.pixelSize: 12
+                        font.bold: true
+                        font.letterSpacing: 1.5
+                        font.capitalization: Font.AllUppercase
+                    }
+                    Text {
+                        objectName: "sentCount"
+                        visible: backend.sentLines.length > sentBox.lines.length
+                        text: qsTr("the last %1 of %2").arg(sentBox.lines.length).arg(backend.sentLines.length)
+                        color: "#77777f"
+                        font.pixelSize: 12
+                    }
+                }
+                Repeater {
+                    model: sentBox.lines
+                    Para {
+                        objectName: "sentLine"
+                        Layout.fillWidth: true
+                        text: modelData
+                        font.family: "monospace"
+                        font.pixelSize: 13
+                        wrapMode: TextEdit.WrapAnywhere
+                    }
                 }
             }
         }

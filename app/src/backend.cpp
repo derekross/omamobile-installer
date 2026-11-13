@@ -149,6 +149,8 @@ void Backend::reset() {
     m_toolProtocol = 0;
     m_busy = false;
     m_hasProgress = false;
+    m_sentLines.clear();
+    emit sentLinesChanged();
     emit screenChanged();
     emit phonesChanged();
     emit problemsChanged();
@@ -174,9 +176,12 @@ void Backend::launch(bool probeOnly) {
              named.isEmpty() ? QString() : tr("%1 names %2, and that is not a program.").arg(QLatin1String(ToolVariable), named));
         return;
     }
-    // These are all the arguments the app ever passes. The protocol mode has
-    // no flag that writes to a phone, and the app has none to give.
+    // These are all the arguments the app ever passes: the mode, the release,
+    // and --write when the window itself was started with it, and only then.
+    // A probe starts no flow and never passes it.
     QStringList arguments{"json"};
+    if (m_write && !probeOnly)
+        arguments << "--write";
     if (!m_releaseDirectory.isEmpty())
         arguments << "--release" << m_releaseDirectory;
     m_pending.clear();
@@ -189,13 +194,16 @@ void Backend::shutdown() {
     m_helloTimer.stop();
     if (m_process.state() == QProcess::NotRunning)
         return;
+    // A tool that is writing is never ended from here: it takes the quit in
+    // its turn, after the write, and the app waits for that.
+    const bool wasWriting = writing();
     m_leaving = true;
     if (m_process.state() == QProcess::Running) {
         const QByteArray line = "{\"type\":\"quit\"}\n";
         m_process.write(line);
         emit sent(line);
         m_process.closeWriteChannel();
-        if (m_process.waitForFinished(1500))
+        if (m_process.waitForFinished(wasWriting ? m_writeWait : 1500))
             return;
     }
     m_process.kill();
@@ -287,10 +295,39 @@ void Backend::handle(const QByteArray &raw) {
             malformed(wrong);
             return;
         }
+        const QString answered = m_pending;
         m_screen = screen.toVariantMap();
         clearProgress();
         emit screenChanged();
         setBusy(false);
+        // The codename was taken and the core's screen now asks for the
+        // writes: they follow at once, as on the command line. The owner's
+        // go-ahead was the codename; the app adds no second question.
+        if (answered == "confirm" && action() == "write")
+            write();
+    } else if (type == "sent") {
+        if (!message.value("command").isString()) {
+            malformed(QStringLiteral("a sent message without a command"));
+            return;
+        }
+        m_sentLines << message.value("command").toString();
+        emit sentLinesChanged();
+    } else if (type == "piece") {
+        if (!message.value("line").isString() || !message.value("number").isDouble()) {
+            malformed(QStringLiteral("a piece message without a number or a line"));
+            return;
+        }
+        m_sentLines << message.value("line").toString();
+        emit sentLinesChanged();
+    } else if (type == "account") {
+        if (!isTexts(message.value("lines"))) {
+            malformed(QStringLiteral("an account message without lines"));
+            return;
+        }
+        const QJsonArray lines = message.value("lines").toArray();
+        for (const auto &line : lines)
+            m_sentLines << line.toString();
+        emit sentLinesChanged();
     } else if (type == "progress") {
         if (!message.value("what").isString() || !message.value("done").isDouble() || !message.value("total").isDouble()) {
             malformed(QStringLiteral("a progress message without what, done or total"));
@@ -355,6 +392,20 @@ void Backend::handleHello(const QJsonObject &message) {
                  .arg(m_toolProtocol).arg(Protocol));
         return;
     }
+    // Whether the flow may write is the tool's to say, and it must be what
+    // this window was started for: the app goes on with neither a tool that
+    // writes when a dry run was asked for, nor the other way round.
+    if (!message.value("writes").isBool()) {
+        fail("malformed", tr("The installer's tool sent something this app cannot read, so the app stopped it rather than guess."),
+             QStringLiteral("a hello that does not say whether the run writes"));
+        return;
+    }
+    if (!m_probeOnly && message.value("writes").toBool() != m_write) {
+        fail("mode", m_write
+                         ? tr("This window was started to install, and the installer's tool started a run that cannot write. The app stopped it.")
+                         : tr("This window was started for a dry run, and the installer's tool started a run that can write. The app stopped it."));
+        return;
+    }
     emit ready();
     if (m_probeOnly) {
         setBusy(false);
@@ -406,6 +457,16 @@ bool Backend::acceptTerms() { return sendFor({"accept-terms"}, {{"type", "accept
 bool Backend::declineTerms() { return sendFor({"accept-terms"}, {{"type", "decline-terms"}}); }
 bool Backend::download() { return sendFor({"download"}, {{"type", "download"}, {"do", "start"}}); }
 bool Backend::dryRun() { return sendFor({"dry-run"}, {{"type", "dry-run"}}); }
+bool Backend::write() { return sendFor({"write"}, {{"type", "write"}}); }
+bool Backend::declineInstall() { return sendFor({"confirm"}, {{"type", "confirm"}, {"typed", ""}}); }
+
+bool Backend::confirmInstall(const QString &typed) {
+    // Nothing typed is not a go-ahead, and is not sent as one by accident:
+    // declining is its own button.
+    if (typed.isEmpty())
+        return false;
+    return sendFor({"confirm"}, {{"type", "confirm"}, {"typed", typed}});
+}
 
 bool Backend::readPhone(const QString &phone) {
     QJsonObject message{{"type", "read-phone"}};
@@ -453,6 +514,8 @@ bool Backend::primaryAction() {
         return download();
     if (current == "dry-run")
         return dryRun();
+    if (current == "write")
+        return write();
     if (current == "take-file" && !m_busy) {
         pickFile();
         return true;

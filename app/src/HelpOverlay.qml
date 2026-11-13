@@ -18,7 +18,7 @@ Rectangle {
         { keys: "↑ ↓ PgUp PgDn", what: qsTr("Scroll") },
         { keys: "Esc", what: qsTr("Cancel a download, or close this") },
         { keys: "?", what: qsTr("Show or hide the shortcuts") },
-        { keys: "Q", what: qsTr("Quit (asks first while a step is running)") }
+        { keys: "Q", what: qsTr("Quit (asks first while a step is running; not while the phone is being written)") }
     ]
 
     MouseArea { anchors.fill: parent; onClicked: overlay.dismissed() }
