@@ -40,12 +40,27 @@ const SESSION_AFTER_US: u64 = 180_000_000;
 /// `smoke` waits this long for the session (§5.6).
 const SMOKE_WAIT_MS: u64 = 180_000;
 
+/// What carries the link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// None was named: the daemon offers no link.
+    None,
+    /// The `SOCK_SEQPACKET` socket on standard input (stage L2, the tests).
+    Stdio,
+    /// FunctionFS, mounted by `omamobile-link-gadget add` (stage L3, the
+    /// phone).
+    Ffs,
+}
+
+/// How long `omamobile-link-gadget add` may take to mount FunctionFS, and
+/// then to put the function on the bus once the descriptors are written.
+const GADGET_WAIT: Duration = Duration::from_secs(20);
+
 /// How the daemon was started.
 #[derive(Debug, Clone)]
 pub struct Options {
     pub root: PathBuf,
-    /// The link is the `SOCK_SEQPACKET` socket on standard input (stage L2).
-    pub stdio: bool,
+    pub transport: Transport,
     // What follows is for tests, and taken on a scratch root only.
     /// The machine's clock runs this many times faster than the wall's.
     pub clock_scale: u64,
@@ -64,7 +79,7 @@ impl Options {
     pub fn new(root: PathBuf) -> Options {
         Options {
             root,
-            stdio: false,
+            transport: Transport::None,
             clock_scale: 1,
             poll_ms: 1000,
             write_timeout_ms: WRITE_TIMEOUT_MS,
@@ -83,6 +98,8 @@ pub enum Ev {
     Link(bool),
     /// One completed read.
     Frame(Vec<u8>),
+    /// FunctionFS's event from `ep0`.
+    Function(crate::ffs::Event),
     /// The transport is gone for good.
     Gone,
     /// A write the bus did not take in time.
@@ -194,6 +211,8 @@ struct Daemon {
     watch: Arc<Watch>,
     /// `omamobile-link-gadget add` ran, and `remove` has not.
     offered: bool,
+    /// FunctionFS: the function is enabled (the machine was told `LinkUp`).
+    enabled: bool,
     exit: Option<i32>,
 }
 
@@ -271,8 +290,8 @@ pub fn run(opts: Options) -> i32 {
             log("no serial in bootconfig, or no codename in the descriptor: nothing is offered");
             return 1;
         }
-        if !opts.stdio {
-            log("FunctionFS is stage L3: this build offers the link on a socket pair only (--transport stdio)");
+        if opts.transport == Transport::None {
+            log("no transport: --transport ffs (FunctionFS) or stdio (a socket pair)");
             return 1;
         }
     }
@@ -295,6 +314,7 @@ pub fn run(opts: Options) -> i32 {
         pending_read: None,
         watch: Arc::new(Watch::default()),
         offered: false,
+        enabled: false,
         exit: None,
     };
     d.carry_out(out);
@@ -333,6 +353,13 @@ impl Daemon {
     fn leave(&mut self) {
         if self.offered {
             self.flush();
+            // FunctionFS: the function's files are closed before `remove`
+            // takes the function out and unmounts it
+            if self.opts.transport == Transport::Ffs {
+                if let Some(bus) = self.bus.take() {
+                    bus.stop();
+                }
+            }
             match self.programs.gadget("remove") {
                 Ok(()) => {
                     let _ = fs::remove_file(self.root.offered());
@@ -362,6 +389,37 @@ impl Daemon {
             Ev::Frame(bytes) => {
                 self.feed(PhoneInput::Frame(&bytes));
                 self.handled();
+            }
+            Ev::Function(event) => {
+                use crate::ffs::Event;
+                match event {
+                    Event::Enable | Event::Disable | Event::Unbind => {
+                        log(&format!("link: {}", event.name()));
+                        let up = event == Event::Enable;
+                        // DISABLE then UNBIND is one link going down
+                        if up != self.enabled {
+                            self.enabled = up;
+                            self.feed(if up {
+                                PhoneInput::LinkUp
+                            } else {
+                                PhoneInput::LinkDown
+                            });
+                        }
+                    }
+                    // §4: logged, and nothing changes. A host that sleeps
+                    // comes back into the same session
+                    Event::Bind | Event::Suspend | Event::Resume => {
+                        log(&format!("link: {}", event.name()))
+                    }
+                    Event::Setup {
+                        request_type,
+                        request,
+                        ..
+                    } => log(&format!(
+                        "link: SETUP {request_type:#04x} {request:#04x}, stalled"
+                    )),
+                    Event::Unknown(t) => log(&format!("link: an unknown event {t}")),
+                }
             }
             Ev::Gone => {
                 log("link: gone");
@@ -500,16 +558,31 @@ impl Daemon {
     fn start_offer(&mut self) -> io::Result<()> {
         fs::create_dir_all(self.root.run_dir())?;
         fs::write(self.root.offered(), b"")?;
-        self.programs.gadget("add")?;
-        self.offered = true;
-        // The link itself: the socket on standard input
-        let sock = UnixStream::from(io::stdin().as_fd().try_clone_to_owned()?);
-        self.bus = Some(Bus::start(
-            sock,
-            self.phone.max_data(),
-            Duration::from_millis(self.opts.write_timeout_ms),
-            self.tx.clone(),
-        )?);
+        let write_timeout = Duration::from_millis(self.opts.write_timeout_ms);
+        if self.opts.transport == Transport::Ffs {
+            self.offered = true;
+            let function = self.add_function()?;
+            self.bus = Some(Bus::start_ffs(
+                function,
+                self.phone.max_data(),
+                write_timeout,
+                self.tx.clone(),
+            )?);
+        } else {
+            // Set before `add` runs: one that fails is followed by `remove`
+            // when the daemon leaves, which finds nothing to put back and
+            // clears the record
+            self.offered = true;
+            self.programs.gadget("add")?;
+            // The link itself: the socket on standard input
+            let sock = UnixStream::from(io::stdin().as_fd().try_clone_to_owned()?);
+            self.bus = Some(Bus::start(
+                sock,
+                self.phone.max_data(),
+                write_timeout,
+                self.tx.clone(),
+            )?);
+        }
         // The owner's session agent: the account first boot made, nobody else
         let root = self.root.clone();
         sockets::listen(
@@ -531,6 +604,54 @@ impl Daemon {
         )?;
         self.start_watcher();
         Ok(())
+    }
+
+    /// `omamobile-link-gadget add` (§3.3), with the daemon's part in the
+    /// middle of it: the script mounts FunctionFS and waits; the daemon
+    /// writes the descriptors and the strings to `ep0`, and the endpoint
+    /// files appear; the script links the function and binds the UDC.
+    fn add_function(&mut self) -> io::Result<crate::ffs::Function> {
+        let dir = self.root.ffs_dir();
+        let mut child = self.programs.gadget_spawn("add")?;
+        let end = Instant::now() + GADGET_WAIT;
+        let failed = |what: &str| io::Error::other(format!("omamobile-link-gadget add: {what}"));
+        // The script has mounted FunctionFS when ep0 is there
+        let ep0 = loop {
+            if dir.join("ep0").exists() {
+                match crate::ffs::open_ep0(&dir) {
+                    Ok(ep0) => break ep0,
+                    Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(failed(&format!("the descriptors were refused: {e}")));
+                    }
+                }
+            }
+            if let Some(status) = child.try_wait()? {
+                crate::programs::gadget_status(status)?;
+                return Err(failed("ended before FunctionFS was mounted"));
+            }
+            if Instant::now() >= end {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed("FunctionFS was not mounted in time"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Then it links the function and binds the UDC
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= end {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed("the function was not put on the bus in time"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        crate::programs::gadget_status(status)?;
+        crate::ffs::open_endpoints(&dir, ep0)
     }
 
     fn start_watcher(&self) {

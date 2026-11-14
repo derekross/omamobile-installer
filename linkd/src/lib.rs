@@ -8,14 +8,18 @@
 //!
 //! For Linux only: on any other system the crate is empty, so that the
 //! workspace still builds there.
-#![forbid(unsafe_code)]
+// No `unsafe` but in `aio`, the five system calls of native asynchronous
+// I/O that FunctionFS's cancel needs and std and rustix have no name for.
+#![deny(unsafe_code)]
 #![cfg(target_os = "linux")]
 
+pub mod aio;
 pub mod bus;
 pub mod command;
 pub mod daemon;
 pub mod descriptor;
 pub mod durable;
+pub mod ffs;
 pub mod found;
 pub mod paths;
 pub mod programs;

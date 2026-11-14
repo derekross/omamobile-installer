@@ -1,0 +1,288 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# omamobile-link-gadget add|remove: put the install link's USB function on
+# the phone's gadget, and take it off again (INSTALL-LINK-PLAN §3.3, §4).
+#
+# This file moves to omarchy-mobile's package omamobile-install-link
+# (/usr/lib/omamobile-install-link/omamobile-link-gadget) with the daemon;
+# it is here, beside the daemon it works with, until that package exists.
+#
+# It is modelled on omamobile-usb-mac. The kernel changes a gadget's
+# functions only while it is unbound, so `add` takes the gadget apart and
+# puts it back in the same order with the link added last:
+#
+#   1. a hang marker, written and synced; the gadget's state recorded on the
+#      tmpfs, for `remove`
+#   2. unbind the UDC; unlink the functions
+#   3. create functions/ffs.link and mount its FunctionFS
+#   4. wait for the daemon (omamobile-linkd) to write the descriptors and
+#      strings to ep0: the endpoint files appear
+#   5. bcdDevice 0x0200 and the Microsoft OS descriptors (§4)
+#   6. link the functions again, then ffs.link; bind the UDC
+#   7. remove the marker
+#
+# `remove` undoes it: the gadget as the initramfs made it, from the recorded
+# state. It also works when FunctionFS has already unbound the gadget,
+# which the kernel does when the daemon's files close with the function
+# bound (a daemon that died).
+#
+# Whatever happens between 2 and 6, an EXIT trap links the previous
+# functions again and binds the UDC. USB is the phone's only link: a start
+# that finds a marker written in an earlier boot (a hang inside the unbind
+# or the bind, then a reset) leaves the gadget as the initramfs made it for
+# this boot, says so, and tries again at the next boot. A marker of this
+# boot is a change that was interrupted without a hang (a killed daemon, a
+# failure): the next `add` or `remove` goes on. A signal (a start
+# timeout's SIGTERM) keeps the marker, as omamobile-usb-mac does, so a slow
+# hang that systemd interrupts is not repeated in the next boot either.
+#
+# Exit status: 0 done; 1 failed, the gadget put back; 2 usage; 3 skipped
+# for this boot (the marker).
+#
+# Tests and stage L3 point it elsewhere (never needed on a phone):
+#   LINK_CONFIGFS     the configfs root            (/sys/kernel/config)
+#   LINK_GADGET_NAME  the gadget                   (g1)
+#   LINK_FFS_DIR      FunctionFS's mount point     (/run/omamobile-install-link/ffs)
+#   LINK_RUN_DIR      the tmpfs directory          (/run/omamobile-install-link)
+#   LINK_MARKER       the hang marker              (/var/lib/omamobile/link-gadget-started)
+#   LINK_BOOT_ID      this boot's id               (/proc/sys/kernel/random/boot_id)
+#   LINK_FFS_OPTS     FunctionFS's mount options   (none: root's files)
+#   LINK_UDC_ALLOW    a pattern the UDC must match (any)
+#   LINK_WAIT_S       seconds to wait for ep1/ep2  (15)
+set -uo pipefail
+
+configfs=${LINK_CONFIGFS:-/sys/kernel/config}
+g=$configfs/usb_gadget/${LINK_GADGET_NAME:-g1}
+ffs=${LINK_FFS_DIR:-/run/omamobile-install-link/ffs}
+run=${LINK_RUN_DIR:-/run/omamobile-install-link}
+marker=${LINK_MARKER:-/var/lib/omamobile/link-gadget-started}
+boot_id_file=${LINK_BOOT_ID:-/proc/sys/kernel/random/boot_id}
+ffs_opts=${LINK_FFS_OPTS:-}
+udc_allow=${LINK_UDC_ALLOW:-*}
+wait_s=${LINK_WAIT_S:-15}
+cfg=$g/configs/c.1
+fn=ffs.link
+state=$run/gadget.state
+skipped=$run/gadget-skipped
+# The OS descriptors' vendor code; any value the gadget's other requests do
+# not use. "MSFT100" is the signature Microsoft OS 1.0 asks for.
+os_code=0xcd
+os_sign=MSFT100
+
+log() { echo "omamobile-link-gadget: $*" >&2; }
+# The kernel's last lines, for a failure the kernel explains (needs root)
+kernel_log() {
+  local l
+  { dmesg 2>/dev/null || journalctl -k -q -n 20 --no-pager 2>/dev/null; } | tail -n 20 |
+    while IFS= read -r l; do log "kernel: $l"; done
+  return 0
+}
+syncdir() { sync -f "$1" 2>/dev/null || sync; }
+
+usage() { echo "usage: omamobile-link-gadget add|remove" >&2; exit 2; }
+(( $# == 1 )) || usage
+verb=$1
+[[ $verb == add || $verb == remove ]] || usage
+
+boot_id=$(cat "$boot_id_file" 2>/dev/null) || boot_id=
+[[ -n $boot_id ]] || { log "this boot's id cannot be read; leaving the gadget as it is"; exit 1; }
+
+[[ -d $g && -d $cfg ]] || { log "no gadget at $g; leaving it as it is"; exit 1; }
+
+# The hang marker: STEP BOOT_ID DATE
+if [[ -e $marker ]]; then
+  read -r m_step m_boot _ < "$marker" 2>/dev/null || { m_step=?; m_boot=; }
+  if [[ $m_boot != "$boot_id" ]]; then
+    log "an earlier boot did not finish changing the gadget (${m_step:-?}); leaving it as the initramfs made it for this boot"
+    mkdir -p "$run" && : > "$skipped"
+    rm -f "$marker"
+    syncdir "${marker%/*}"
+    exit 3
+  fi
+  log "a change in this boot was interrupted (${m_step:-?}); going on"
+fi
+if [[ $verb == add && -e $skipped ]]; then
+  log "skipped for this boot: an earlier boot did not finish changing the gadget"
+  exit 3
+fi
+
+# What the gadget is now. `add` records it; `remove` puts it back from it.
+current_links() {
+  local l
+  for l in "$cfg"/*; do
+    [[ -L $l && ${l##*/} != "$fn" ]] && printf '%s ' "${l##*/}"
+  done
+}
+os_link() {
+  local l
+  for l in "$g"/os_desc/*; do [[ -L $l ]] && { printf '%s' "${l##*/}"; return; }; done
+  return 0
+}
+s_udc= s_links= s_bcd= s_os_use= s_os_code= s_os_sign= s_os_link=
+read_state() {
+  local k v
+  [[ -r $state ]] || return 1
+  while IFS='=' read -r k v; do
+    case $k in
+      udc) s_udc=$v ;; links) s_links=$v ;; bcd) s_bcd=$v ;;
+      os_use) s_os_use=$v ;; os_code) s_os_code=$v ;; os_sign) s_os_sign=$v ;;
+      os_link) s_os_link=$v ;;
+    esac
+  done < "$state"
+  [[ -n $s_udc ]]
+}
+
+mark() {   # mark STEP: written and synced before anything is taken apart
+  mkdir -p "${marker%/*}" &&
+    printf '%s %s %s\n' "$1" "$boot_id" "$(date -Is)" > "$marker" &&
+    { sync -f "$marker" 2>/dev/null || sync; }
+}
+unmark() { rm -f "$marker"; syncdir "${marker%/*}"; }
+
+udc_bind() {
+  [[ -z $(cat "$g/UDC" 2>/dev/null) ]] || return 0
+  echo "$1" > "$g/UDC" || { log "could not bind $1 again"; return 1; }
+}
+udc_unbind() {
+  [[ -n $(cat "$g/UDC" 2>/dev/null) ]] || return 0
+  echo "" > "$g/UDC" || { log "could not unbind the UDC"; return 1; }
+}
+
+# Take the link's function out, whatever of it is there, and the gadget's
+# settings back to the recorded ones. The UDC is unbound when this runs.
+take_out() {
+  local i
+  rm -f "$cfg/$fn"
+  if [[ -n $s_bcd ]]; then echo "$s_bcd" > "$g/bcdDevice" || log "could not put bcdDevice back"; fi
+  if [[ -d $g/os_desc ]]; then
+    if [[ -z $s_os_link ]]; then
+      for i in "$g"/os_desc/*; do [[ -L $i ]] && rm -f "$i"; done
+    fi
+    [[ -n $s_os_use ]] && { echo "$s_os_use" > "$g/os_desc/use" || log "could not put os_desc/use back"; }
+    [[ -n $s_os_code ]] && { echo "$s_os_code" > "$g/os_desc/b_vendor_code" 2>/dev/null || true; }
+    [[ -n $s_os_sign ]] && { echo "$s_os_sign" > "$g/os_desc/qw_sign" 2>/dev/null || true; }
+  fi
+  if mountpoint -q "$ffs" 2>/dev/null; then
+    # The daemon closes its files before it calls `remove`; one that died
+    # has none open. Give a slow close a moment, then detach the mount.
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      umount "$ffs" 2>/dev/null && break
+      sleep 0.5
+    done
+    if mountpoint -q "$ffs" 2>/dev/null; then
+      log "FunctionFS is still in use; detaching it"
+      umount -l "$ffs" || log "could not unmount $ffs"
+    fi
+  fi
+  if [[ -d $g/functions/$fn ]]; then rmdir "$g/functions/$fn" || log "could not remove functions/$fn"; fi
+}
+link_again() {
+  local n
+  for n in $s_links; do
+    [[ -e $cfg/$n ]] || ln -s "$g/functions/$n" "$cfg/$n" || log "could not link $n again"
+  done
+}
+
+if [[ $verb == remove ]]; then
+  if ! read_state; then
+    if [[ ! -e $g/functions/$fn && -n $(cat "$g/UDC" 2>/dev/null) ]]; then
+      log "the gadget has no link function; nothing to do"
+      [[ -e $marker ]] && unmark
+      exit 0
+    fi
+    log "no record of the gadget before the link ($state); leaving it as it is"
+    exit 1
+  fi
+  mark remove || { log "cannot write $marker; leaving the gadget as it is"; exit 1; }
+  signal=0
+  trap 'signal=1; exit 130' INT TERM HUP
+  trap 'link_again; udc_bind "$s_udc"; (( signal )) || unmark' EXIT
+  udc_unbind || exit 1
+  take_out
+  link_again
+  udc_bind "$s_udc" || exit 1
+  trap - EXIT
+  rm -f "$state"
+  unmark
+  log "the gadget is as it was before the link"
+  exit 0
+fi
+
+# add
+if [[ -e $g/functions/$fn ]]; then
+  log "the gadget already has the link function; remove it first"
+  exit 1
+fi
+udc=$(cat "$g/UDC" 2>/dev/null) || udc=
+[[ -n $udc ]] || { log "the gadget is not bound to a UDC; leaving it as it is"; exit 1; }
+# shellcheck disable=SC2053  # a pattern, on purpose
+[[ $udc == $udc_allow ]] || { log "the gadget's UDC $udc is not one this run may use; leaving it as it is"; exit 1; }
+
+s_udc=$udc
+s_links=$(current_links)
+s_bcd=$(cat "$g/bcdDevice" 2>/dev/null) || s_bcd=
+if [[ -d $g/os_desc ]]; then
+  s_os_use=$(cat "$g/os_desc/use" 2>/dev/null) || s_os_use=
+  s_os_code=$(cat "$g/os_desc/b_vendor_code" 2>/dev/null) || s_os_code=
+  s_os_sign=$(cat "$g/os_desc/qw_sign" 2>/dev/null) || s_os_sign=
+  s_os_link=$(os_link)
+fi
+if ! { mkdir -p "$run" &&
+       printf 'udc=%s\nlinks=%s\nbcd=%s\nos_use=%s\nos_code=%s\nos_sign=%s\nos_link=%s\n' \
+         "$s_udc" "$s_links" "$s_bcd" "$s_os_use" "$s_os_code" "$s_os_sign" "$s_os_link" > "$state.new" &&
+       mv -f "$state.new" "$state"; }; then
+  log "cannot record the gadget in $state; leaving it as it is"
+  exit 1
+fi
+mark add || { log "cannot write $marker; leaving the gadget as it is"; rm -f "$marker" "$state"; exit 1; }
+
+signal=0
+put_back() {
+  udc_unbind
+  take_out
+  link_again
+  udc_bind "$s_udc"
+  rm -f "$state"
+  (( signal )) || unmark
+}
+trap 'signal=1; exit 130' INT TERM HUP
+trap put_back EXIT
+
+udc_unbind || exit 1
+for n in $s_links; do rm -f "$cfg/$n"; done
+mkdir "$g/functions/$fn" || { log "the kernel refused functions/$fn (is usb_f_fs there?)"; kernel_log; exit 1; }
+mkdir -p "$ffs" || exit 1
+# The source is the instance's name, not a path. mount(8) makes a source
+# that names an existing file into that file's absolute path (libmount
+# counts functionfs as no pseudo file system), and FunctionFS then finds no
+# instance of that name (ENOENT): so --no-canonicalize, and from / . The
+# first L3 run hit it: its working directory had a directory named link.
+if ! (cd / && mount --no-canonicalize -t functionfs ${ffs_opts:+-o "$ffs_opts"} link "$ffs"); then
+  log "could not mount FunctionFS"
+  kernel_log
+  exit 1
+fi
+
+# The daemon writes the descriptors now: the endpoint files appear
+for (( i = 0; i < wait_s * 10; i++ )); do
+  [[ -e $ffs/ep1 && -e $ffs/ep2 ]] && break
+  sleep 0.1
+done
+[[ -e $ffs/ep1 && -e $ffs/ep2 ]] || { log "the daemon wrote no descriptors in ${wait_s}s"; exit 1; }
+
+echo 0x0200 > "$g/bcdDevice" || log "could not set bcdDevice"
+if [[ -d $g/os_desc ]]; then
+  { echo 1 > "$g/os_desc/use" &&
+    echo "$os_code" > "$g/os_desc/b_vendor_code" &&
+    echo "$os_sign" > "$g/os_desc/qw_sign" &&
+    { [[ -n $s_os_link ]] || ln -s "$cfg" "$g/os_desc/c.1"; }; } ||
+    log "could not set the OS descriptors; Windows will not bind WinUSB by itself"
+fi
+for n in $s_links; do ln -s "$g/functions/$n" "$cfg/$n" || { log "could not link $n again"; exit 1; }; done
+ln -s "$g/functions/$fn" "$cfg/$fn" || { log "could not link $fn"; exit 1; }
+echo "$udc" > "$g/UDC" || { log "could not bind $udc"; exit 1; }
+
+trap - EXIT
+unmark
+log "the link is on the gadget, after: ${s_links:-nothing}"
+exit 0

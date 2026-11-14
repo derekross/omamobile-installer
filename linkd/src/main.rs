@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! `omamobile-linkd [--root DIR] --transport stdio`
+//! `omamobile-linkd [--root DIR] --transport ffs|stdio`
 #[cfg(target_os = "linux")]
-use omamobile_linkd::daemon::{run, Options};
+use omamobile_linkd::daemon::{run, Options, Transport};
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
@@ -12,8 +12,10 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-const USAGE: &str = "usage: omamobile-linkd [--root DIR] --transport stdio
+const USAGE: &str = "usage: omamobile-linkd [--root DIR] --transport ffs|stdio
   --root DIR         a scratch directory in place of the phone's file system
+  --transport ffs    the link is FunctionFS, mounted by omamobile-link-gadget add
+                     at /run/omamobile-install-link/ffs (under the root)
   --transport stdio  the link is the SOCK_SEQPACKET socket on standard input
 For tests, with a scratch root only: --clock-scale N, --poll-ms N,
 --write-timeout-ms N, --max-data N, --ack-every N, --window N,
@@ -41,7 +43,8 @@ fn parse(args: Vec<String>) -> Result<Options, String> {
         match arg.as_str() {
             "--root" => opts.root = PathBuf::from(value()?),
             "--transport" => match value()?.as_str() {
-                "stdio" => opts.stdio = true,
+                "stdio" => opts.transport = Transport::Stdio,
+                "ffs" => opts.transport = Transport::Ffs,
                 other => return Err(format!("no such transport: {other}")),
             },
             "--clock-scale" => (opts.clock_scale, knobs) = (number(value()?)?, true),
