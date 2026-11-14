@@ -817,7 +817,13 @@ fn a_phone_that_reports_one_slots_bootloader_stops_and_no_slot_is_switched() {
         }
     );
     assert_eq!(s.retry, Retry::StopsAgain);
-    assert!(s.message.join(" ").contains("so a dry run does not do it"));
+    // This pretend phone reports no slot flags, which reads as a slot B
+    // that has started: no run measures it (core/tests/slot_probe.rs has
+    // the phones that are measured)
+    assert!(s
+        .message
+        .join(" ")
+        .contains("reads as a slot that has started"));
     only_getvar(&phone);
     assert!(!phone.log().iter().any(|c| c.starts_with("set_active")));
     // With both versions reported, the same descriptor installs as usual

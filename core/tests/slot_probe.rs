@@ -605,7 +605,26 @@ fn a_slot_a_that_reads_unstartable_afterwards_stops_the_install() {
 
 #[test]
 fn a_slot_b_that_reads_as_started_is_never_measured() {
+    // Flags the phone does not report count as a started slot B, as in
+    // tools/install-phone
     let bundle = probing_release();
+    let silent = phone("first-install");
+    silent.edit(|s| {
+        s.vars.remove("slot-successful:b");
+        s.vars.remove("slot-unbootable:b");
+    });
+    let mut flow = Flow::begin(
+        &bundle.files(),
+        bundle.index(),
+        &bundle.trusted(),
+        options(),
+    );
+    drive(&mut flow, &bundle, &silent, "cheetah", "");
+    assert!(stop(&flow)
+        .message
+        .join(" ")
+        .contains("reads as a slot that has started"));
+    assert!(not_reads(&silent).is_empty());
     let phone = phone("first-install-b-started");
     let mut flow = Flow::begin(
         &bundle.files(),

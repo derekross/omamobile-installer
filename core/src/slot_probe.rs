@@ -116,10 +116,13 @@ impl SlotReading {
 /// Whether slot B reads as a slot that has started and can start again: what
 /// an installed Omarchy Mobile sent back to slot A looks like, and stock
 /// Android after a system update. The two can't be told apart from
-/// fastboot, so neither is measured.
+/// fastboot, so neither is measured. A slot B that reads unbootable, or not
+/// successful, has no such mark to lose; flags the phone does not report
+/// count as the look of a started slot, as in Omarchy Mobile's
+/// `tools/install-phone`.
 pub(crate) fn slot_b_reads_as_started(flags: &[(String, String)]) -> bool {
     let get = |k: &str| flags.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
-    get("slot-successful:b") == Some("yes") && get("slot-unbootable:b") == Some("no")
+    !(get("slot-unbootable:b") == Some("yes") || get("slot-successful:b") == Some("no"))
 }
 
 /// What the front end saw after a restart it was asked for.
