@@ -435,7 +435,11 @@ impl Usb {
                     .wait()
                     .and_then(|dev| dev.claim_interface(iface_no).wait().map(|i| (dev, i)))
                 {
-                    Ok((dev, iface)) => return Usb::with(dev, iface, iface_no),
+                    Ok((dev, iface)) => {
+                        let mut usb = Usb::with(dev, iface, iface_no)?;
+                        usb.start_clean();
+                        return Ok(usb);
+                    }
                     Err(e) => last = format!("open or claim: {e}"),
                 }
             }
@@ -522,6 +526,28 @@ impl Usb {
             reader: Some(reader),
             _iface: iface,
         })
+    }
+}
+
+impl Usb {
+    /// A zero-length packet before anything else (E16). An installer killed
+    /// in the middle of an OUT transfer leaves the packets it sent in the
+    /// phone's pending read, which has no short packet yet; the next run's
+    /// `hello` would complete that read and arrive glued to the dead run's
+    /// part of a frame, one transfer that is no frame, and be lost. The ZLP
+    /// ends that read by itself: the phone reads the left-over part alone
+    /// (dropped, or a frame error that ends the dead run's session), or,
+    /// when nothing was left, a read of nothing, which it passes over.
+    fn start_clean(&mut self) {
+        self.out.submit(Vec::<u8>::new().into());
+        if self
+            .out
+            .wait_next_complete(Duration::from_secs(2))
+            .is_none()
+        {
+            self.out.cancel_all();
+            let _ = self.out.wait_next_complete(Duration::from_secs(2));
+        }
     }
 }
 
@@ -1690,10 +1716,20 @@ fn l3_06_flow_d_a_killed_host_resumes() {
             .collect()
     };
     let mut rng = TestRng(66);
+    // On the socket pair: what a ZLP gives the daemon after a run killed in
+    // the middle of an OUT transfer, the dead run's part of a data frame as
+    // one read of its own (E16). The next run must pair as quickly anyway
+    let mut leftovers = 0;
     let (mut killed_hello, mut killed_stream) = (0, 0);
     for run in 0..runs {
         let hello_only = run % 3 == 2;
         let before = lines().len();
+        if let (Some(s), true) = (&sock, run > 0 && (run - 1) % 3 != 2) {
+            let f = frame::encode(Kind::Data, 9, 0, &[0x5a; 4000], 65536).unwrap();
+            let cut = 100 + (rng.next_u64() % 3000) as usize;
+            (&*s).write_all(&f[..cut]).unwrap();
+            leftovers += 1;
+        }
         let mut c = if hello_only {
             child(&[("L3_CHILD_HELLO_ONLY", "1")])
         } else {
@@ -1758,7 +1794,12 @@ fn l3_06_flow_d_a_killed_host_resumes() {
     env.ok(
         "flow (d), F1, F2",
         &format!(
-            "{runs} installers killed with the cable in ({killed_stream} in the stream, {killed_hello} between hello and its answer); every next run paired within {worst} frames, {discarded} stale frames passed over in all, no wrong count; the last run finished the image ({} MiB) and it verified",
+            "{runs} installers killed with the cable in ({killed_stream} in the stream, {killed_hello} between hello and its answer{}); every next run paired within {worst} frames, {discarded} stale frames passed over in all, no wrong count; the last run finished the image ({} MiB) and it verified",
+            if leftovers > 0 {
+                format!(", {leftovers} of them leaving part of a frame for the phone to read alone")
+            } else {
+                String::new()
+            },
             len >> 20
         ),
     );

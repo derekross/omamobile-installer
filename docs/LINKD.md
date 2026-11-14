@@ -91,6 +91,7 @@ Anything but a peer's fixed lines ends its connection. The code is in these line
 | E12 | §3.3: `remove` puts the gadget back "as the initramfs made it" | `add` records the gadget on the tmpfs (the UDC, the functions in order, `bcdDevice`, `os_desc`) and `remove` puts it back from that record, also when the gadget is unbound | When the daemon's files close with the function bound, FunctionFS takes the **whole gadget** off the bus (upstream `ffs_closed()` calls `unregister_gadget_item()`): the UDC file is then empty, and NCM and ACM are gone with the link until the next `remove`. So on the development phone a daemon that dies takes SSH with it until the unit starts it again or `ExecStopPost=` runs `remove`. The mount option `no_disconnect=1` would keep the gadget bound with the link deactivated instead; L3's "a dead daemon" line shows what this kernel does, and the plan should choose after it |
 | E13 | §5.7: `io_cancel` dequeues a write | The endpoint files are opened non-blocking, and every read and write is an asynchronous request | On a blocking endpoint file a request made before `ENABLE` waits for it inside `io_submit`, where no time limit reaches; non-blocking, it fails at once and the bus waits for `ENABLE` itself |
 | E15 | §3.3: the script mounts the link's FunctionFS | `mount --no-canonicalize`, from `/` | mount(8) turns a source that names an existing file into that file's absolute path (libmount does not count functionfs among the pseudo file systems it leaves alone), and FunctionFS then finds no instance of that name: `fsconfig() failed: No such file or directory`. The first root run had the checkout as its working directory, which has a directory `link/` |
+| E16 | §5.3 (F1): a run that begins with `hello` begins cleanly, whatever came before | The host's transport sends a zero-length packet when it has claimed the interface, before its first `hello`; the daemon passes over a read of nothing | An installer killed in the middle of an OUT transfer leaves the packets it sent in the phone's pending read, which has had no short packet yet. The next run's `hello` completes that read: one transfer that is no frame, and the `hello` in it is lost until the host's 60 s of silence. At full speed a megabyte frame takes about a second, so a kill lands inside one; the second root run of L3 met it (§5.6). The ZLP ends the left-over read by itself. **For L6**: the installer's `Link` transport must do the same; it is the transport's, not the protocol's |
 | E14 | §11.1, L2: a socket pair stands in for the endpoints | The L2 tests keep to 1024-byte frames; L3's checks of its own logic on the socket pair use 64 KiB and a small send buffer | A local datagram must fit the sender's buffer (about 208 KiB by default), so a megabyte frame is refused there, and a socket takes many small frames where a bulk IN endpoint holds one. Sizes and blocking are USB's: L3 |
 
 ## 4. The tests
@@ -238,5 +239,16 @@ After L3, for the phone (the plan's runbook): the phone's own controller's deque
   - `a streamed file`: 4 294 968 296 bytes at 298 MiB/s; the phone's whole-file check took 2.5 s.
 - **The cleanup was complete.** No gadget, rule, state file, scratch directory or module was left. The log has no summary block: the script ended between super speed's teardown and its summary, most likely on a signal. It now logs which signal ended it, and appends the kernel's lines for FunctionFS, the gadget and the virtual bus.
 
-Still to run: high speed, and full speed's first six tests. `sudo tools/l3-run-as-root --speeds "high full"` runs them; the default reruns all three.
+### 5.7 The second root run (2026-11-14)
+
+`sudo tools/l3-run-as-root --speeds "high full"`, with E15's fix:
+
+- **High speed: 12 of 12 passed.**
+- **Full speed: 11 of 12 passed.**
+- **`flow (d), F1, F2` failed at full speed.** Run 0 was killed 50 to 450 ms into the image's stream, which at 12 Mbit/s is inside a 1 MiB frame. Run 1 then got nothing back in its 60 s ("run 1: not paired: []"). That is E16: run 1's `hello` completed run 0's half-sent transfer and was lost with it.
+- **The fix:** the host's transport now sends a zero-length packet on opening, before its first `hello`.
+- **New check on the socket pair:** after each killed run the test now leaves part of a frame for the daemon to read alone, which is what the ZLP turns the glued read into. Each next run still pairs within 2 frames. The glueing itself only USB shows.
+- Cleanup was complete.
+
+Still to run: `flow (d)` at full speed with the fix, `sudo tools/l3-run-as-root --speeds full --only l3_06`. The ZLP is sent by every USB test's host; `sudo tools/l3-run-as-root` reruns everything.
 
