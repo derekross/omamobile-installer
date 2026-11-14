@@ -84,7 +84,7 @@ shipping_rs=()
 for f in web/src/*.rs; do
   case " ${preview_rs[*]} " in *" $f "*) ;; *) shipping_rs+=("$f") ;; esac
 done
-preview_page=(web/preview/index.html web/preview/preview.js web/preview/write-walk.js)
+preview_page=(web/preview/index.html web/preview/preview.js web/preview/write-walk.js web/preview/slot-probe.js)
 preview_tests=(web/preview/test/*)
 
 fail=0
@@ -204,6 +204,17 @@ none "the page cannot state the other bootloader slot's version for its owner, i
   'bootloader_slots_match|slots[-_]match' web/src/*.rs web/static/* "${preview_page[@]}" "${preview_tests[@]}"
 once "the command-line tool takes that statement from one argument" \
   'options.bootloader_slots_match = Some(' cli/src/main.rs
+# The other-slot measurement (DESIGN §6) changes the phone's slot flags:
+# the page that ships, whose flow is a dry run, never says it can do it and
+# has none of its steps; its three commands are named in the core only
+none "the page that ships can't measure the other bootloader slot" \
+  'can_probe_slots|slot_probe|phone_of_device' "${shipping_rs[@]}" web/static/*
+once "the core's gate lists the measurement's three commands in one place" \
+  'pub const SLOT_PROBE_COMMANDS: [&str; 3] = ["set_active:a", "set_active:b", "reboot-bootloader"];' core/src/fastboot.rs
+none "no front end names the measurement's commands: they are the core's" \
+  '"(set_active:a|reboot-bootloader)"' cli/src/*.rs web/src/*.rs web/static/* "${preview_page[@]}" app/src/*.cpp app/src/*.h app/src/*.qml
+once "only the flow makes a measurement, through one constructor" \
+  'pub(crate) fn measure(phone: PhoneId, first: char, first_version: String) -> Self {' core/src/slot_probe.rs
 # The page: no session that writes, in any build. Its self-test walks an
 # install against the pretend phone through a session it opens directly,
 # which is a dry run, and exists only in a self-test build
@@ -381,7 +392,7 @@ else bad "the $preview_feature feature does not turn on link-preview"; fi
 # itself, its exports, and its transport's words
 preview_marks=("this build can write to a phone" "web_write_preview" "begin_write_preview" "session_root_feed"
   "the connection to the phone ended earlier" "timed out waiting for the phone")
-preview_glue='preview|web_write|session_(open|boot|root_feed|finish|abandon|progress)|images_(check_boot|root_(begin|update|done))'
+preview_glue='preview|web_write|session_(open|boot|root_feed|finish|abandon|progress)|images_(check_boot|root_(begin|update|done))|slot_probe|phone_of_device'
 
 if (( built )); then
   # What only a build with the pretend phone holds: its serial numbers, its
@@ -505,7 +516,7 @@ if (( preview )); then
     none "the write preview's glue has no pretend phone, no self-test and no override" \
       'fake_phone|selftest|slot_override|maintainer|slots_match' "$glue"
     strays=$(cd "$dist" && find . -type f ! -path './pkg/*' ! -path './release/*' | sort | tr '\n' ' ')
-    if [[ $strays == "./app.js ./index.html ./preview.js ./release-fetch.js ./style.css ./write-walk.js " ]]; then ok "the write preview is the page's files and its own three, with none of its tests"
+    if [[ $strays == "./app.js ./index.html ./preview.js ./release-fetch.js ./slot-probe.js ./style.css ./write-walk.js " ]]; then ok "the write preview is the page's files and its own four, with none of its tests"
     else bad "the write preview holds other files than the page's and its own" "$strays"; fi
     if grep -qF 'this build can write to a phone' "$dist/index.html" && grep -qF 'It has never been run against a real phone' "$dist/index.html" &&
       ! grep -qF 'cannot write to a phone' "$dist/index.html"; then
@@ -535,7 +546,11 @@ const has = ["request_phone", "web_write_preview", "LinkPreview"].every((n) => n
   makers.includes("begin_write_preview") &&
   ["confirm_install", "images_check_boot", "images_root_begin", "images_root_update", "images_root_done",
     "session_open", "session_boot", "session_root_feed", "session_finish", "session_abandon"].every((n) => steps.includes(n));
-const extra = [...names, ...steps, ...makers, ...linkSteps].filter((n) => /fake|selftest|pretend|slot|override|maintainer|unlock|command|partition|token/i.test(n));
+// The other-slot measurement's steps, by name, are the one thing of a slot
+// it may name: they take an answer of the core's, a phone or what the page
+// saw of a restart (docs/DESIGN.md §6)
+const probe = ["slot_probe_answer", "slot_probe_step", "slot_probe_restart_seen", "slot_probe_kept", "slot_probe_done", "slot_probe_record"];
+const extra = [...names, ...steps, ...makers, ...linkSteps].filter((n) => !probe.includes(n)).filter((n) => /fake|selftest|pretend|slot|override|maintainer|unlock|command|partition|token/i.test(n));
 // The one call: a sentence, made of nothing but the module's own words
 const says = glue.web_write_preview();
 console.log(JSON.stringify({ has, extra, says }));

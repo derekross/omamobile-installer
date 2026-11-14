@@ -70,15 +70,15 @@ export function holdsTheAnswers(assert, userdata, raw) {
 // page takes it to the step named: "phone" (the warning accepted), "dry-run"
 // (looked at, factory image and answers in), "confirm" (the dry run walked)
 // or "write" (the codename typed).
-export async function begin(until = "dry-run", { phone = new FakePhone(), reinstall = false } = {}) {
+export async function begin(until = "dry-run", { phone = new FakePhone(), reinstall = false, probe = false, record = undefined } = {}) {
   usb.phone = phone;
-  const flow = core.InstallFlow.selftest_write_preview(reinstall);
+  const flow = core.InstallFlow.selftest_write_preview(reinstall, probe, record);
   const run = { flow, phone, picked: null, files: null };
   flow.acknowledge_warning();
   if (until === "phone") return run;
   run.picked = await core.request_phone();
   await flow.read_phone(run.picked.again());
-  if (screen(flow).state !== "factory-image") return run;
+  if (until === "phone-looked" || screen(flow).state !== "factory-image") return run;
   const zip = core.selftest_factory_zip();
   flow.zip_begin(screen(flow).file.name, zip.length);
   flow.zip_update(zip);
@@ -111,8 +111,10 @@ export function nth(log, from, starts, n = 0) {
 }
 
 // Everything this installer may put on the wire, as the core's gate has it
-// (core/src/fastboot.rs, `allowed`), written out again here on its own
+// (core/src/fastboot.rs, `allowed`), written out again here on its own; the
+// other-slot measurement's three (SLOT_PROBE_COMMANDS) apart, as PROBE
 export const GATE = /^(getvar:[\x20-\x7e]+|flashing get_unlock_ability|download:[0-9a-f]{8}|flash:(boot_b|init_boot_b|vendor_boot_b|vendor_kernel_boot_b|dtbo_b|userdata)|set_active:b|reboot)$/;
+export const PROBE = /^(set_active:a|set_active:b|reboot-bootloader)$/;
 export const READS = /^(getvar:[\x20-\x7e]+|flashing get_unlock_ability)$/;
 
 // The `setTimeout` the module finds, replaced by one the test fires by hand,

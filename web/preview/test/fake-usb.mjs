@@ -116,6 +116,17 @@ export class FakePhone {
     this.silentAt = null; // command N is carried out; its answer never comes, and the device stays
     this.vanishInData = null; // the cable is pulled once this many bytes of a download arrived
     this.unplugged = false;
+    // The two slots, for a phone that tells the running bootloader's version
+    // only (firstInstall): each slot's version, the one that runs, whether
+    // current-slot follows set_active at once (as in the other tests), and
+    // what reboot-bootloader does ("normal", "never-leaves", "boots-os-on-b")
+    this.slotVersions = null;
+    this.running = "a";
+    this.followsFlag = true;
+    this.restart = "normal";
+    this.away = false;
+    this.restarts = 0;
+    this.bus = null; // the pretend navigator.usb it is on, for its events
     // Protocol state
     this.staged = null;
     this.expecting = 0;
@@ -124,6 +135,61 @@ export class FakePhone {
     this.replies = [];
     // The USB side
     this.usb = new FakeUsbDevice(this);
+  }
+
+  // A Pixel 7 Pro from stock Android ("first-install" in the Rust pretend
+  // phone): on slot a, telling the running bootloader's version only, with
+  // slot b's bootloader at `slotB` and the flags of a slot b never started
+  firstInstall(slotB = "fake-1.0") {
+    this.vars.delete("version-bootloader-a");
+    this.vars.delete("version-bootloader-b");
+    this.slotVersions = { a: "fake-1.0", b: slotB };
+    this.followsFlag = false;
+    for (const [k, v] of [
+      ["slot-successful:a", "yes"],
+      ["slot-unbootable:a", "no"],
+      ["slot-retry-count:a", "3"],
+      ["slot-successful:b", "no"],
+      ["slot-unbootable:b", "yes"],
+      ["slot-retry-count:b", "0"],
+    ])
+      this.vars.set(k, v);
+    return this;
+  }
+
+  // A restart into the bootloader: the device leaves the bus, and comes
+  // back as a new device running the active slot's bootloader, each as the
+  // browser's event; or, booting an OS, it does not come back
+  restartIntoBootloader() {
+    this.restarts += 1;
+    if (this.restart === "never-leaves") return;
+    setTimeout(() => {
+      this.away = true;
+      const old = this.usb;
+      for (const { reject } of old.pendingIn.splice(0)) reject(gone());
+      this.bus?.emit("disconnect", old);
+      if (this.restart === "boots-os-on-b" && this.activeSlot === "b") return;
+      setTimeout(() => this.comeBack(), 3);
+    }, 1);
+  }
+
+  comeBack() {
+    this.away = false;
+    this.replies = [];
+    this.staged = null;
+    this.expecting = 0;
+    this.running = this.activeSlot;
+    this.vars.set("current-slot", this.running);
+    if (this.slotVersions) this.vars.set("version-bootloader", this.slotVersions[this.running]);
+    this.usb = new FakeUsbDevice(this);
+    this.bus?.emit("connect", this.usb);
+  }
+
+  // The owner brings the phone to Fastboot Mode with its buttons
+  ownerButtons() {
+    this.replug();
+    this.comeBack();
+    return this;
   }
 
   // The owner plugs the cable back in, with the phone still in Fastboot Mode
@@ -202,9 +268,21 @@ export class FakePhone {
         this.reply("OKAY");
       }
     } else if (cmd.startsWith("set_active:")) {
-      this.activeSlot = cmd.slice(11);
-      this.vars.set("current-slot", this.activeSlot);
+      const slot = cmd.slice(11);
+      if (slot !== "a" && slot !== "b") return this.reply("FAIL", "no such slot");
+      this.activeSlot = slot;
+      if (this.followsFlag) this.vars.set("current-slot", this.activeSlot);
+      // As the Rust pretend phone: the slot made active loses its
+      // successful mark and gets tries
+      if (this.vars.has(`slot-successful:${slot}`)) {
+        this.vars.set(`slot-successful:${slot}`, "no");
+        this.vars.set(`slot-unbootable:${slot}`, "no");
+        this.vars.set(`slot-retry-count:${slot}`, "7");
+      }
       this.reply("OKAY");
+    } else if (cmd === "reboot-bootloader") {
+      this.reply("OKAY");
+      this.restartIntoBootloader();
     } else if (cmd === "reboot") {
       this.rebooted = true;
       this.reply("OKAY");
@@ -220,7 +298,7 @@ export class FakePhone {
   // Bytes on the OUT endpoint. Returns how many were taken, or throws when
   // the phone is no longer on the bus.
   out(data) {
-    if (this.rebooted || this.unplugged) throw gone();
+    if (this.rebooted || this.unplugged || this.away) throw gone();
     if (this.expecting === 0 && this.unplugAt !== null && this.log.length >= this.unplugAt) {
       this.unplugged = true;
       throw gone();
@@ -332,6 +410,12 @@ class FakeUsbDevice {
   note(method, detail = {}) {
     this.calls.push({ method, ...detail });
   }
+  // A device object the browser gave before the phone restarted: after a
+  // restart the phone is a new device (first-install phones only, which
+  // restart)
+  stale() {
+    return this.phone.slotVersions !== null && this.phone.usb !== this;
+  }
   // The calls of one kind, or the names of all that were made
   made(method) {
     return method ? this.calls.filter((c) => c.method === method) : [...new Set(this.calls.map((c) => c.method))];
@@ -339,7 +423,7 @@ class FakeUsbDevice {
 
   async open() {
     this.note("open");
-    if (this.phone.unplugged || this.phone.rebooted) throw gone();
+    if (this.phone.unplugged || this.phone.rebooted || this.stale()) throw gone();
     this.opened = true;
   }
   async close() {
@@ -390,7 +474,7 @@ class FakeUsbDevice {
   async transferIn(endpoint, length) {
     this.note("transferIn", { endpoint, length });
     this.ready(endpoint, EP_IN);
-    if (this.phone.unplugged) throw gone();
+    if (this.phone.unplugged || this.phone.away || this.stale()) throw gone();
     const reply = this.phone.replies.shift();
     if (!reply) {
       // Nothing to say: the request stays pending, as on a real bus, until
@@ -437,11 +521,25 @@ class FakeUsbDevice {
 
 // `navigator.usb`, with a chooser in which the pretend owner picks `phone`
 // (or closes it, when there is none). Every request is recorded.
-export class FakeUsb {
+export class FakeUsb extends EventTarget {
   constructor() {
-    this.phone = null;
+    super();
+    this.current = null;
     this.requests = [];
     this.listed = 0;
+  }
+  get phone() {
+    return this.current;
+  }
+  set phone(phone) {
+    this.current = phone;
+    if (phone) phone.bus = this;
+  }
+  // The browser's event for a device of the page's that left or came back
+  emit(kind, device) {
+    const event = new Event(kind);
+    event.device = device;
+    this.dispatchEvent(event);
   }
   async requestDevice(options) {
     // As a browser would see it: plain data

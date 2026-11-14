@@ -25,8 +25,13 @@
 //!   as it came, so the screen says how far the phone confirmed the writes.
 //!   The page cannot forget to: it is done here, not in its script.
 //! - **Not the owner's statement.** A phone that tells one bootloader
-//!   slot's version stops this flow as it stops every flow of the page; the
-//!   statement that passes that stop is the command line's (DESIGN §6).
+//!   slot's version is never passed on anyone's word here; the statement
+//!   that passes that stop is the command line's (DESIGN §6). Where the
+//!   release allows it, the core measures the other slot instead, with the
+//!   owner's answer: this file runs the core's measurement, hands it each
+//!   phone the browser hands the page again after a restart, and says what
+//!   the page saw of the restart (`slot_probe_*`); the commands and every
+//!   decision are the core's.
 //!
 //! Every file is checked before a session is opened: each boot image
 //! against the signed manifest and the root image's SHA-256. The page does
@@ -38,8 +43,9 @@
 use super::{js, AnyTransport, InstallFlow, Phone};
 use omamobile_installer_core::bundle::{RootImageCheck, VerifiedRootImage};
 use omamobile_installer_core::fastboot::{PieceReport, Session};
-use omamobile_installer_core::flow::{Flow, FlowOptions, Step};
+use omamobile_installer_core::flow::{Flow, FlowOptions, ProbeAnswer, Step};
 use omamobile_installer_core::install::{UserdataFeed, SEGMENT_CAP};
+use omamobile_installer_core::slot_probe::{ProbeNext, Restart, SlotProbe};
 use omamobile_installer_core::Error;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
@@ -83,13 +89,66 @@ pub(crate) struct Preview {
     /// The root image's proof: its SHA-256 was the signed manifest's.
     root: Option<VerifiedRootImage>,
     open: Option<Open>,
+    /// The other-slot measurement the flow gave, while the page runs it,
+    /// and how many of its lines the page was given.
+    probe: Option<SlotProbe>,
+    probe_said: usize,
 }
 
-/// As the page ships it, but for the one thing this build is for.
-fn write_options(reinstall: bool) -> FlowOptions {
+/// As the page ships it, but for the one thing this build is for, and the
+/// other-slot measurement's restarts, which the page can watch (WebUSB's
+/// `disconnect` and `connect` events for the device the person picked).
+fn write_options(reinstall: bool, slot_probe_record: Option<String>) -> FlowOptions {
     let mut options = super::page_options(reinstall);
     options.write = true;
+    options.can_probe_slots = true;
+    options.slot_probe_record = slot_probe_record;
     options
+}
+
+/// A transport to no phone, for a stretch of the measurement the page has
+/// no phone for: every command fails, and the core ends it as a lost link.
+struct NoPhone;
+
+impl omamobile_installer_core::fastboot::Transport for NoPhone {
+    async fn send(&mut self, _: &[u8]) -> omamobile_installer_core::Result<usize> {
+        Err(Error::Transport(
+            "the page has no phone for this step".into(),
+        ))
+    }
+    async fn recv(&mut self) -> omamobile_installer_core::Result<Vec<u8>> {
+        Err(Error::Transport(
+            "the page has no phone for this step".into(),
+        ))
+    }
+}
+
+#[wasm_bindgen]
+impl Phone {
+    /// The serial number the browser reported for the device, so that the
+    /// page knows it again when it comes back after a restart. It stays in
+    /// the page; the core pins the phone by what it answers.
+    pub fn serial_number(&self) -> String {
+        self.serial.clone()
+    }
+}
+
+/// The device the browser handed the page again, after a restart, for a
+/// phone the person picked before (a `connect` event's `device`): the core
+/// pins it again by the serial number it answers before it is told
+/// anything.
+#[wasm_bindgen]
+pub fn phone_of_device(device: JsValue) -> Result<Phone, JsError> {
+    use wasm_bindgen::JsCast;
+    if !device.is_object() {
+        return Err(JsError::new("not a USB device"));
+    }
+    let device: web_sys::UsbDevice = device.unchecked_into();
+    let serial = device.serial_number().unwrap_or_default();
+    Ok(Phone {
+        link: super::Link::WebUsb(device),
+        serial,
+    })
 }
 
 fn no_session() -> JsError {
@@ -113,6 +172,7 @@ impl InstallFlow {
         device_conf: &[u8],
         index: Option<Vec<u8>>,
         reinstall: bool,
+        slot_probe_record: Option<String>,
     ) -> InstallFlow {
         let files = omamobile_installer_core::bundle::ReleaseFiles {
             sha256sums,
@@ -127,7 +187,7 @@ impl InstallFlow {
                 &files,
                 index.as_deref(),
                 &omamobile_installer_core::signature::TrustedKeys::omamobile(),
-                write_options(reinstall),
+                write_options(reinstall, slot_probe_record),
             ),
             check: None,
             download: None,
@@ -139,8 +199,17 @@ impl InstallFlow {
 
     /// The same on the signed test bundle, trusted by its test key: for
     /// the preview's tests, in a build that also has the self-test.
+    /// `probe`: the test bundle whose descriptor allows the other-slot
+    /// measurement (fixtures/selftest-probe), with what an earlier run kept.
     #[cfg(feature = "selftest")]
-    pub fn selftest_write_preview(reinstall: bool) -> Result<InstallFlow, JsError> {
+    pub fn selftest_write_preview(
+        reinstall: bool,
+        probe: bool,
+        slot_probe_record: Option<String>,
+    ) -> Result<InstallFlow, JsError> {
+        if probe {
+            return Self::selftest_probe(reinstall, slot_probe_record);
+        }
         let files = omamobile_installer_core::bundle::ReleaseFiles {
             sha256sums: fx!("SHA256SUMS"),
             sha256sums_sig: fx!("SHA256SUMS.sig"),
@@ -160,7 +229,7 @@ impl InstallFlow {
                 &files,
                 Some(fx!("factory-builds.json")),
                 &trusted,
-                write_options(reinstall),
+                write_options(reinstall, None),
             ),
             check: None,
             download: None,
@@ -168,6 +237,119 @@ impl InstallFlow {
             built_in: false,
             preview: Preview::default(),
         })
+    }
+
+    // ---- The other bootloader slot (DESIGN §6) ----------------------------
+
+    /// The owner's answer on the question whether to measure the other
+    /// bootloader slot, or to put slot A back: one of the screen's
+    /// `choices`, by its `answer`. `true`: the core's measurement is under
+    /// way, and the page runs it with [`Self::slot_probe_step`]. Nothing is
+    /// sent to the phone here.
+    pub fn slot_probe_answer(&mut self, answer: &str) -> Result<bool, JsError> {
+        let offered = self
+            .flow
+            .screen()
+            .choices
+            .iter()
+            .any(|c| c.answer == answer);
+        let answer = ProbeAnswer::from_answer(answer)
+            .filter(|_| offered)
+            .ok_or_else(|| JsError::new("not one of the screen's answers"))?;
+        let probe = self.flow.slot_probe(answer).map_err(js)?;
+        self.preview.probe_said = 0;
+        let running = probe.is_some();
+        self.preview.probe = probe;
+        Ok(running)
+    }
+
+    /// The next stretch of the measurement on `phone` (the one the person
+    /// picked, or the one the browser handed back after a restart; none if
+    /// the page has none, and the core ends the measurement as a lost link).
+    /// JSON: `next` (`restart` or `finished`), for a restart `into`,
+    /// `leave_within` and `back_within` (seconds) and `note`, and `lines`,
+    /// what the measurement sent and read since the last call.
+    pub async fn slot_probe_step(&mut self, phone: Option<Phone>) -> Result<String, JsError> {
+        let mut probe = self
+            .preview
+            .probe
+            .take()
+            .ok_or_else(|| JsError::new("no measurement is under way"))?;
+        let next = match phone {
+            Some(phone) => match phone.open().await {
+                Ok(mut transport) => probe.step(&mut transport).await,
+                Err(_) => probe.step(&mut NoPhone).await,
+            },
+            None => probe.step(&mut NoPhone).await,
+        };
+        let lines: Vec<String> = probe.log()[self.preview.probe_said..].to_vec();
+        self.preview.probe_said = probe.log().len();
+        self.preview.probe = Some(probe);
+        Ok(match next {
+            ProbeNext::Finished => json!({"next": "finished", "lines": lines}),
+            ProbeNext::Restart {
+                into,
+                leave_within,
+                back_within,
+                note,
+            } => json!({
+                "next": "restart",
+                "into": into.to_string(),
+                "leave_within": leave_within,
+                "back_within": back_within,
+                "note": note,
+                "lines": lines,
+            }),
+        }
+        .to_string())
+    }
+
+    /// What the page saw of the restart it was asked for:
+    /// `left-and-back`, `never-left` or `not-back`.
+    pub fn slot_probe_restart_seen(&mut self, seen: &str) -> Result<(), JsError> {
+        let seen = match seen {
+            "left-and-back" => Restart::LeftAndBack,
+            "never-left" => Restart::NeverLeft,
+            "not-back" => Restart::NotBack,
+            _ => return Err(JsError::new("left-and-back, never-left or not-back")),
+        };
+        let probe = self
+            .preview
+            .probe
+            .as_mut()
+            .ok_or_else(|| JsError::new("no measurement is under way"))?;
+        probe.restart_seen(seen).map_err(js)
+    }
+
+    /// What to keep for the next run now, while the measurement runs
+    /// (`undefined`: nothing, delete what was kept).
+    pub fn slot_probe_kept(&self) -> Option<String> {
+        self.preview
+            .probe
+            .as_ref()
+            .and_then(SlotProbe::record)
+            .map(|r| r.to_text())
+    }
+
+    /// The measurement has finished: back to the flow, whose screen says
+    /// what comes next.
+    pub fn slot_probe_done(&mut self) -> Result<(), JsError> {
+        let probe = self
+            .preview
+            .probe
+            .take()
+            .ok_or_else(|| JsError::new("no measurement is under way"))?;
+        if !probe.is_finished() {
+            self.preview.probe = Some(probe);
+            return Err(JsError::new("the measurement has not finished"));
+        }
+        self.flow.slot_probe_done(probe).map_err(js)
+    }
+
+    /// What to keep for the next run once it is over (`undefined`: delete
+    /// what was kept).
+    pub fn slot_probe_record(&self) -> Option<String> {
+        self.flow.slot_probe_record().map(|r| r.to_text())
     }
 
     /// The owner's answer to the list of what will be written: what they
@@ -418,5 +600,49 @@ impl InstallFlow {
                 Ok(false)
             }
         }
+    }
+}
+
+#[cfg(feature = "selftest")]
+macro_rules! fxp {
+    ($name:literal) => {
+        include_bytes!(concat!("../../fixtures/selftest-probe/", $name)).as_slice()
+    };
+}
+
+#[cfg(feature = "selftest")]
+impl InstallFlow {
+    /// The signed test bundle whose descriptor says
+    /// `BOOTLOADER_SLOT_PROBE=yes`, for the measurement's tests.
+    fn selftest_probe(
+        reinstall: bool,
+        slot_probe_record: Option<String>,
+    ) -> Result<InstallFlow, JsError> {
+        let files = omamobile_installer_core::bundle::ReleaseFiles {
+            sha256sums: fxp!("SHA256SUMS"),
+            sha256sums_sig: fxp!("SHA256SUMS.sig"),
+            keyring: fxp!("test-key.gpg"),
+            manifest_json: fxp!("manifest.json"),
+            manifest_txt: fxp!("MANIFEST"),
+            device_conf: fxp!("device.conf"),
+        };
+        let trusted =
+            omamobile_installer_core::signature::TrustedKeys::new(&[core::str::from_utf8(fxp!(
+                "test-key.fingerprint"
+            ))
+            .map_err(js)?])
+            .map_err(js)?;
+        Ok(InstallFlow {
+            flow: Flow::begin(
+                &files,
+                Some(fxp!("factory-builds.json")),
+                &trusted,
+                write_options(reinstall, slot_probe_record),
+            ),
+            check: None,
+            download: None,
+            built_in: false,
+            preview: Preview::default(),
+        })
     }
 }
