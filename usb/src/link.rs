@@ -105,9 +105,21 @@ impl UsbLink {
             .claim_interface(number)
             .wait()
             .map_err(usb("claiming the install link's interface"))?;
-        let ep_out = interface
+        let mut ep_out = interface
             .endpoint::<Bulk, Out>(out)
             .map_err(usb("opening the OUT endpoint"))?;
+        // A zero-length packet before anything else (linkd's LINKD.md E16):
+        // an installer killed in the middle of an OUT transfer leaves the
+        // packets it sent in the phone's pending read, which has had no
+        // short packet yet, and our first `hello` would complete that read
+        // glued to the dead run's part of a frame and be lost. The ZLP ends
+        // that read by itself; with nothing left over it is a read of
+        // nothing, which the phone passes over. Seen at full speed in L3.
+        ep_out.submit(Vec::<u8>::new().into());
+        if ep_out.wait_next_complete(Duration::from_secs(2)).is_none() {
+            ep_out.cancel_all();
+            let _ = ep_out.wait_next_complete(Duration::from_secs(2));
+        }
         let mut ep_in = interface
             .endpoint::<Bulk, In>(inp)
             .map_err(usb("opening the IN endpoint"))?;
