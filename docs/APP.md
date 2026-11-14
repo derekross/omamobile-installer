@@ -42,7 +42,7 @@ The app starts the tool as a child process and talks to it over the child's stan
 
 ## 3. The protocol
 
-Protocol number **5**. (Number 4 was two protocols, on two branches that were merged into this one: the one with the steps after the write and the one with the install link; 5 is both. Number 3 was the same protocol without either: no action `after` and no message of that type, the last screen of a write named no action; no `link` on the `installed` screen, none of the link's states, screens whose action is `wait`, the actions `link`, `pair`, `backup-dir` and `retry`, `start` with `link`, the three optional fields of `answers`, or the `pretend` message of a pretend build (§3.9). Number 2 was the same protocol without the question of what slot B holds: no `choices` in the screen, no `slot-b` action and message; a phone on slot B in a run not said to be a reinstall stopped at `runs-from-slot-b`. Number 1 was 2 without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. Sides that speak different numbers refuse each other, §3.2.)
+Protocol number **6**. (Number 5 was the same protocol without the measurement of the other bootloader slot: no `slot-probe` action and message, none of its three states, no `probe` message, and `start` in a run that writes did not tell the flow that this mode can carry out the measurement's restarts (§3.10). Number 4 was two protocols, on two branches that were merged into this one: the one with the steps after the write and the one with the install link; 5 is both. Number 3 was the same protocol without either: no action `after` and no message of that type, the last screen of a write named no action; no `link` on the `installed` screen, none of the link's states, screens whose action is `wait`, the actions `link`, `pair`, `backup-dir` and `retry`, `start` with `link`, the three optional fields of `answers`, or the `pretend` message of a pretend build (§3.9). Number 2 was the same protocol without the question of what slot B holds: no `choices` in the screen, no `slot-b` action and message; a phone on slot B in a run not said to be a reinstall stopped at `runs-from-slot-b`. Number 1 was 2 without a write: no `--write`, no `writes` in the tool's hello, no `confirm` and `write`, no `sent`, `piece` and `account`. Sides that speak different numbers refuse each other, §3.2.)
 
 ### 3.1 Framing
 
@@ -82,6 +82,7 @@ tool -> app   {"type":"screen","screen":{...}}
 | `problems` | `problems`: `[{"field": text, "message": text}]` | The core's objections to the owner's answers, as `AnswerProblem` serialises: `field` is `username`, `password`, `hostname`, `timezone`, `wifi_ssid` or `wifi_psk`. The flow stays at `answers` |
 | `sent` | `command` (text) | Only during `write`: a command that is not a question was sent by the session that writes, as the phone received it (`download:00004000`, `flash:boot_b`, `set_active:b`, `reboot`). The pieces of `userdata` are not said this way but as `piece` |
 | `piece` | `number` (number, from 1), `blocks` (number), `bytes` (number), `seconds` (number, or null when the phone did not answer), `line` (text) | Only during `write`: one piece of `userdata` was sent. `blocks` is what its flash covered on the phone, `bytes` what was sent, `seconds` how long the phone took to answer. `line` is the same in the words the terminal prints (`flash:userdata (piece 1: … blocks, … KiB written on the phone, … bytes sent, answered in … s)`) |
+| `probe` | `line` (text) | Only during `slot-probe` (§3.10): one line of the other-slot measurement: a command it sent (`set_active:b`, `reboot-bootloader`, …), a reading of the slots, or a restart the tool saw |
 | `account` | `lines`: `[text]` | Only during `write`, at most once, when `userdata` is over or the write stopped inside it: the piece that covered the most blocks, the flash the phone took longest over, and a piece that was sent and not confirmed (DESIGN §11, "How much one flash asks of the phone"). The lines the runbook reads |
 | `error` | `message` (text) | What was sent did not go through and the flow did not move for it: a file that is not there, a phone that stopped answering, an action the screen does not name, a message of a type the tool does not know, a line that is not a JSON object. The tool's words, shown as they are. It repeats nothing of what was sent but the message's type and a phone's id |
 | `fatal` | `message` (text) | The tool itself failed and is about to exit with a status other than 0: an argument it does not take (the one `fatal` that comes before `hello`), another protocol number, a release that can't be read, a bug (a panic is caught and said this way) |
@@ -136,6 +137,7 @@ One message per action that `Screen.action` names. The app sends an action only 
 | --- | --- | --- |
 | `acknowledge` | `{"type":"acknowledge"}` | `acknowledge_warning` |
 | `acknowledge` | `{"type":"decline"}` | `decline_warning` |
+| `slot-probe` | `{"type":"slot-probe","answer":"<answer>"}`, the `answer` of one of the screen's `choices`: `measure` or `stop` on `slot-probe`, `put-back` or `stop` on `slot-probe-put-back` | `slot_probe`; for `measure` or `put-back` the tool then runs the core's measurement to its end, watching the restarts on USB by the phone's serial number, saying each line as `probe`, keeping its record in the work directory after every step, and hands it back (`slot_probe_done`): the next screen is the flow's. A missing answer, or one the screen does not offer: `error`, and the question stays. Only in a run started with `--write` (§3.10) |
 | `slot-b` | `{"type":"slot-b","answer":"<answer>"}`, the `answer` of one of the screen's `choices`: `omarchy-mobile`, `android` or `not-sure` | `answer_slot_b`: Omarchy Mobile makes the run a reinstall and the flow goes on from the look at the phone, with no new question sent to it; the other two end in the core's stop `runs-from-slot-b`. A missing or unknown `answer`: `error`, and the question stays |
 | `read-phone` | `{"type":"read-phone"}` or `{"type":"read-phone","phone":"<id>"}` | No phone in Fastboot Mode: `no_phone`. One, or the one chosen: `read_phone`. Several and none chosen: the phone the flow looked at before, if it is among them; otherwise a `phones` message, and the flow is not touched. An `id` no `phones` message of this run gave, or a phone that is gone: `error` |
 | `accept-terms` | `{"type":"accept-terms"}` | `accept_google_terms(now)`, by the tool's clock: the app sends no time |
@@ -158,7 +160,7 @@ The fields of `answers` are those of `AnswersInput` in `core/src/flow.rs` today.
 
 ### 3.5 What answers what
 
-**Every action ends with exactly one `screen`**: the flow's screen after the action, changed or not. Before it the tool may send any number of `progress` messages, and at most one of `phones`, `problems` or `error`; a `write` also any number of `sent` and `piece`, and at most one `account`. From sending an action until that screen the app is busy: it shows what is running, offers no other action (but cancelling a download), and asks before it quits.
+**Every action ends with exactly one `screen`**: the flow's screen after the action, changed or not. Before it the tool may send any number of `progress` messages, and at most one of `phones`, `problems` or `error`; a `write` also any number of `sent` and `piece`, and at most one `account`; a `slot-probe` also any number of `probe`. From sending an action until that screen the app is busy: it shows what is running, offers no other action (but cancelling a download), and asks before it quits.
 
 So a refused file is `screen` (the same step, with the core's `problem`); refused answers are `problems`, then `screen`; a file that is not there is `error`, then `screen`.
 
@@ -293,6 +295,18 @@ For a release whose `manifest.json` says `install_link` (Omarchy Mobile's INSTAL
 **`start` with `"link": true`** goes on from the record a run before this one kept in the work directory (`--work-dir`, or the user's cache directory): `link/record.json`, mode 600, holding the serial the write pinned (for the serial proof: it never crosses the link), the session token, the factory image's path and the backup folder. It needs `--release DIR` too. The record holds no answer and no password hash; the answers are asked again if the phone has none yet.
 
 **A pretend build** (`fake-phone`) says `{"type":"pretend","shows":"<code>"}` before a screen that asks for the code: what its pretend phone's screen shows, for the tests and the recorded pictures. A build that ships never says it.
+
+### 3.10 The other bootloader slot (protocol 6)
+
+For a release whose descriptor says `BOOTLOADER_SLOT_PROBE=yes`, a first install of a phone that tells one bootloader copy's version is asked whether the installer may measure the other copy (DESIGN §6, "Measuring the other slot"). This mode offers it only in a run started with `--write`: `start` then sets `FlowOptions::can_probe_slots`, and the record an earlier run left in the work directory (`slot-probe`) as `slot_probe_record`. A run without `--write` is a dry run, and a dry run never measures.
+
+| State | What it is | Action |
+| --- | --- | --- |
+| `slot-probe` | The question: what the measurement does, the two restarts, that nothing is written to the phone's partitions, the risk and the way back. `choices`: `measure`, `stop` | `slot-probe` |
+| `slot-probe-put-back` | An earlier run's measurement on this phone may have left slot B active: put slot A back first. `choices`: `put-back`, `stop` | `slot-probe` |
+| `slot-probe-running` | Never sent: the tool runs the measurement inside the `slot-probe` action, and the next screen is the one after it | (none) |
+
+While it runs the tool sends `{"type":"probe","line":"<text>"}` for each command the measurement sent, each reading of the slots, and each restart it saw, in the core's words and the tool's; then exactly one `screen`. The measurement is not cut off by `quit` or by a cancel: each restart is bounded by the core's limits (15 seconds to leave the bus, 90 to come back), and stopping between two of them would leave slot B active with no record of why. The app shows the `probe` lines in its box of what was sent to the phone, and the question's `choices` as buttons, as for `slot-b`.
 
 ## 4. The window
 

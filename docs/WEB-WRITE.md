@@ -36,7 +36,10 @@ Both `.rs` files are compiled only with the feature. Both scripts, and the previ
 
 | The page calls | The module does | The core's part |
 | --- | --- | --- |
-| `InstallFlow.begin_write_preview(release files, index, reinstall)` | begins a flow with the page's options and `write` on | `Flow::begin`: verifies, refuses a release for another phone than `WRITE_DEVICES` |
+| `InstallFlow.begin_write_preview(release files, index, reinstall, slot_probe_record)` | begins a flow with the page's options, `write` on, the measurement's restarts possible (`can_probe_slots`), and what an earlier run's measurement kept in this browser | `Flow::begin`: verifies, refuses a release for another phone than `WRITE_DEVICES` |
+| `slot_probe_answer(answer)` | one of the screen's `choices` on `slot-probe` or `slot-probe-put-back`; `true` when the core's measurement is under way | `Flow::slot_probe` |
+| `slot_probe_step(phone)`, `slot_probe_restart_seen(seen)` | one stretch of the measurement on the phone (the one picked, or the one the browser handed back after a restart, `phone_of_device`), and what the page saw of a restart (`left-and-back`, `never-left`, `not-back`) | `SlotProbe::step`, `SlotProbe::restart_seen`: every command and every decision |
+| `slot_probe_kept()`, `slot_probe_done()`, `slot_probe_record()` | what to keep in `localStorage` while it runs and after; the measurement back to the flow | `SlotProbe::record`, `Flow::slot_probe_done`, `Flow::slot_probe_record` |
 | `images_check_boot(n, bytes)`, `images_root_begin/update/done` | checks every file of the release against the signed manifest, before any session | `verify_boot_image`, `RootImageCheck` |
 | `session_open(phone)` | refuses unless every file was checked; then asks the flow for the session of the step it is on | `Flow::dry_run` or, once the codename was typed, `Flow::begin_write` |
 | `session_boot(n, bytes)` | checks the image again, hands it to the session | `Session::flash_boot` |
@@ -45,6 +48,8 @@ Both `.rs` files are compiled only with the feature. Both scripts, and the previ
 | `confirm_install(typed)` | passes on what was typed, unchanged | compares it with the codename, or stops |
 | `session_abandon(why)` | a file could not be read any more: the session goes back to the flow as failed | `write_failed` or `dry_run_failed` |
 | `session_progress()` | the pieces so far: bytes, blocks, how long each flash took | `Session::pieces` |
+
+**The other bootloader slot** (DESIGN §6, "Measuring the other slot"). For a release that allows it, the core asks on a first install whether it may measure the phone's other bootloader slot. The preview draws the core's answers as buttons and runs the measurement with `web/preview/slot-probe.js`: before each stretch it arms a watch on `navigator.usb`'s `disconnect` and `connect` events for the serial number the browser gave when the person picked the phone (a browser fires them only for a device the page was allowed to use), and after a restart it waits within the core's limits for a `disconnect` and then a `connect`, and hands the core the device that came back. The page lists no devices (`getDevices` is not called) and needs no click between the restarts. Nothing of this is in the page that ships. Not known until a real browser and phone: whether Chromium hands the page the same device's `connect` after a restart into the bootloader without a new permission, which the preview needs; if it does not, the page has no phone for the next stretch and the core ends the measurement as a lost link, with slot B possibly active and the record kept.
 
 When the session returns an error, the module hands the session back to the flow at once (`write_failed`, with the error as it came) and answers `false`. The page's script cannot forget to: it is not its job. The next screen is the flow's stop, which says how far the phone confirmed the writes.
 
