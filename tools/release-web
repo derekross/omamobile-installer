@@ -1,0 +1,60 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# The web page as it ships, packed for a release: web/dist (web/build.sh,
+# no argument) as omamobile-installer-web-TAG.tar.gz, after
+# tools/check-shipping has read it as built. This is the file the website
+# (derekross/omamobile-website, installer-web.env) pins by SHA-256 and
+# serves at omamobile.org/install/web/app/.
+#
+#   tools/release-web TAG OUTDIR      TAG: vX.Y.Z
+#
+# The archive holds one folder, named as the file, with plain files and
+# directories only. It is packed reproducibly (sorted names, the commit's
+# time, owner 0, gzip without a name or time), so the same web/dist always
+# gives the same bytes. Needs what web/build.sh needs (the toolchain of
+# rust-toolchain.toml with wasm32, wasm-bindgen-cli at Cargo.lock's
+# version) and node for check-shipping.
+set -euo pipefail
+tag=${1:-} out=${2:-}
+[[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n $out ]] || { echo "usage: tools/release-web vX.Y.Z OUTDIR" >&2; exit 2; }
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+
+# The module's panic messages name the source files they come from. Name
+# them from fixed roots, not from this computer's home and checkout, so the
+# file holds no local path and the same commit gives the same bytes on any
+# machine with the same toolchain. This replaces .cargo/config.toml's
+# rustflags for wasm32, so its one flag is repeated here.
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="--cfg=web_sys_unstable_apis --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$root=/src"
+grep -qx 'rustflags = \["--cfg=web_sys_unstable_apis"\]' .cargo/config.toml \
+  || { echo ".cargo/config.toml's wasm32 rustflags changed: change them here too" >&2; exit 1; }
+
+# The shipping tool too: check-shipping --built reads both
+cargo build --release --locked -p omamobile-installer-cli
+web/build.sh
+tools/check-shipping --built
+
+name=omamobile-installer-web-$tag
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+cp -R web/dist "$stage/$name"
+# What the website's deploy refuses, refused here first
+if find "$stage/$name" -name '.*' -print -quit | grep -q .; then
+  echo "web/dist holds a dotfile" >&2; exit 1
+fi
+if find "$stage/$name" ! -type f ! -type d -print -quit | grep -q .; then
+  echo "web/dist holds something other than files and directories" >&2; exit 1
+fi
+grep -q 'cannot write to a phone' "$stage/$name/index.html"
+if grep -qaF -- "$HOME" "$stage/$name/pkg/omamobile_installer_web_bg.wasm"; then
+  echo "the module names this computer's home directory" >&2; exit 1
+fi
+! grep -q fake_phone "$stage/$name/pkg/omamobile_installer_web.js"
+
+mkdir -p "$out"
+epoch=$(git log -1 --format=%ct)
+tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+  --mode='u+rwX,go+rX,go-w' --format=gnu -C "$stage" -c "$name" | gzip -9n >"$out/$name.tar.gz"
+echo "$out/$name.tar.gz"
+sha256sum "$out/$name.tar.gz"

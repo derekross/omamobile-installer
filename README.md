@@ -12,6 +12,9 @@ The installer for [Omarchy Mobile](https://github.com/derekross/omarchy-mobile):
 - [RECOMMENDATION.md](RECOMMENDATION.md): why Rust and a web UI (the spike this grew from), with measurements.
 - [docs/LINKD.md](docs/LINKD.md): the install link's daemon on the phone's side (`linkd/`), its FunctionFS transport and the root runner of its L3 tests.
 - [docs/WEB-WRITE.md](docs/WEB-WRITE.md): the page's preview (its write path, with the install link's screens) and the page's download of a release.
+- [docs/INSTALL-APP.md](docs/INSTALL-APP.md): installing the desktop app from a release, for owners: the Arch package on Omarchy and Arch Linux, the AppImage elsewhere. No release is published yet.
+- [docs/GO-LIVE.md](docs/GO-LIVE.md): the attended runs that must pass before the installer reaches owners, and the switches that then make it reach them (the first tagged release, the server's header, the website's flag), each with who decides.
+- `.github/workflows/release.yml`: the downloads (the Arch package, the AppImage, the web page's archive for omamobile.org, `SHA256SUMS`), built by hand or from a `v*` tag; a tag makes a draft release, never a published one. `tools/release-web` and `tools/release-appimage` are its steps, and run locally.
 - [CONTRIBUTING.md](CONTRIBUTING.md): the safety rules.
 
 ## What works today, and what is untested on hardware
