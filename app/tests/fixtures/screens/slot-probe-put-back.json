@@ -1,0 +1,36 @@
+{
+  "state": "slot-probe-put-back",
+  "stop": null,
+  "retry": null,
+  "title": "Put slot A back as the active slot",
+  "notice": null,
+  "body": [
+    "An earlier run of the installer measured this Pixel 7 Pro's second bootloader copy and did not finish, so slot B may still be its active slot.",
+    "The installer can make slot A the active slot again, restart the phone into its bootloader if slot B's runs now, and look at it again. Nothing is written to the phone's partitions."
+  ],
+  "quote": null,
+  "steps": [
+    {
+      "text": "Or do it yourself, with Android's fastboot tool and the phone in Fastboot Mode:",
+      "command": "fastboot --set-active=a && fastboot reboot-bootloader"
+    }
+  ],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer only asked the phone what it is in this run. It sends nothing more before you answer."
+  ],
+  "choices": [
+    {
+      "answer": "put-back",
+      "label": "Make slot A active again (at most one restart into the bootloader)"
+    },
+    {
+      "answer": "stop",
+      "label": "Not now: stop here"
+    }
+  ],
+  "action": "slot-probe"
+}

@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omarchy Mobile starts from slot B, so slot B's bootloader has to be the same version as slot A's, and this phone only tells the version of the copy in use (fake-1.0).",
-    "Reading the other copy's version would mean making that copy the active one and switching back. The installer does not do that to this phone.",
+    "Reading the other copy's version means making that copy the active one, restarting into it and switching back. The installer does not do that to this phone model yet.",
     "If the two copies differ, the phone may not start from slot B, so the installer stops rather than guess. To ask about this phone, open an issue: https://github.com/derekross/omarchy-mobile/issues"
   ],
   "quote": null,

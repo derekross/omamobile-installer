@@ -1,0 +1,50 @@
+{
+  "state": "slot-probe",
+  "stop": null,
+  "retry": null,
+  "title": "Measure the phone's second bootloader copy?",
+  "notice": null,
+  "body": [
+    "The Pixel 7 Pro keeps two copies of its system, slot A and slot B, each with its own bootloader. Android runs from slot A, whose bootloader is fake-1.0. Omarchy Mobile is written to slot B, and the install ends by making slot B the one the phone starts from, so slot B's bootloader has to be the same version. This phone tells the version of the copy it runs only.",
+    "The installer can measure slot B's version itself. It makes slot B the active slot and restarts the phone into slot B's bootloader, reads the version there, then makes slot A the active slot again and restarts back. The phone restarts into its bootloader twice, showing its Fastboot Mode screen each time; it does not start Android or anything else. How long a restart takes has not been timed on a real phone yet: the installer waits up to a minute and a half for each.",
+    "Nothing is written to the phone's partitions. What changes is the bootloader's own record of which slot to start (its slot flags), which the installer sets back to slot A. Starting a slot's bootloader can also change that slot's flags; the installer reads them before and after, shows what changed, and stops if slot A could not start.",
+    "The risk: this starts slot B's bootloader before its version is known, and checking that version is the reason for the measurement. If slot B's bootloader does not start, or the phone starts an operating system instead of staying in Fastboot Mode, it may not come back by itself. The way back is below; read it before you answer."
+  ],
+  "quote": null,
+  "steps": [
+    {
+      "text": "While it runs, keep the cable in and don't press the phone's buttons.",
+      "command": null
+    },
+    {
+      "text": "If the phone does not come back to Fastboot Mode, bring it there with its buttons: with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears. If an operating system starts and asks for anything (a factory reset, \"Try again\"), choose nothing and use the buttons.",
+      "command": null
+    },
+    {
+      "text": "Then start the installer again: it sees that slot B was left active and offers to put slot A back first.",
+      "command": null
+    },
+    {
+      "text": "Or put slot A back yourself, with Android's fastboot tool and the phone in Fastboot Mode:",
+      "command": "fastboot --set-active=a && fastboot reboot-bootloader"
+    }
+  ],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "So far the installer has only asked the phone what it is. It sends nothing more before you answer."
+  ],
+  "choices": [
+    {
+      "answer": "measure",
+      "label": "Measure slot B's bootloader (two restarts into the bootloader)"
+    },
+    {
+      "answer": "stop",
+      "label": "Don't measure: stop the install here"
+    }
+  ],
+  "action": "slot-probe"
+}

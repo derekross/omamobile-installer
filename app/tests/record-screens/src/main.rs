@@ -13,7 +13,10 @@
 mod support;
 use omamobile_installer_core::download::{FactoryDownload, FetchFailure, FetchNext, FetchResponse};
 use omamobile_installer_core::fastboot::PhoneId;
-use omamobile_installer_core::flow::{AnswersInput, Flow, FlowOptions, OwnerAnswers, SlotBHolds};
+use omamobile_installer_core::flow::{
+    AnswersInput, Flow, FlowOptions, OwnerAnswers, ProbeAnswer, SlotBHolds,
+};
+use omamobile_installer_core::slot_probe::{ProbeNext, Restart};
 use pollster::block_on;
 use serde_json::Value;
 use std::path::Path;
@@ -476,4 +479,74 @@ fn main() {
     phone.edit(|s| s.unplug_on = Some(("flash:init_boot_b".into(), 1)));
     drive(&mut f, &b, &phone, "cheetah", "stopped");
     dump(dir, "stop-write-interrupted-reinstall", &f);
+    // A first install of a phone that tells one bootloader copy's version,
+    // from a release that allows the measurement of the other: the
+    // question, the putting back after a run that left slot B active, the
+    // measurement's stops and the confirmation of a measured phone
+    let probing = TestBundle::build(|_| {}, |c| c + "BOOTLOADER_SLOT_PROBE=yes\n");
+    let measuring = || FlowOptions {
+        write: true,
+        can_probe_slots: true,
+        asks_what_slot_b_holds: true,
+        ..Default::default()
+    };
+    let at_question = |phone: &FakePhone, o: FlowOptions| {
+        let mut f = begin(&probing, o);
+        drive(&mut f, &probing, phone, "cheetah", "slot-probe");
+        assert_eq!(f.screen().state, "slot-probe");
+        f
+    };
+    let measure = |f: &mut Flow, phone: &FakePhone| -> Option<String> {
+        let mut probe = f.slot_probe(ProbeAnswer::Measure).unwrap().unwrap();
+        loop {
+            match block_on(probe.step(&mut phone.clone())) {
+                ProbeNext::Finished => break,
+                ProbeNext::Restart { .. } => {
+                    let mut seen = Restart::NeverLeft;
+                    if !phone.listed() {
+                        seen = Restart::NotBack;
+                        for _ in 0..90 {
+                            phone.tick();
+                            if phone.listed() {
+                                seen = Restart::LeftAndBack;
+                                break;
+                            }
+                        }
+                    }
+                    probe.restart_seen(seen).unwrap();
+                }
+            }
+        }
+        f.slot_probe_done(probe).unwrap();
+        f.slot_probe_record().map(|r| r.to_text())
+    };
+    let phone = scen("first-install");
+    let f = at_question(&phone, measuring());
+    dump(dir, "slot-probe", &f);
+    let mut f = at_question(&phone, measuring());
+    f.slot_probe(ProbeAnswer::Stop).unwrap();
+    dump(dir, "stop-slot-probe-declined", &f);
+    let mut f = at_question(&phone, measuring());
+    measure(&mut f, &phone);
+    drive(&mut f, &probing, &phone, "cheetah", "confirm");
+    dump(dir, "confirm-slot-measured", &f);
+    let phone = scen("first-install-os");
+    let mut f = at_question(&phone, measuring());
+    let kept = measure(&mut f, &phone);
+    dump(dir, "stop-slot-probe-stopped", &f);
+    phone.owner_buttons();
+    let mut f = begin(
+        &probing,
+        FlowOptions {
+            slot_probe_record: kept,
+            ..measuring()
+        },
+    );
+    f.acknowledge_warning().unwrap();
+    look(&mut f, &phone);
+    dump(dir, "slot-probe-put-back", &f);
+    let phone = scen("first-install-differ");
+    let mut f = at_question(&phone, measuring());
+    measure(&mut f, &phone);
+    dump(dir, "stop-bootloader-slots-differ-measured", &f);
 }

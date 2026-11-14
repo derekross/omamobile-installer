@@ -54,6 +54,8 @@ const QString ZipName = QStringLiteral("cheetah-test.260101.001-factory-31c2322a
 const QString Zip = Release + "/factory/" + ZipName;
 // The same test release, whose root image offers the install link.
 const QString ReleaseLink = QDir(Tests + "/../../fixtures/selftest-link").absolutePath();
+// The test release whose descriptor allows the other-slot measurement.
+const QString ReleaseProbe = QDir(Tests + "/../../fixtures/selftest-probe").absolutePath();
 const QString ZipLink = ReleaseLink + "/factory/" + ZipName;
 
 // `omamobile-install json`, the real one, as the app starts it: through a
@@ -455,8 +457,8 @@ private slots:
                 stops << screen.value("stop").toString();
         }
         // core/src/flow.rs: Screen::state, and Stop::id
-        for (const char *state : {"warning", "phone", "slot-b", "unlock", "google-terms", "factory-image", "answers", "dry-run",
-                                  "done", "confirm", "write", "installed", "stopped"})
+        for (const char *state : {"warning", "phone", "slot-b", "slot-probe", "slot-probe-put-back", "unlock", "google-terms",
+                                  "factory-image", "answers", "dry-run", "done", "confirm", "write", "installed", "stopped"})
             QVERIFY2(states.contains(state), state);
         // Every id of docs/DESIGN.md §4
         const QStringList ids{"release-not-verified", "no-build-index", "build-index-refused", "warning-declined",
@@ -464,7 +466,8 @@ private slots:
                               "bootloader-slots-differ", "bootloader-slots-stated-other", "baseband-unknown",
                               "build-not-listed", "build-not-tested", "factory-download-mismatch", "locked-at-dry-run",
                               "build-changed", "dry-run-refused", "override-in-an-install", "writes-not-for-this-device", "no-place-for-answers",
-                              "images-not-checked", "not-confirmed", "locked-at-write", "write-refused", "write-interrupted"};
+                              "images-not-checked", "not-confirmed", "locked-at-write", "write-refused", "write-interrupted",
+                              "slot-probe-declined", "slot-probe-stopped"};
         for (const QString &stop : ids)
             QVERIFY2(stops.contains(stop), qPrintable(stop));
         // And none the list above does not know: a new stop in the core
@@ -507,7 +510,7 @@ private slots:
         QCOMPARE(sent.count(), 2);
         QVERIFY(oneLine(sent.at(0).at(0).toByteArray()));
         QCOMPARE(json(sent.at(0).at(0).toByteArray()),
-                 (QJsonObject{{"type", "hello"}, {"protocol", 5}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
+                 (QJsonObject{{"type", "hello"}, {"protocol", 6}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
         QCOMPARE(json(sent.at(1).at(0).toByteArray()), (QJsonObject{{"type", "start"}, {"reinstall", false}}));
 
         Backend again;
@@ -880,7 +883,7 @@ private slots:
         QTest::newRow("a screen that lacks a field") << QByteArray("odd-screen") << "malformed" << "sent something this app cannot read" << "the screen has no \"footer\"";
         QTest::newRow("an unknown message") << QByteArray("unknown") << "malformed" << "sent something this app cannot read" << "a kind this app does not know";
         QTest::newRow("an unexpected exit") << QByteArray("exit") << "crashed" << "stopped unexpectedly (exit status 3)" << "stand-in: leaving, as the test asked";
-        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 5" << "";
+        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 6" << "";
         QTest::newRow("another kind of run") << QByteArray("other-mode") << "mode" << "started a run that can write" << "";
         QTest::newRow("a fatal message") << QByteArray("fatal") << "fatal" << "reported that it failed" << "the release could not be read";
         QTest::newRow("no hello") << QByteArray("silent") << "silent" << "did not say hello" << "";
@@ -924,7 +927,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":5,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":6,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "printf '{\"type\":\"screen\",\"screen\":%s}\\n' \"$(tr -d '\\n' < '" + Tests.toUtf8() + "/fixtures/screens/phone.json')\"\n"
                      "read action\n"
@@ -1076,17 +1079,19 @@ private slots:
         QCOMPARE(w.items("quoteLink").size(), screen.value("quote").toObject().value("links").toArray().size());
 
         // One main action, labelled from the core's `action`; the question
-        // of what slot B holds has none, and a button for each answer.
+        // of what slot B holds, and the one whether to measure the other
+        // bootloader slot, have none, and a button for each answer.
         const QString action = screen.value("action").toString();
+        const bool asks = action == "slot-b" || action == "slot-probe";
         QCOMPARE(w.text("primaryButton"), primaryLabel(action));
-        QCOMPARE(w.shown("primaryButton"), action != "slot-b");
+        QCOMPARE(w.shown("primaryButton"), !asks);
         QCOMPARE(w.texts("choiceButton"), [&] {
             QStringList labels;
             for (const auto &choice : screen.value("choices").toArray())
                 labels << choice.toObject().value("label").toString();
             return labels;
         }());
-        QCOMPARE(w.shown("choices"), action == "slot-b");
+        QCOMPARE(w.shown("choices"), asks);
         // "Start again" beside it exactly where the core says a new run can
         // get past the stop (Screen.retry), and on no other screen.
         const QString retry = screen.value("retry").toString();
@@ -1495,7 +1500,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":5,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":6,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "cat <<'END'\n"
                      + QJsonDocument(QJsonObject{{"type", "screen"}, {"screen", screen}}).toJson(QJsonDocument::Compact) + "\nEND\n"
@@ -2644,6 +2649,48 @@ private slots:
             const QByteArray line = call.at(0).toByteArray();
             QVERIFY2(!line.contains("bootloader") && !line.contains("fake-1.0"), line.constData());
         }
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void theRealToolAFirstInstallMeasuresTheOtherBootloaderSlot() {
+        // The Pixel 7 Pro from stock Android, in a window that installs: the
+        // core asks whether it may measure slot B's bootloader, the person
+        // clicks Measure, the tool restarts the pretend phone into its
+        // bootloader twice, and the install goes on with nobody's word about
+        // the other copy (docs/DESIGN.md §6).
+        RealTool tool("first-install");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(ReleaseProbe);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        QSignalSpy sent(&backend, &Backend::sent);
+        backend.start();
+        QVERIFY(goTo(backend, "slot-probe", ReleaseProbe + "/factory/" + ZipName));
+        w.settle();
+        const QStringList labels = w.texts("choiceButton");
+        QCOMPARE(labels.size(), 2);
+        QVERIFY2(labels.join("\n").contains("Measure slot B's bootloader"), qPrintable(labels.join("\n")));
+        // An answer the screen does not offer is not sent
+        QVERIFY(!backend.answerChoice("put-back"));
+        QVERIFY(w.click("choiceButton"));
+        QVERIFY(at(backend, "google-terms"));
+        QVERIFY(backend.sentLines().contains("set_active:b"));
+        QVERIFY(backend.sentLines().contains("reboot-bootloader"));
+        QVERIFY(goTo(backend, "confirm", ReleaseProbe + "/factory/" + ZipName));
+        const QStringList body = backend.screen().value("body").toStringList();
+        QVERIFY2(body.join("\n").contains("Bootloader fake-1.0 on both copies: the installer measured slot B's bootloader"),
+                 qPrintable(body.join("\n")));
+        QVERIFY(backend.screen().value("notice").isNull());
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QVERIFY(at(backend, "installed"));
+        backend.shutdown();
+        int partitions = 0;
+        const QStringList written = tool.notReads(&partitions);
+        QCOMPARE(partitions, 6);
+        QCOMPARE(written.mid(0, 4), (QStringList{"set_active:b", "reboot-bootloader", "set_active:a", "reboot-bootloader"}));
+        QCOMPARE(written.last(), QString("reboot"));
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
     }
 
