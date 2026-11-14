@@ -172,8 +172,12 @@ fn footer_is_honest(stop: &Stop) {
             assert!(text.contains("written nothing to either"));
             assert_eq!(text.contains("erased that phone"), unlock_shown);
         }
-        // The stops after a write began are tested in write_path.rs
+        // The stops after a write began are tested in write_path.rs, and
+        // those after a measurement of the other slot in slot_probe.rs
         PhoneFact::WriteStopped { .. } => panic!("no stop of this file follows a write"),
+        PhoneFact::SlotsMeasured { .. } | PhoneFact::SlotProbeStopped { .. } => {
+            panic!("no stop of this file follows a measurement")
+        }
     }
 }
 
@@ -789,15 +793,16 @@ fn a_phone_that_reports_one_slots_bootloader_stops_and_no_slot_is_switched() {
     assert_eq!((s.phone, s.retry), (PhoneFact::OnlyRead, Retry::StopsAgain));
     let text = s.message.join(" ");
     assert!(text.contains("only tells the version of the copy in use (fake-1.0)"));
-    assert!(text.contains("does not do that to this phone"));
+    assert!(text.contains("does not do that to this phone model yet"));
     // No way around is handed out
     assert!(!text.contains("--") && !text.contains("slots-match"));
     footer_is_honest(&s);
     only_getvar(&phone);
     assert!(!phone.log().iter().any(|c| c.starts_with("set_active")));
 
-    // A descriptor that allows the probe changes the words, and nothing else:
-    // this version still switches no slot
+    // A descriptor that allows the probe changes the words, and nothing else
+    // in a dry run: a dry run never measures (core/tests/slot_probe.rs has
+    // the runs that do)
     let allowed = TestBundle::build(|_| {}, |c| c + "BOOTLOADER_SLOT_PROBE=yes\n");
     assert!(allowed.verify().unwrap().rules().bootloader_slot_probe);
     assert!(!bundle.verify().unwrap().rules().bootloader_slot_probe);
@@ -812,10 +817,7 @@ fn a_phone_that_reports_one_slots_bootloader_stops_and_no_slot_is_switched() {
         }
     );
     assert_eq!(s.retry, Retry::StopsAgain);
-    assert!(s
-        .message
-        .join(" ")
-        .contains("this version of the installer does not do it yet"));
+    assert!(s.message.join(" ").contains("so a dry run does not do it"));
     only_getvar(&phone);
     assert!(!phone.log().iter().any(|c| c.starts_with("set_active")));
     // With both versions reported, the same descriptor installs as usual

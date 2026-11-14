@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! `omamobile-install json`: the install flow as JSON lines, for the desktop
-//! app, agents and scripts. The protocol is docs/APP.md §3, number 3.
+//! app, agents and scripts. The protocol is docs/APP.md §3, number 6.
 //!
 //! One JSON object per line on standard input and on standard output.
 //! Standard output carries the protocol and nothing else: this file takes it
@@ -36,7 +36,8 @@ use crate::{
 };
 use omamobile_installer_core::fastboot::{PhoneId, PieceReport, Transport};
 use omamobile_installer_core::flow::{
-    AnswerField, AnswerProblem, AnswersInput, Flow, FlowOptions, OwnerAnswers, SlotBHolds,
+    AnswerField, AnswerProblem, AnswersInput, Flow, FlowOptions, OwnerAnswers, ProbeAnswer,
+    SlotBHolds,
 };
 use omamobile_installer_core::link::LinkTransport;
 use omamobile_installer_core::signature::TrustedKeys;
@@ -54,7 +55,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The protocol this tool speaks (docs/APP.md §3).
-pub const PROTOCOL: u64 = 5;
+pub const PROTOCOL: u64 = 6;
 /// A line longer than this is not a message of this protocol.
 const LONGEST_LINE: usize = 1 << 20;
 
@@ -477,6 +478,41 @@ trait Phones {
     fn shows(_link: &Self::After) -> Option<String> {
         None
     }
+    /// Wait before the next look while a phone restarts: real time on USB,
+    /// a tick of the pretend phones' clock in a pretend build.
+    fn pause(&mut self);
+    /// How many pauses make a second.
+    fn per_second(&self) -> u32;
+}
+
+/// The other-slot measurement's view of the phones: the one the flow
+/// looked at, by what tells it from the others, opened anew for each
+/// stretch, and watched on the bus while it restarts.
+struct ProbePhones<'a, P: Phones> {
+    phones: &'a mut P,
+    identity: String,
+}
+
+impl<P: Phones> crate::probe::ProbeSeams for ProbePhones<'_, P> {
+    type Link = P::Link;
+    fn open(&mut self) -> Result<Option<(Self::Link, PhoneId)>, String> {
+        let seen = self.phones.look().map_err(|e| e.to_string())?;
+        match seen.iter().position(|p| p.identity == self.identity) {
+            Some(n) => self.phones.open(n).map(Some).map_err(|e| e.to_string()),
+            None => Ok(None),
+        }
+    }
+    fn listed(&mut self) -> bool {
+        self.phones
+            .look()
+            .is_ok_and(|seen| seen.iter().any(|p| p.identity == self.identity))
+    }
+    fn pause(&mut self) {
+        self.phones.pause();
+    }
+    fn per_second(&self) -> u32 {
+        self.phones.per_second()
+    }
 }
 
 /// The app's side of a run of the install link: each new screen while the
@@ -557,6 +593,14 @@ impl Phones for Usb {
                 }
             })
             .collect())
+    }
+
+    fn pause(&mut self) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    fn per_second(&self) -> u32 {
+        5
     }
 
     fn open(&mut self, nth: usize) -> Res<(UsbTransport, PhoneId)> {
@@ -660,11 +704,23 @@ impl Phones for Pretend {
         link.shows()
     }
 
+    fn pause(&mut self) {
+        for p in &self.phones {
+            p.phone.tick();
+        }
+    }
+
+    fn per_second(&self) -> u32 {
+        1
+    }
+
     fn look(&mut self) -> Res<Vec<Connected>> {
+        // A pretend phone that is restarting is off the bus
         Ok(self
             .phones
             .iter()
             .enumerate()
+            .filter(|(_, p)| !p.phone.restarting())
             .map(|(n, p)| Connected {
                 identity: format!("serial {}", p.serial),
                 label: format!("Pretend phone {} ({})", n + 1, p.state),
@@ -673,7 +729,16 @@ impl Phones for Pretend {
     }
 
     fn open(&mut self, nth: usize) -> Res<(Self::Link, PhoneId)> {
-        let p = self.phones.get_mut(nth).ok_or("no such pretend phone")?;
+        // The nth of the last look, which leaves out phones that restart
+        let at = self
+            .phones
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.phone.restarting())
+            .nth(nth)
+            .map(|(at, _)| at)
+            .ok_or("no such pretend phone")?;
+        let p = &mut self.phones[at];
         p.opened += 1;
         // A locked pretend phone is unlocked by its pretend owner after the
         // unlock steps were shown once, as in `flow --fake-phone locked`
@@ -1026,6 +1091,16 @@ impl<P: Phones> Driver<P> {
             reinstall,
             asks_what_slot_b_holds: true,
             write: self.may_write,
+            // A run that writes can do the other-slot measurement's
+            // restarts, and goes on from what an earlier one kept
+            can_probe_slots: self.may_write,
+            slot_probe_record: if self.may_write {
+                crate::probe::load_record(
+                    crate::probe::record_path(self.work_dir.as_deref()).as_deref(),
+                )
+            } else {
+                None
+            },
             owner_ssh_key: self.key.as_ref().map(|k| k.public.clone()),
             after_write_steps: self.key.is_some() && after::release_has_tools(&dir),
             ..Default::default()
@@ -1279,6 +1354,7 @@ impl<P: Phones> Driver<P> {
             "acknowledge" | "decline" => asks == "acknowledge",
             "read-phone" => asks == "read-phone",
             "slot-b" => asks == "slot-b",
+            "slot-probe" => asks == "slot-probe",
             "accept-terms" | "decline-terms" => asks == "accept-terms",
             "download" => asks == "download",
             "take-file" => asks == "download" || asks == "take-file",
@@ -1363,6 +1439,52 @@ impl<P: Phones> Driver<P> {
                         format!("slot-b needs \"answer\": one of {}.", names.join(", "))
                     })?;
                 self.flow().answer_slot_b(holds)?;
+            }
+            // Measure the other bootloader slot, or put slot A back: the
+            // answer is one of the screen's choices. The measurement runs to
+            // its end here (its restarts are bounded by the core's limits),
+            // saying each line as `probe`, and its record is kept in the
+            // work directory after every step
+            "slot-probe" => {
+                let answer = text(message, "answer")
+                    .and_then(ProbeAnswer::from_answer)
+                    .filter(|a| {
+                        self.flow()
+                            .screen()
+                            .choices
+                            .iter()
+                            .any(|c| c.answer == a.answer())
+                    })
+                    .ok_or_else(|| {
+                        let names: Vec<&str> = self
+                            .flow()
+                            .screen()
+                            .choices
+                            .iter()
+                            .map(|c| c.answer)
+                            .collect();
+                        format!("slot-probe needs \"answer\": one of {}.", names.join(", "))
+                    })?;
+                let identity = self.chosen.clone();
+                let record = crate::probe::record_path(self.work_dir.as_deref());
+                let Some(started) = self.started.as_mut() else {
+                    return Ok(());
+                };
+                if let Some(mut slot_probe) = started.flow.slot_probe(answer)? {
+                    let identity = identity.ok_or("no phone was looked at in this run")?;
+                    let mut seams = ProbePhones {
+                        phones: &mut self.phones,
+                        identity,
+                    };
+                    crate::probe::run(
+                        &mut slot_probe,
+                        &mut seams,
+                        &mut |line| say(json!({"type": "probe", "line": line})),
+                        &mut |kept| crate::probe::keep_record(record.as_deref(), kept),
+                    );
+                    started.flow.slot_probe_done(slot_probe)?;
+                    crate::probe::keep_record(record.as_deref(), started.flow.slot_probe_record());
+                }
             }
             "accept-terms" => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

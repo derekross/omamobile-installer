@@ -69,7 +69,7 @@ use omamobile_installer_core::fastboot::{
     PhoneId, PieceReport, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
 use omamobile_installer_core::flow::{
-    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, Screen, WRITE_HELP,
+    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, ProbeAnswer, Screen, WRITE_HELP,
 };
 use omamobile_installer_core::install::{
     flash_userdata_with_progress, UserdataStream, SEGMENT_CAP,
@@ -89,6 +89,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod after;
 mod json;
 mod link;
+mod probe;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -421,6 +422,16 @@ fn show(screen: &Screen) {
         wrap(&step.text, "       ", &format!("    {}. ", n + 1));
         if let Some(command) = &step.command {
             println!("\n           {command}\n");
+        }
+    }
+    if !screen.choices.is_empty() {
+        println!();
+        for choice in &screen.choices {
+            wrap(
+                &format!("{} (type {})", choice.label, choice.answer),
+                "         ",
+                "    -  ",
+            );
         }
     }
     if let Some(link) = &screen.link {
@@ -1183,12 +1194,23 @@ impl Extra {
 
 /// Drive the core's flow to its end. `connect` finds the phone and opens
 /// it, or says there is none; nothing else here touches a phone.
-fn run_flow<T: Transport>(
+/// The other-slot measurement's part of a run: eyes on the bus, where the
+/// record is kept, and whether a yes must come from a terminal.
+struct Probing<S> {
+    seams: S,
+    record: Option<PathBuf>,
+    /// A measurement changes the phone's slot flags: on a real phone its
+    /// yes is taken from a terminal only, never from piped input.
+    yes_from_a_terminal: bool,
+}
+
+fn run_flow<T: Transport, S: probe::ProbeSeams>(
     bundle: &Bundle,
     trusted: &TrustedKeys,
     mut options: FlowOptions,
     mut factory: FactoryImage,
     mut connect: impl FnMut() -> Res<Option<(T, PhoneId)>>,
+    mut probing: Probing<S>,
 ) -> Res<Ran> {
     let mut typed = Typed::new();
     // In memory only, until the install link has given them to the phone
@@ -1197,6 +1219,12 @@ fn run_flow<T: Transport>(
     // A file handed in up front: the installer downloads nothing
     options.owner_has_factory_zip = factory.own_file.is_some();
     let writes = options.write;
+    // A run that installs can do the measurement's restarts, and goes on
+    // from what an earlier one's kept
+    if writes {
+        options.can_probe_slots = true;
+        options.slot_probe_record = probe::load_record(probing.record.as_deref());
+    }
     let mut flow = Flow::begin(&bundle.files(), bundle.index.as_deref(), trusted, options);
     let (mut looked, mut downloaded) = (false, false);
     loop {
@@ -1317,6 +1345,32 @@ fn run_flow<T: Transport>(
                     }
                 }
             }
+            // Measure the other bootloader slot, or put slot A back: the
+            // owner's answer, then the core's sequence, with the restarts
+            // watched here
+            "slot-probe" => {
+                let typed_answer = typed.ask("Type your answer (anything else stops here): ")?;
+                let offered =
+                    |a: ProbeAnswer| screen.choices.iter().any(|c| c.answer == a.answer());
+                let mut answer = ProbeAnswer::from_answer(&typed_answer)
+                    .filter(|a| offered(*a))
+                    .unwrap_or(ProbeAnswer::Stop);
+                if answer != ProbeAnswer::Stop && probing.yes_from_a_terminal && !typed.terminal {
+                    println!("    That changes the phone's slot flags, so the answer is taken from a terminal only, not from piped input. The install stops here.");
+                    answer = ProbeAnswer::Stop;
+                }
+                if let Some(mut slot_probe) = flow.slot_probe(answer)? {
+                    let record = probing.record.clone();
+                    probe::run(
+                        &mut slot_probe,
+                        &mut probing.seams,
+                        &mut |line| wrap(line, "        ", "    "),
+                        &mut |kept| probe::keep_record(record.as_deref(), kept),
+                    );
+                    flow.slot_probe_done(slot_probe)?;
+                    probe::keep_record(record.as_deref(), flow.slot_probe_record());
+                }
+            }
             // What will be written was listed: the owner types the phone's
             // codename, and the core takes that or stops
             "confirm" => {
@@ -1378,9 +1432,19 @@ fn run_flow<T: Transport>(
 fn cmd_install(dir: &Path, serial: &str, options: FlowOptions, factory: FactoryImage) -> Res<bool> {
     let bundle = Bundle::load(dir, "omamobile.gpg")?;
     let (backup_dir, work_dir) = (factory.backup_dir.clone(), factory.work_dir.clone());
-    let ran = run_flow(&bundle, &TrustedKeys::omamobile(), options, factory, || {
-        block_on(open_usb(serial))
-    })?;
+    let probing = Probing {
+        seams: probe::Usb { serial },
+        record: probe::record_path(work_dir.as_deref()),
+        yes_from_a_terminal: true,
+    };
+    let ran = run_flow(
+        &bundle,
+        &TrustedKeys::omamobile(),
+        options,
+        factory,
+        || block_on(open_usb(serial)),
+        probing,
+    )?;
     match ran {
         Ran::Ended(done) => Ok(done),
         Ran::Link(mut link, zip, mut typed) => {
@@ -1457,8 +1521,16 @@ fn cmd_fake(
     println!("A pretend phone ({scenario}), held in memory. No USB device is opened.");
     let mut looks = 0;
     let (backup_dir, work_dir) = (factory.backup_dir.clone(), factory.work_dir.clone());
+    let probing = Probing {
+        seams: probe::Pretend {
+            phone: phone.clone(),
+        },
+        record: probe::record_path(work_dir.as_deref()),
+        // The tests type their answers through a pipe
+        yes_from_a_terminal: false,
+    };
     // The record is printed however the run ended
-    let ran = run_flow(&bundle, &trusted, options, factory, || {
+    let connect = || {
         looks += 1;
         // A locked pretend phone is unlocked by its pretend owner after the
         // unlock steps were shown once
@@ -1469,7 +1541,8 @@ fn cmd_fake(
             });
         }
         Ok(Some((phone.clone(), PhoneId::of_serial(SERIAL).unwrap())))
-    });
+    };
+    let ran = run_flow(&bundle, &trusted, options, factory, connect, probing);
     let done = match ran {
         Err(e) => Err(e),
         Ok(Ran::Ended(done)) => Ok(done),

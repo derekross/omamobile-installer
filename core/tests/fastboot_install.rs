@@ -780,40 +780,58 @@ fn write_the_selftest_fixture() {
         ("selftest", TestBundle::new()),
         ("after", TestBundle::with_files(tools)),
     ] {
-        bundle.verify().unwrap();
-        let dir = root.join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("images")).unwrap();
-        let put = |name: &str, data: &[u8]| std::fs::write(dir.join(name), data).unwrap();
-        put("SHA256SUMS", &bundle.sums);
-        put("SHA256SUMS.sig", &bundle.sig);
-        put("test-key.gpg", &bundle.keyring);
-        put("test-key.fingerprint", bundle.fingerprint.as_bytes());
-        put("manifest.json", &bundle.manifest_json);
-        put("MANIFEST", &bundle.manifest_txt);
-        put("device.conf", &bundle.device_conf);
-        put("root.img.zst", &bundle.root_zst);
-        for (name, data) in &bundle.images {
-            put(&format!("images/{name}.img"), data);
-        }
-        put("factory-builds.json", &bundle.index_json);
-        // The stand-in for Google's factory zip, under the name the index
-        // gives it (the name carries its digest, so it changes only with
-        // the bytes)
-        std::fs::create_dir_all(dir.join("factory")).unwrap();
-        put(
-            &format!("factory/{}", bundle.factory_zip_name),
-            &bundle.factory_zip,
-        );
-        for (path, data) in &bundle.extra {
-            let file = dir.join(path);
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, data).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+        write_fixture(&root, name, &bundle);
+    }
+}
+
+/// Writes fixtures/selftest-probe/: the test release with
+/// `BOOTLOADER_SLOT_PROBE=yes` in its descriptor, for the front ends' tests
+/// of the other-slot measurement (a first install of a phone that tells one
+/// bootloader copy's version). Its own key, so that the other fixtures stay
+/// as they are. Run by hand:
+/// `cargo test -p omamobile-installer-core --test fastboot_install write_the_probe_fixture -- --ignored`
+#[test]
+#[ignore = "regenerates fixtures/selftest-probe"]
+fn write_the_probe_fixture() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+    let bundle = TestBundle::build(|_| {}, |c| c + "BOOTLOADER_SLOT_PROBE=yes\n");
+    write_fixture(&root, "selftest-probe", &bundle);
+}
+
+fn write_fixture(root: &std::path::Path, name: &str, bundle: &TestBundle) {
+    bundle.verify().unwrap();
+    let dir = root.join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    let put = |name: &str, data: &[u8]| std::fs::write(dir.join(name), data).unwrap();
+    put("SHA256SUMS", &bundle.sums);
+    put("SHA256SUMS.sig", &bundle.sig);
+    put("test-key.gpg", &bundle.keyring);
+    put("test-key.fingerprint", bundle.fingerprint.as_bytes());
+    put("manifest.json", &bundle.manifest_json);
+    put("MANIFEST", &bundle.manifest_txt);
+    put("device.conf", &bundle.device_conf);
+    put("root.img.zst", &bundle.root_zst);
+    for (name, data) in &bundle.images {
+        put(&format!("images/{name}.img"), data);
+    }
+    put("factory-builds.json", &bundle.index_json);
+    // The stand-in for Google's factory zip, under the name the index
+    // gives it (the name carries its digest, so it changes only with
+    // the bytes)
+    std::fs::create_dir_all(dir.join("factory")).unwrap();
+    put(
+        &format!("factory/{}", bundle.factory_zip_name),
+        &bundle.factory_zip,
+    );
+    for (path, data) in &bundle.extra {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, data).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 }

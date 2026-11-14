@@ -20,6 +20,9 @@
 //!   address in the signed build index and decided here, answer by answer.
 //! - [`text`]: what a phone, a server or a file name says, made fit to print
 //!   before it is kept, compared or put on a screen.
+//! - [`slot_probe`]: a first install's measurement of the other bootloader
+//!   slot, through a client that can send `set_active` and
+//!   `reboot-bootloader` and nothing else, and only when the flow makes it.
 //! - [`flow`]: the install as one state machine for every front end, with
 //!   the write path behind a typed confirmation;
 //! - [`ramdisk_key`]: the owner's SSH key appended to slot B's initramfs, as
@@ -55,6 +58,7 @@ pub mod link;
 pub mod manifest;
 pub mod ramdisk_key;
 pub mod signature;
+pub mod slot_probe;
 pub mod sparse;
 pub mod text;
 pub mod zstd_push;

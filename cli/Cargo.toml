@@ -40,6 +40,10 @@ required-features = ["fake-phone"]
 name = "link_fake_phone"
 required-features = ["fake-phone"]
 
+[[test]]
+name = "slot_probe_fake_phone"
+required-features = ["fake-phone"]
+
 [dependencies]
 omamobile-installer-core = { path = "../core" }
 omamobile-installer-usb = { path = "../usb" }
