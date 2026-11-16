@@ -419,4 +419,13 @@ WRITE-RUNBOOK steps 6, 7 and 8, unchanged: the slot state, what the phone shows 
 
 ## 9. Results
 
-Not run yet. For each run: the date, the commit, the browser and its version, the operating system, each step's outcome in a line, and for steps 4 and 5 the stop's id and how long the look took.
+**2026-11-15, installer `c4b5c9a` (installer-next), Chromium 155.0.8059.84 Arch Linux on Omarchy (Arch Linux), the Omarchy Mobile 2026.11.15 release candidate, the reference Pixel 7 Pro (reinstalled by the app's part B2 the same evening).** The page that ships, steps 0 to 6: passed. The write preview (8766) was loaded only; steps 7 to 9 wait for the maintainer's decision.
+
+- 0: `web/build.sh`, `web/build.sh web-write-preview`, `tools/check-shipping --built --preview`, `web/preview-test.sh`, `web/fetch-test.sh`: every line ok.
+- 1: the radio partitions had matched the reference backup in part B2's backup that evening.
+- 2: both pages served by `web/serve.py` with `Permissions-Policy: usb=(self)`; 8765 loaded the release and showed "Read this once" (the maintainer: "it looks fine").
+- 3: one phone in Fastboot Mode, `cheetah`, unlocked, slot B, successful.
+- 4: Chromium's USB chooser offered the phone and the page reached it over WebUSB.
+- 5: the factory image handed in by file: a newer factory build (`CP4A…`) the owner had downloaded was not taken, the release's listed build was. The dry run passed.
+- 6: the `getvar` values read again: every one as in step 3.
+
