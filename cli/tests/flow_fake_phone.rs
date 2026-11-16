@@ -1018,3 +1018,202 @@ fn a_release_on_the_running_slot_writes_slot_a_of_a_phone_from_stock_and_sends_n
     assert!(out.contains(ONLY_GETVAR), "{out}");
     assert!(!flat(&out).contains("--set-active"));
 }
+
+// ---- Repair (docs/DESIGN.md §11) --------------------------------------------
+
+/// A Repair as a person types it: the warning's yes, then the codename.
+fn repair(scenario: &str, dir: &Path, extra: &[&str], typed: &str) -> (i32, String, String) {
+    let mut args = vec![
+        "flow",
+        dir.to_str().unwrap(),
+        "--fake-phone",
+        scenario,
+        "--write",
+        "--repair",
+    ];
+    args.extend_from_slice(extra);
+    run(&args, typed)
+}
+
+#[test]
+fn a_repair_writes_the_running_slots_five_boot_images_and_nothing_else() {
+    let dir = running_fixture();
+    let (code, out, err) = repair("running-a", &dir, &[], "yes\ncheetah\n");
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        titles(&out),
+        [
+            "Repair: read this once",
+            "Connect the Pixel 7 Pro",
+            "The dry run",
+            "This is what the repair will write",
+            "Writing to the phone",
+            "The boot images are written, and the phone is restarting"
+        ]
+    );
+    // Asked for nothing an install asks: no factory image, no answers
+    assert!(!out.contains("User name") && !out.contains("factory image for build"));
+    let asked = out.find("Codename: ").unwrap();
+    let before = flat(&out[..asked]);
+    for line in [
+        "boot_a: images/boot.img, 16384 bytes (the partition holds 16384 bytes)",
+        "dtbo_a: images/dtbo.img, 4096 bytes",
+        "then: restart the phone (reboot)",
+        "userdata is not written: your account, your files and everything else stored on the phone are kept.",
+        "No slot is made active: the phone keeps starting from slot a.",
+    ] {
+        assert!(
+            before.contains(line),
+            "not said before the confirmation: {line}\n{out}"
+        );
+    }
+    assert!(
+        !before.contains("set_active") && !before.contains("ERASED"),
+        "{out}"
+    );
+    // What the pretend phone received that was not a question: the five
+    // boot images of slot a, each downloaded and flashed, then the restart
+    assert_eq!(
+        others(&out),
+        [
+            "download:00004000",
+            "flash:boot_a",
+            "download:00002000",
+            "flash:init_boot_a",
+            "download:00001000",
+            "flash:vendor_boot_a",
+            "download:00003000",
+            "flash:vendor_kernel_boot_a",
+            "download:00001000",
+            "flash:dtbo_a",
+            "reboot"
+        ]
+    );
+    assert!(
+        out.contains("(partitions written: boot_a, dtbo_a, init_boot_a, vendor_boot_a, vendor_kernel_boot_a)"),
+        "{out}"
+    );
+    assert!(!out.contains("flash:userdata"));
+    let after = flat(&out[out.find("==> The boot images are written").unwrap()..]);
+    assert!(after.contains("userdata was not written"), "{after}");
+}
+
+#[test]
+fn a_repair_on_slot_b_writes_slot_b_where_the_release_accepts_it_and_stops_where_not() {
+    let dir = running_fixture();
+    // The fixture's release accepts slot a only
+    let (code, out, _) = repair("running-b", &dir, &[], "yes\ncheetah\n");
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "This release can't be installed on the slot this phone runs from yet"
+    );
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+}
+
+#[test]
+fn a_repair_with_another_codename_writes_nothing() {
+    let dir = running_fixture();
+    let (code, out, _) = repair("running-a", &dir, &[], "yes\npanther\n");
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(*titles(&out).last().unwrap(), "Not confirmed");
+    assert!(flat(&out).contains("so the repair stops here. Nothing was written."));
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+}
+
+#[test]
+fn a_repair_of_a_format_1_release_stops_before_any_phone_is_asked() {
+    let dir = fixture();
+    let (code, out, _) = repair("ready", &dir, &[], "yes\ncheetah\n");
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(titles(&out), ["This release can't repair a phone"]);
+    assert!(out.contains("received 0 commands"), "{out}");
+}
+
+#[test]
+fn a_repair_is_a_run_that_writes_and_takes_none_of_an_installs_options() {
+    let dir = running_fixture();
+    let zip = std::fs::read_dir(dir.join("factory"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    for args in [
+        // No --write: refused before any phone, pretend or real, is opened
+        vec![
+            "flow",
+            dir.to_str().unwrap(),
+            "--fake-phone",
+            "running-a",
+            "--repair",
+        ],
+        vec!["repair", dir.to_str().unwrap(), "--serial", "X"],
+        vec![
+            "repair",
+            dir.to_str().unwrap(),
+            "--serial",
+            "X",
+            "--dry-run",
+        ],
+        // An install's statements and files
+        vec![
+            "repair",
+            dir.to_str().unwrap(),
+            "--serial",
+            "X",
+            "--write",
+            "--reinstall",
+        ],
+        vec![
+            "repair",
+            dir.to_str().unwrap(),
+            "--serial",
+            "X",
+            "--write",
+            "--factory-zip",
+            zip.to_str().unwrap(),
+        ],
+        vec![
+            "flow",
+            dir.to_str().unwrap(),
+            "--fake-phone",
+            "running-a",
+            "--write",
+            "--repair",
+            "--bootloader-slots-match",
+            "fake-1.0",
+        ],
+        // The pretend phone is flow's, and --repair is flow's word
+        vec![
+            "repair",
+            dir.to_str().unwrap(),
+            "--fake-phone",
+            "running-a",
+            "--write",
+        ],
+        vec![
+            "install",
+            dir.to_str().unwrap(),
+            "--serial",
+            "X",
+            "--write",
+            "--repair",
+        ],
+    ] {
+        let (code, out, err) = run(&args, "yes\ncheetah\n");
+        assert_eq!(code, 1, "{args:?}\n{out}\n{err}");
+        assert!(!out.contains("pretend phone ("), "{args:?}: {out}");
+        assert!(
+            !err.contains("No phone in Fastboot Mode"),
+            "{args:?}: {err}"
+        );
+    }
+    let (_, _, err) = run(&["repair", dir.to_str().unwrap(), "--serial", "X"], "");
+    assert!(err.contains("repair needs --write"), "{err}");
+    // The help says what a repair writes and keeps
+    let (code, out, _) = run(&["help"], "");
+    assert_eq!(code, 0);
+    assert!(flat(&out).contains("repair DIR --serial S --write"));
+    assert!(flat(&out).contains("userdata is NOT written"));
+}

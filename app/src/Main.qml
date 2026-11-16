@@ -45,8 +45,14 @@ ApplicationWindow {
     readonly property bool onControl: activeFocusItem instanceof AbstractButton
     readonly property bool keysFree: !typing && !overlayOpen
 
-    // A run that may write has one stage more, after the dry run.
-    readonly property var stages: [
+    // A run that may write has one stage more, after the dry run. A Repair
+    // has no factory image and no answers, and ends with the boot images.
+    readonly property var stages: backend.repairing ? [
+        { label: qsTr("Warning"), states: ["warning"] },
+        { label: qsTr("Phone"), states: ["phone"] },
+        { label: qsTr("Dry run"), states: ["dry-run"] },
+        { label: qsTr("Repair"), states: ["confirm", "write", "repaired"] }
+    ] : [
         { label: qsTr("Warning"), states: ["warning"] },
         { label: qsTr("Phone"), states: ["phone", "slot-b", "slot-probe", "slot-probe-put-back", "slot-probe-running", "unlock"] },
         { label: qsTr("Factory image"), states: ["google-terms", "factory-image"] },
@@ -76,7 +82,7 @@ ApplicationWindow {
         case "take-file": return qsTr("Choose the file…")
         case "answers": return qsTr("Go on")
         case "dry-run": return qsTr("Run the dry run")
-        case "confirm": return qsTr("Erase the phone and install")
+        case "confirm": return backend.repairing ? qsTr("Write the boot images") : qsTr("Erase the phone and install")
         // Reached by hand only when the writes could not begin (no phone
         // answered): the app sends them itself once the codename is taken.
         case "write": return backend.busy ? "" : qsTr("Look for the phone again")
@@ -96,7 +102,7 @@ ApplicationWindow {
         case "acknowledge": return qsTr("Stop here")
         case "accept-terms": return qsTr("I will download it myself")
         case "download": return backend.pending === "download" ? qsTr("Cancel") : qsTr("Choose a file I saved…")
-        case "confirm": return qsTr("Do not install")
+        case "confirm": return backend.repairing ? qsTr("Do not repair") : qsTr("Do not install")
         }
         // Offered where the core says a new run can get past the stop, and
         // nowhere else: the app does not read the stop's sentences.
@@ -271,7 +277,7 @@ ApplicationWindow {
                         id: previewText
                         objectName: "mode"
                         anchors.centerIn: parent
-                        text: backend.writes ? qsTr("Install") : qsTr("Dry run")
+                        text: backend.writes ? (backend.repairing ? qsTr("Repair") : qsTr("Install")) : qsTr("Dry run")
                         color: backend.writes ? "#ff9a92" : theme.accent
                         font.pixelSize: 12
                         font.bold: true
@@ -479,6 +485,18 @@ ApplicationWindow {
                         text: win.secondaryLabel
                         enabled: (!backend.busy || backend.pending === "download" || win.toolFailed) && !backend.writing
                         onClicked: win.secondary()
+                    }
+                    // On the first screen of a run that writes: Repair a
+                    // phone that runs Omarchy Mobile and no longer starts,
+                    // instead of an install (docs/DESIGN.md §11). The core's
+                    // own warning for it comes next.
+                    ActionButton {
+                        id: repairButton
+                        objectName: "repairButton"
+                        visible: backend.canRepair && !win.toolFailed
+                        text: qsTr("Repair a phone instead")
+                        enabled: !backend.busy
+                        onClicked: backend.startRepair()
                     }
                     Item { Layout.fillWidth: true }
                     // Where the core asks for the phone's codename. Beside

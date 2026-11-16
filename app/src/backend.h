@@ -38,6 +38,13 @@ class Backend : public QObject {
     // The flow of this run may write to a phone: the window was started with
     // --write, and the tool was started with it and said so in its hello.
     Q_PROPERTY(bool writes READ writes NOTIFY toolChanged)
+    // This run is a Repair (docs/DESIGN.md §11): the tool was started with
+    // `"repair": true`, so the core writes the running slot's boot images
+    // and nothing else. Offered on the first screen of a run that writes.
+    Q_PROPERTY(bool repairing READ repairing NOTIFY toolChanged)
+    // The first screen of a run that writes, before anything else was done:
+    // where the window offers Repair instead of an install.
+    Q_PROPERTY(bool canRepair READ canRepair NOTIFY screenChanged)
     // The writes are under way: the one action that is never cut off.
     Q_PROPERTY(bool writing READ writing NOTIFY busyChanged)
     // What the session that writes said it sent, as the tool put it: each
@@ -72,7 +79,7 @@ class Backend : public QObject {
 
 public:
     // The protocol this app speaks (docs/APP.md).
-    static constexpr int Protocol = 6;
+    static constexpr int Protocol = 7;
     // The tool's name, beside the app's binary or on PATH.
     static constexpr const char *ToolName = "omamobile-install";
     // Names another tool, for the tests.
@@ -112,6 +119,8 @@ public:
         return action() == "none" && (retry == "whenever" || retry == "after-fix");
     }
     bool writes() const { return m_write; }
+    bool repairing() const { return m_repair; }
+    bool canRepair() const { return m_write && !m_repair && state() == "warning"; }
     // From the moment the writes were asked for until the tool answered
     // them with a screen, or left. Also true after the app stopped reading
     // the tool (a line it could not read): the tool may still be writing.
@@ -146,6 +155,11 @@ public:
     Q_INVOKABLE void restart();
     // Tells the tool to leave and waits a moment for it. Safe to call twice.
     Q_INVOKABLE void shutdown();
+    // A new run of the tool, as a Repair: only from the first screen of a
+    // run that writes (canRepair). Whether it writes stays what the window
+    // was started with: the tool is started with --write as before, by the
+    // one line that passes it, and the core stops a Repair that can't write.
+    Q_INVOKABLE bool startRepair();
 
     // One per message of the protocol. Each returns whether it was sent: an
     // action the current screen does not name is not sent at all.
@@ -244,6 +258,7 @@ private:
     bool m_greeted = false;
     bool m_leaving = false;
     bool m_reinstall = false;
+    bool m_repair = false;
     bool m_write = false;
     bool m_writeInHand = false;
     bool m_inputClosed = false;

@@ -72,6 +72,17 @@
 //! phone: Android on the phone is replaced, and the way back is Google's
 //! factory image ([`GO_BACK_TO_ANDROID`]).
 //!
+//! **Repair** ([`FlowOptions::repair`], docs/DESIGN.md §11) is a mode of
+//! this flow for such a release, and only in a flow that writes: the way
+//! back from a bad kernel once Android is gone. It writes the running slot's
+//! boot images again and nothing else: no `userdata`, so the account and
+//! everything stored are kept; no `set_active`; never the other slot. Its
+//! steps are the warning, the look (model, pinned phone, `current-slot`
+//! accepted, unlocked; no build index and no factory image, since no
+//! firmware is written), the dry run, the confirmation, the write and
+//! [`Step::Repaired`]. The session is the one [`Flow::begin_write`] opens,
+//! with the token it makes, like every write.
+//!
 //! Every end that isn't `Done` is a [`Stop`]: a typed reason, the words for
 //! the person, and a closing line that says what is true of the phone at
 //! that moment and whether starting again can get past it. No stop ends in a
@@ -406,7 +417,31 @@ pub struct FlowOptions {
     /// ships them): the last screen says that they come next rather than
     /// that nothing does. The flow itself still ends at the write.
     pub after_write_steps: bool,
+    /// Repair the phone (docs/DESIGN.md §11, "Repair"): write the running
+    /// slot's boot images from this release again, and nothing else. Only
+    /// with [`Self::write`] ([`StopKind::RepairNeedsWrite`] otherwise) and
+    /// only for a release that installs on the running slot, manifest
+    /// format 2 ([`StopKind::RepairNotForRelease`] otherwise), both stopped
+    /// in [`Flow::begin`]. `userdata` is never written, so the phone keeps
+    /// its account and everything on it; no slot is made active, and the
+    /// other slot is never written. There is no build index lookup, no
+    /// factory image and no answers: no firmware is written. A locked phone
+    /// stops ([`StopKind::RepairLocked`]): unlocking would erase what a
+    /// Repair keeps. The SSH key and the steps after the write are not for
+    /// it, and are ignored.
+    pub repair: bool,
 }
+
+/// What a front end says where it offers Repair (the command line's
+/// `repair`): exactly what is written and what is kept.
+pub const REPAIR_HELP: &str = "Repairs a phone that runs Omarchy Mobile from a release that installs on the slot the phone runs from (manifest format 2), when a kernel update left it unable to start: it writes the release's boot images again to the slot the phone runs from (each to its partition with that slot's suffix), then restarts the phone. Nothing else: userdata is NOT written, so your account and everything on the phone are kept; no slot is made active; the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. It needs no factory image and no answers. The phone has to be unlocked and in Fastboot Mode on the slot the release accepts. The run first checks the phone and every image against the release's signed checksums, then lists each partition and waits for you to type the phone's codename; nothing is written before that.";
+
+/// Said on a Repair's warning, its confirmation and its last screen: what
+/// it keeps, and the ways back if it does not help.
+pub const REPAIR_KEEPS: &str = "A repair does not write userdata: your account, your files and everything else stored on the phone are kept. No slot is made active, and the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.";
+
+/// The way on when a Repair does not get the phone to start.
+pub const REPAIR_WAY_BACK: &str = "If the phone still does not start after a repair, a full install of this release with the installer writes everything again, userdata included, which erases what is stored on the phone. Or put Android back with Google's factory image, which erases the phone too.";
 
 /// The owner accepted Google's terms on the terms step: for which build,
 /// and when. Kept in the flow and nowhere else; it is never sent anywhere.
@@ -560,6 +595,10 @@ pub enum Step {
     /// Every write was confirmed by the phone, slot B is active and the
     /// phone was told to restart. The flow ends here.
     Installed(DryRunPlan),
+    /// A Repair ran through: the running slot's boot images were written
+    /// and confirmed, `userdata` was not touched, and the phone was told to
+    /// restart. The flow ends here.
+    Repaired(DryRunPlan),
     /// The install stopped. Nothing more is accepted; a new flow starts over.
     Stopped(Stop),
 }
@@ -645,6 +684,15 @@ pub enum StopKind {
     WriteRefused(Error),
     /// The writes began and did not run through.
     WriteInterrupted(Error),
+    /// Repair was asked for in a flow that does not write. Stopped in
+    /// `begin`, before the release is read.
+    RepairNeedsWrite,
+    /// Repair was asked for with a release that does not install on the
+    /// running slot (format 1). Stopped in `begin`.
+    RepairNotForRelease,
+    /// Repair, and the phone's bootloader is locked: unlocking erases the
+    /// phone, and a Repair is there to keep what is on it.
+    RepairLocked,
 }
 
 /// What is true of the phone when the install stops.
@@ -674,6 +722,10 @@ pub enum PhoneFact {
     /// A release on the running slot (format 2): the writes to `slot`, the
     /// slot the phone runs from, began and did not run through.
     WriteStoppedRunning { reach: WriteReach, slot: Slot },
+    /// A Repair: the writes to the boot images of `slot`, the slot the
+    /// phone runs from, began and did not run through. `userdata` was not
+    /// touched.
+    RepairStopped { reach: WriteReach, slot: Slot },
 }
 
 /// Whether starting the installer again can get past a stop. On a screen
@@ -759,6 +811,7 @@ impl Stop {
             PhoneFact::WriteStoppedRunning { reach, slot } => {
                 return write_stopped_running_footer(reach, slot)
             }
+            PhoneFact::RepairStopped { reach, slot } => return repair_stopped_footer(reach, slot),
         };
         out.push(
             match self.retry {
@@ -805,6 +858,9 @@ impl Stop {
             StopKind::LockedAtWrite => "locked-at-write",
             StopKind::WriteRefused(_) => "write-refused",
             StopKind::WriteInterrupted(_) => "write-interrupted",
+            StopKind::RepairNeedsWrite => "repair-needs-write",
+            StopKind::RepairNotForRelease => "repair-not-for-this-release",
+            StopKind::RepairLocked => "repair-locked",
         }
     }
 }
@@ -902,6 +958,37 @@ fn write_stopped_running_footer(reach: WriteReach, slot: Slot) -> Vec<String> {
             format!("Every image was written to slot {slot}, and the phone confirmed each one. The restart was not sent, or the phone did not confirm it."),
             format!("If the phone is still in Fastboot Mode, restart it from its Fastboot Mode screen (Start): it starts the slot it runs from, slot {slot}, which holds Omarchy Mobile now. If the installer said the phone's current slot changed, start the installer again instead."),
             "Or start the installer again with the phone in Fastboot Mode: it checks the phone again and writes every image again, from the first.".to_string(),
+        ],
+    }
+}
+
+/// [`write_stopped_running_footer`] for a Repair: only the slot's boot
+/// images were being written, `userdata` was not touched, and no slot is
+/// ever made active.
+fn repair_stopped_footer(reach: WriteReach, slot: Slot) -> Vec<String> {
+    let again = "Bring the phone to Fastboot Mode and start the repair again: it checks the phone again and writes every boot image again, from the first. It still does not write userdata.";
+    let kept = "userdata was not written: your account and everything stored on the phone are still there.";
+    match reach {
+        WriteReach::Nothing => vec![
+            "No write reached the phone: the installer sent it nothing that changes it.".to_string(),
+            "You can start the repair again at any time.".to_string(),
+        ],
+        WriteReach::BootImages { done, of, in_doubt } => vec![
+            format!(
+                "The repair stopped while it was writing slot {slot}'s boot images: {done} of {of} were written{}.",
+                if in_doubt { ", and the next one may be partly written" } else { "" }
+            ),
+            kept.to_string(),
+            format!("Slot {slot} is the slot the phone starts from, and its boot images are now partly this release's: the phone may not start until a repair has run through."),
+            again.to_string(),
+        ],
+        // Every boot image was written: the read-back or the restart was
+        // not confirmed. No slot is ever made active
+        _ => vec![
+            format!("Every boot image was written to slot {slot}, and the phone confirmed each one. The restart was not sent, or the phone did not confirm it."),
+            kept.to_string(),
+            format!("If the phone is still in Fastboot Mode, restart it from its Fastboot Mode screen (Start): it starts the slot it runs from, slot {slot}. If the installer said the phone's current slot changed, start the repair again instead."),
+            "Or start the repair again with the phone in Fastboot Mode: it checks the phone again and writes every boot image again, from the first.".to_string(),
         ],
     }
 }
@@ -1198,9 +1285,13 @@ pub struct DryRunPlan {
     pub current_slot: String,
     pub bootloader: String,
     pub baseband: Option<String>,
-    /// The factory image that was checked.
-    pub factory_zip: VerifiedFactoryZip,
-    pub answers: AnswersSummary,
+    /// The factory image that was checked. `None` in a Repair, which
+    /// writes no firmware and takes no factory image.
+    pub factory_zip: Option<VerifiedFactoryZip>,
+    /// The owner's answers. `None` in a Repair, which writes no `userdata`.
+    pub answers: Option<AnswersSummary>,
+    /// A Repair: `writes` are the running slot's boot images alone.
+    pub repair: bool,
     /// The writes an install would send, in order, in words.
     pub would: Vec<String>,
     /// Whether the front end walked the release's images through the dry
@@ -1507,6 +1598,21 @@ impl Flow {
             );
             return flow;
         }
+        // A Repair writes: it is a mode of a flow that may write, and there
+        // is nothing it would show in a dry run that its own confirmation
+        // does not list before anything is written
+        if flow.options.repair && !flow.options.write {
+            flow.stop(
+                StopKind::RepairNeedsWrite,
+                Retry::AfterFix,
+                "A repair is a run that writes",
+                vec![
+                    "This run was asked to repair a phone, and it was not started as a run that may write. A repair writes the boot images of the slot the phone runs from, after it has listed them and you have typed the phone's codename.".into(),
+                    "Start the installer's repair as a run that writes.".into(),
+                ],
+            );
+            return flow;
+        }
         let release = match verify_release(files, trusted) {
             Ok(r) => r,
             Err(e) => {
@@ -1541,6 +1647,25 @@ impl Flow {
                     format!("A dry run works for this phone. To install, use the installer that comes with the release ({DOWNLOAD}), or ask at {ISSUES}"),
                 ],
             );
+            flow.release = Some(release);
+            return flow;
+        }
+        // A Repair writes the running slot's boot images again: a release
+        // that writes slot B and makes it active has no such thing. It needs
+        // no place for answers and no build index, since it writes neither
+        // userdata nor firmware
+        if flow.options.repair {
+            if !release.manifest().on_running_slot() {
+                flow.stop(
+                    StopKind::RepairNotForRelease,
+                    Retry::StopsAgain,
+                    "This release can't repair a phone",
+                    vec![
+                        format!("This release of Omarchy Mobile for the {name} ({codename}) is written to slot B and makes slot B the active slot, with Android kept on slot A. A repair is for a release that installs on the slot the phone runs from, and writes that slot's boot images again."),
+                        format!("A phone installed from such a release is put right by installing it again. To repair a phone, use a release made to install on the slot the phone runs from, from {DOWNLOAD}."),
+                    ],
+                );
+            }
             flow.release = Some(release);
             return flow;
         }
@@ -1648,6 +1773,11 @@ impl Flow {
             .is_some_and(|r| r.manifest().on_running_slot())
     }
 
+    /// Whether this flow is a Repair ([`FlowOptions::repair`]).
+    pub fn repairs(&self) -> bool {
+        self.options.repair
+    }
+
     /// Whether the release's system image keeps a place for the owner's
     /// answers ([`crate::manifest::RootImage::placeholders`]).
     fn has_place_for_answers(&self) -> bool {
@@ -1658,6 +1788,9 @@ impl Flow {
 
     fn phone_fact(&self) -> PhoneFact {
         if let (Some((reach, _)), Some(slot)) = (self.write_reach, self.write_running) {
+            if self.options.repair {
+                return PhoneFact::RepairStopped { reach, slot };
+            }
             return PhoneFact::WriteStoppedRunning { reach, slot };
         }
         if let Some((reach, on_slot_b)) = self.write_reach {
@@ -1787,6 +1920,18 @@ impl Flow {
             ));
         }
         match self.judge(&report) {
+            // A Repair keeps what is on the phone, and unlocking erases it:
+            // no unlock steps, and no question about them
+            Judged::Locked if self.options.repair => self.stop(
+                StopKind::RepairLocked,
+                Retry::StopsAgain,
+                "The phone's bootloader is locked",
+                vec![
+                    "A repair writes the boot images of the slot the phone runs from, and only an unlocked phone takes them. This phone's bootloader is locked.".into(),
+                    "Unlocking it erases the phone, which is what a repair is there to avoid, so the installer does not show the steps for it here. A phone that runs Omarchy Mobile was unlocked to install it; if it is locked now, it most likely runs Android again.".into(),
+                    format!("To install Omarchy Mobile on it anyway, use the installer's install, which erases the phone. To ask about this phone, open an issue: {ISSUES}"),
+                ],
+            ),
             Judged::Locked => {
                 // Asked only of a phone about to be shown the unlock steps,
                 // and after every other question
@@ -2029,6 +2174,9 @@ impl Flow {
             Judged::AskSlotB => self.step = Step::SlotB,
             Judged::OfferProbe => self.step = Step::SlotProbe,
             Judged::OfferPutBack => self.step = Step::SlotProbePutBack,
+            // A Repair needs no factory image and no answers: the dry run
+            // is next
+            Judged::Repair => self.step = Step::DryRun,
             // The owner has the file: nothing is downloaded, so there are no
             // terms for the installer to show
             Judged::Ready { build, same_pair } if self.options.owner_has_factory_zip => {
@@ -2172,6 +2320,15 @@ impl Flow {
             // bootloader that answers is the one that starts what is written
             if let Some(stopped) = self.judge_running_slot(report) {
                 return stopped;
+            }
+            // A Repair writes no firmware: no build index, no baseband and
+            // no factory image. What is left to judge is the lock
+            if self.options.repair {
+                return if report.unlocked {
+                    Judged::Repair
+                } else {
+                    Judged::Locked
+                };
             }
         } else {
             let on_slot_b = report.current_slot == "b";
@@ -2853,6 +3010,9 @@ impl Flow {
                 );
                 return Ok(None);
             }
+            // Only `judge` of a Repair says so, and a Repair needs nothing
+            // more of the phone here
+            Judged::Repair => {}
             Judged::Ready { build, .. } => {
                 if self.zip.as_ref().is_none_or(|z| z.build != build.build) {
                     self.stop(
@@ -2874,6 +3034,7 @@ impl Flow {
             .clone()
             .expect("a flow past the warning has a release");
         let slot_b = !self.on_running_slot();
+        let repair = self.options.repair;
         let options = PhoneOptions {
             reinstall: self.options.reinstall && slot_b,
             // The owner's statement, if one was made: the session compares
@@ -2889,8 +3050,10 @@ impl Flow {
             // What this run measured, compared again by the session
             other_slot_measured: self.measured.clone().filter(|_| slot_b),
             // So that the dry run checks the image with the key against
-            // its partition, as the write will send it
-            owner_ssh_key: self.options.owner_ssh_key.clone(),
+            // its partition, as the write will send it. A Repair writes the
+            // images as they were signed
+            owner_ssh_key: self.options.owner_ssh_key.clone().filter(|_| !repair),
+            repair,
         };
         let opened = match Session::connect_pinned(transport, &release, &report.id, options).await {
             // The answers walk through the dry run too: it checks the image
@@ -2957,9 +3120,13 @@ impl Flow {
             return self.out_of_order("the dry run's end");
         }
         let ours = self.release.as_ref().map(|r| r.id());
-        if !session.is_dry_run() || Some(session.release_id()) != ours {
+        if !session.is_dry_run()
+            || Some(session.release_id()) != ours
+            || session.repairs() != self.options.repair
+        {
             return Err(Error::Refused("not the dry run this install opened".into()));
         }
+        let repair = self.options.repair;
         // Once skipped, on any look at the phone, the whole run says so
         self.slot_check_skipped |= session.slot_check_skipped();
         let walked = session.is_done();
@@ -3001,14 +3168,32 @@ impl Flow {
                 flag("successful") == Some("yes") && flag("unbootable") != Some("yes")
             })
         });
-        let (Some(factory_zip), Some(answers)) = (self.zip.clone(), self.answers.clone()) else {
+        // An install has both; a Repair neither, since it writes no
+        // firmware and no userdata
+        let (factory_zip, answers) = (self.zip.clone(), self.answers.clone());
+        if !repair && (factory_zip.is_none() || answers.is_none()) {
             return self.out_of_order("the dry run's end");
-        };
+        }
         // Each partition with its sizes on this phone, for the confirmation
         let mut writes = Vec::new();
-        if let (true, Some(release), Some(walk)) =
-            (walked, self.release.as_ref(), session.userdata_walk())
-        {
+        if let (true, true, Some(release)) = (repair, walked, self.release.as_ref()) {
+            // The running slot's boot images, and nothing else
+            let m = release.manifest();
+            for (w, size) in m.boot_writes.iter().zip(session.boot_partition_sizes()) {
+                writes.push(PlannedWrite {
+                    partition: w.partition(facts.target_slot).name().to_string(),
+                    source: w.source.clone(),
+                    bytes: w.size,
+                    partition_bytes: *size,
+                    pieces: None,
+                });
+            }
+        } else if let (false, true, Some(release), Some(walk)) = (
+            repair,
+            walked,
+            self.release.as_ref(),
+            session.userdata_walk(),
+        ) {
             let m = release.manifest();
             for (w, size) in m.boot_writes.iter().zip(session.boot_partition_sizes()) {
                 writes.push(PlannedWrite {
@@ -3035,6 +3220,7 @@ impl Flow {
             baseband: facts.baseband,
             factory_zip,
             answers,
+            repair,
             would,
             images_walked: walked,
             slot_check_skipped: self.slot_check_skipped,
@@ -3061,10 +3247,17 @@ impl Flow {
                 StopKind::ImagesNotChecked,
                 Retry::AfterFix,
                 "The release's images are not all on this computer",
-                vec![
-                    "An install writes the release's boot images and its system image. They were not all found beside the release's other files, so none of them was checked, and the installer does not ask you to confirm a write it has not checked.".into(),
-                    format!("Fetch the whole release from {DOWNLOAD}: its images directory, and the system image (.img.zst) beside it."),
-                ],
+                if repair {
+                    vec![
+                        "A repair writes the release's boot images. They were not all found beside the release's other files, so none of them was checked, and the installer does not ask you to confirm a write it has not checked.".into(),
+                        format!("Fetch the whole release from {DOWNLOAD}: its images directory."),
+                    ]
+                } else {
+                    vec![
+                        "An install writes the release's boot images and its system image. They were not all found beside the release's other files, so none of them was checked, and the installer does not ask you to confirm a write it has not checked.".into(),
+                        format!("Fetch the whole release from {DOWNLOAD}: its images directory, and the system image (.img.zst) beside it."),
+                    ]
+                },
             );
         } else {
             self.step = Step::Confirm(plan);
@@ -3086,7 +3279,10 @@ impl Flow {
                 StopKind::NotConfirmed,
                 Retry::Whenever,
                 "Not confirmed",
-                vec![format!("What was typed is not the phone's codename ({codename}), so the install stops here. Nothing was written.")],
+                vec![format!(
+                    "What was typed is not the phone's codename ({codename}), so the {} stops here. Nothing was written.",
+                    if self.options.repair { "repair" } else { "install" }
+                )],
             );
             return Ok(());
         }
@@ -3132,9 +3328,12 @@ impl Flow {
                 "the phone's codename was not typed in this run: nothing is written".into(),
             ));
         }
-        let (Some(release), Some(_), Some(pinned)) = (
+        let repair = self.options.repair;
+        // A Repair writes no firmware, so it reads no build index; every
+        // other write needs the verified one
+        let (Some(release), true, Some(pinned)) = (
             self.release.clone(),
-            self.index.as_ref(),
+            repair || self.index.is_some(),
             self.pinned.clone(),
         ) else {
             return Err(Error::Refused(
@@ -3146,6 +3345,21 @@ impl Flow {
                 "the release's images were not checked in this run: nothing is written".into(),
             ));
         };
+        // What the owner confirmed for a Repair is the boot images alone,
+        // and what they confirmed for an install is not a Repair
+        if plan.repair != repair
+            || (repair
+                && (!release.manifest().on_running_slot()
+                    || plan.writes.len() != release.manifest().boot_writes.len()
+                    || plan
+                        .writes
+                        .iter()
+                        .any(|w| w.partition == release.manifest().root_image.partition.name())))
+        {
+            return Err(Error::Refused(
+                "the plan the owner confirmed is not this run's: nothing is written".into(),
+            ));
+        }
         let report = probe(&mut transport).await?;
         match self.judge(&report) {
             Judged::Stopped => return Ok(None),
@@ -3166,6 +3380,7 @@ impl Flow {
                 );
                 return Ok(None);
             }
+            Judged::Repair => {}
             Judged::Ready { build, .. } => {
                 if self.zip.as_ref().is_none_or(|z| z.build != build.build) {
                     self.stop(
@@ -3195,13 +3410,25 @@ impl Flow {
                 .filter(|_| slot_b),
             maintainer_skip_bootloader_slot_check: false,
             other_slot_measured: self.measured.clone().filter(|_| slot_b),
-            owner_ssh_key: self.options.owner_ssh_key.clone(),
+            owner_ssh_key: self.options.owner_ssh_key.clone().filter(|_| !repair),
+            repair,
         };
         // Every condition above held: the one token there is, for the one
         // session that writes. Nothing else in any crate can make one.
         let token = WriteToken(());
         let opened =
             match Session::connect_writing(transport, &release, &pinned, options, token).await {
+                // A Repair: the boot images alone, with no answers and no
+                // userdata. The session must say it is one
+                Ok(session) if repair => {
+                    if session.repairs() {
+                        Ok(session)
+                    } else {
+                        Err(Error::Refused(
+                            "the session is not a repair: nothing is written".into(),
+                        ))
+                    }
+                }
                 // The answers the owner gave in this run, as the image's
                 // blocks: the session takes the root image only with them,
                 // and checks that before the first write
@@ -3294,10 +3521,11 @@ impl Flow {
         self.stop(
             StopKind::WriteInterrupted(error.clone()),
             Retry::Whenever,
-            if reach == WriteReach::Nothing {
-                "The install stopped before anything was written"
-            } else {
-                "The install stopped partway"
+            match (reach == WriteReach::Nothing, self.options.repair) {
+                (true, false) => "The install stopped before anything was written",
+                (false, false) => "The install stopped partway",
+                (true, true) => "The repair stopped before anything was written",
+                (false, true) => "The repair stopped partway",
             },
             vec![
                 format!("The install did not run through ({error})."),
@@ -3327,7 +3555,11 @@ impl Flow {
         self.write_reach = None;
         self.link_serial = Some(session.serial().to_string());
         self.write_slot = session.running_slot();
-        self.step = Step::Installed(plan.clone());
+        self.step = if self.options.repair {
+            Step::Repaired(plan.clone())
+        } else {
+            Step::Installed(plan.clone())
+        };
         Ok(session.into_transport())
     }
 
@@ -3449,6 +3681,19 @@ impl Flow {
         };
         let developer_options = String::from("In Settings > About phone, tap \"Build number\" seven times. Then in Settings > System > Developer options, switch on \"OEM unlocking\". If it is greyed out, connect the phone to the internet once (it stays grey until then after a reset); if it is still grey, the phone is most likely locked to its carrier and can't run Omarchy Mobile.");
         match &self.step {
+            Step::Warning if self.options.repair => {
+                s.state = "warning";
+                s.action = "acknowledge";
+                s.title = "Repair: read this once".into();
+                s.body = vec!["It is the only warning; nothing will ask again.".into()];
+                s.steps = vec![
+                    step(format!("A repair is for a {name} that runs Omarchy Mobile and no longer starts, for example after a kernel update: it writes this release's boot images again to the slot the phone runs from, then restarts the phone. It needs the phone unlocked and in Fastboot Mode: {keys}.")),
+                    step(REPAIR_KEEPS),
+                    step(format!("The boot images written are this release's ({label}). Use the newest release for this phone: the system on the phone keeps the kernel modules of its own last update, and a kernel much older than them may start without some of its drivers.")),
+                    step(format!("{REPAIR_WAY_BACK} {GO_BACK_TO_ANDROID}")),
+                ];
+                s.footer = vec!["Nothing is asked of the phone until you accept.".into()];
+            }
             Step::Warning => {
                 s.state = "warning";
                 s.action = "acknowledge";
@@ -3774,7 +4019,12 @@ impl Flow {
                 s.state = "dry-run";
                 s.action = "dry-run";
                 s.title = "The dry run".into();
-                s.body = if self.options.write {
+                s.body = if self.options.repair {
+                    vec![
+                        "The installer now asks the phone every question a repair starts with, checks every boot image of the release against its signed checksum, and works out exactly what it will write.".into(),
+                        "This step sends no write: it reads. Nothing is written before you have seen the list and typed the phone's codename.".into(),
+                    ]
+                } else if self.options.write {
                     vec![
                         "The installer now asks the phone every question an install starts with, checks every image of the release against its signed checksum, and works out exactly what it will write.".into(),
                         "This step sends no write: it reads. Nothing is written before you have seen the list and typed the phone's codename.".into(),
@@ -3794,30 +4044,15 @@ impl Flow {
                 } else {
                     "The dry run passed. Nothing was written".into()
                 };
-                let a = &plan.answers;
-                s.body = vec![
-                    format!(
-                        "The {name} ({}) is unlocked and runs from slot {}; bootloader {}{}.",
-                        plan.product,
-                        plan.current_slot,
-                        plan.bootloader,
-                        plan.baseband
-                            .as_ref()
-                            .map(|b| format!(", baseband {b}"))
-                            .unwrap_or_default()
-                    ),
-                    format!(
-                        "Google's factory image for build {} is the right file ({}).",
-                        plan.factory_zip.build, plan.factory_zip.name
-                    ),
-                ];
+                s.body = vec![phone_line(&name, plan)];
+                s.body.extend(factory_zip_line(plan));
                 if plan.slot_b_bootloader_in_use {
                     s.body.push(slot_b_bootloader_line(plan));
                 }
                 if let Some(slot) = plan.running_slot {
                     s.body.push(running_slot_line(slot));
                 }
-                s.body.extend([
+                s.body.extend(plan.answers.as_ref().map(|a| {
                     format!(
                         "User {} ({}), phone name {}, time zone {}, Wi-Fi {}.",
                         a.username,
@@ -3825,7 +4060,9 @@ impl Flow {
                         a.hostname,
                         a.timezone,
                         if a.wifi { "set" } else { "not set" }
-                    ),
+                    )
+                }));
+                s.body.extend([
                     if self.has_install_link() {
                         "An install would give these answers to the phone over the install link, after the write; the system image is written as the release signed it.".into()
                     } else if !self.has_place_for_answers() {
@@ -3847,27 +4084,33 @@ impl Flow {
                     "This run was a dry run, and it ends here: a dry run has no step that writes to a phone.".into(),
                 ];
             }
+            Step::Confirm(plan) if plan.repair => {
+                s.state = "confirm";
+                s.action = "confirm";
+                s.title = "This is what the repair will write".into();
+                let slot = plan.running_slot.map(|s| s.name()).unwrap_or("a");
+                s.body = vec![
+                    phone_line(&name, plan),
+                    format!("The repair writes this release's boot images again to slot {slot}, the slot the phone runs from, and restarts the phone. It writes nothing else."),
+                    "Every boot image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
+                ];
+                s.plan = plan.writes.iter().map(PlannedWrite::line).collect();
+                s.plan.push("then: restart the phone (reboot)".into());
+                s.footer = vec![
+                    "userdata is not written: your account, your files and everything else stored on the phone are kept.".into(),
+                    format!("Slot {slot}'s boot partitions, listed above, are overwritten with this release's boot images."),
+                    format!("No slot is made active: the phone keeps starting from slot {slot}. The other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written."),
+                    REPAIR_WAY_BACK.into(),
+                    format!("To go ahead, type the phone's codename: {codename}"),
+                    "Anything else stops the repair here, with nothing written.".into(),
+                ];
+            }
             Step::Confirm(plan) => {
                 s.state = "confirm";
                 s.action = "confirm";
                 s.title = "This is what the installer will write".into();
-                let a = &plan.answers;
-                s.body = vec![
-                    format!(
-                        "The {name} ({}) is unlocked and runs from slot {}; bootloader {}{}.",
-                        plan.product,
-                        plan.current_slot,
-                        plan.bootloader,
-                        plan.baseband
-                            .as_ref()
-                            .map(|b| format!(", baseband {b}"))
-                            .unwrap_or_default()
-                    ),
-                    format!(
-                        "Google's factory image for build {} is the right file ({}).",
-                        plan.factory_zip.build, plan.factory_zip.name
-                    ),
-                ];
+                s.body = vec![phone_line(&name, plan)];
+                s.body.extend(factory_zip_line(plan));
                 if plan.slot_b_bootloader_in_use {
                     s.body.push(slot_b_bootloader_line(plan));
                 }
@@ -3875,7 +4118,7 @@ impl Flow {
                     s.body.push(running_slot_line(slot));
                 }
                 s.body.extend(other_slot_lines(plan));
-                s.body.extend([
+                s.body.extend(plan.answers.as_ref().map(|a| {
                     format!(
                         "Your answers: user {} ({}), phone name {}, time zone {}, Wi-Fi {}{}. The phone sets up your account from them at its first start.",
                         a.username,
@@ -3888,9 +4131,9 @@ impl Flow {
                         } else {
                             ""
                         }
-                    ),
-                    "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
-                ]);
+                    )
+                }));
+                s.body.push("Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into());
                 if let Some(at) = self
                     .options
                     .owner_ssh_key
@@ -3988,6 +4231,10 @@ impl Flow {
                 s.title = "Writing to the phone".into();
                 s.body = vec![
                     match plan.running_slot {
+                        Some(slot) if plan.repair => format!(
+                            "The installer now writes the {} boot images that were listed, to slot {slot}, the slot the phone runs from, then restarts the phone. It writes no userdata and makes no slot active.",
+                            plan.writes.len()
+                        ),
                         Some(slot) => format!(
                             "The installer now writes the {} partitions that were listed, to slot {slot}, the slot the phone runs from, then restarts the phone. It makes no slot active.",
                             plan.writes.len()
@@ -4044,6 +4291,24 @@ impl Flow {
                         "The install guide's \"Going back to Android\" has the steps to put the phone back as it was sold.".into(),
                     ]
                 };
+            }
+            Step::Repaired(plan) => {
+                s.state = "repaired";
+                s.title = "The boot images are written, and the phone is restarting".into();
+                let slot = plan.running_slot.map(|s| s.name()).unwrap_or("a");
+                s.body = vec![
+                    format!(
+                        "Every boot image was written, and the phone confirmed each one: {}.",
+                        plan.writes
+                            .iter()
+                            .map(|w| w.partition.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    format!("The phone was told to restart. It starts Omarchy Mobile from slot {slot}, the slot it ran from, with this release's boot images; no slot was made active."),
+                    "userdata was not written: the phone starts into your account as it was, with everything that was stored on it.".into(),
+                ];
+                s.footer = vec![REPAIR_WAY_BACK.into(), GO_BACK_TO_ANDROID.into()];
             }
             Step::Stopped(stop) => {
                 s.state = "stopped";
@@ -4125,6 +4390,32 @@ fn other_slot_lines(plan: &DryRunPlan) -> Vec<String> {
         )
     });
     lines
+}
+
+/// The first line of the dry run's last screen and of the confirmation:
+/// the phone as the dry run found it.
+fn phone_line(name: &str, plan: &DryRunPlan) -> String {
+    format!(
+        "The {name} ({}) is unlocked and runs from slot {}; bootloader {}{}.",
+        plan.product,
+        plan.current_slot,
+        plan.bootloader,
+        plan.baseband
+            .as_ref()
+            .map(|b| format!(", baseband {b}"))
+            .unwrap_or_default()
+    )
+}
+
+/// The line about the factory image that was checked: none in a Repair,
+/// which takes none.
+fn factory_zip_line(plan: &DryRunPlan) -> Option<String> {
+    plan.factory_zip.as_ref().map(|z| {
+        format!(
+            "Google's factory image for build {} is the right file ({}).",
+            z.build, z.name
+        )
+    })
 }
 
 /// The line of the dry run's last screen and of the confirmation that says
@@ -4276,6 +4567,8 @@ enum Judged {
     /// The phone runs from slot B: the owner is asked what slot B holds.
     AskSlotB,
     Locked,
+    /// A Repair: the phone passed every stop of one, and is unlocked.
+    Repair,
     Ready {
         build: Box<Build>,
         same_pair: Vec<String>,

@@ -43,6 +43,10 @@ pub async fn walk<T: Transport>(
         let image = release.verify_boot_image(write, bundle.image(&write.image))?;
         session.flash_boot(&image).await?;
     }
+    // A Repair ends after the boot images: the read-back and the restart
+    if session.repairs() {
+        return session.activate_and_reboot().await;
+    }
     let mut check = release.root_image_check();
     check.update(&bundle.root_zst);
     let root = check.finish()?;

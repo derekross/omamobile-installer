@@ -93,14 +93,19 @@ fn on_the_fixed_list(partition: &str) -> bool {
 /// The same for the slot a session writes: that slot's boot images and
 /// `userdata`. The other slot's names are never on it.
 fn on_the_fixed_list_for(partition: &str, slot: Slot) -> bool {
+    partition == "userdata" || on_the_repair_list_for(partition, slot)
+}
+
+/// The fixed list of a Repair ([`Grant::Repair`]): that slot's boot images,
+/// and never `userdata`, whatever a session's own list holds.
+fn on_the_repair_list_for(partition: &str, slot: Slot) -> bool {
     let suffix = match slot {
         Slot::A => "_a",
         Slot::B => "_b",
     };
-    partition == "userdata"
-        || partition
-            .strip_suffix(suffix)
-            .is_some_and(|image| crate::manifest::SLOT_B_IMAGES.contains(&image))
+    partition
+        .strip_suffix(suffix)
+        .is_some_and(|image| crate::manifest::SLOT_B_IMAGES.contains(&image))
 }
 
 /// `download:` and the size as exactly eight hex digits, as this crate
@@ -137,6 +142,12 @@ pub(crate) enum Grant {
     /// runs from: these partitions (each also on the gate's fixed list for
     /// that slot), `download:` and `reboot`. No `set_active` of any kind.
     WriteRunning(Slot, Vec<String>),
+    /// The session of a Repair of a format-2 release (docs/DESIGN.md §11,
+    /// "Repair"): these partitions, each also on that slot's fixed list of
+    /// boot images, which never holds `userdata`; `download:` and `reboot`.
+    /// No `set_active` of any kind, and no `flash:userdata` whatever the
+    /// list says.
+    Repair(Slot, Vec<String>),
 }
 
 /// Every command this crate may put on the wire, and nothing more. The
@@ -160,21 +171,28 @@ pub(crate) enum Grant {
 /// asks gets none of them either.
 #[cfg(test)]
 fn allowed(command: &str, flashable: &[String], slot_probe: bool) -> bool {
-    allowed_on(command, flashable, slot_probe, Slot::B, true)
+    allowed_on(command, flashable, slot_probe, Slot::B, true, true)
 }
 
 /// [`allowed`], for a client whose fixed list is `slot`'s, and which may
 /// send `set_active:b` (format 1's writer) or no `set_active` at all
-/// (format 2's, whose `slot` is the one the phone runs from).
+/// (format 2's, whose `slot` is the one the phone runs from). `userdata`:
+/// whether `userdata` is on the fixed list at all; not for a Repair.
 fn allowed_on(
     command: &str,
     flashable: &[String],
     slot_probe: bool,
     slot: Slot,
     set_active: bool,
+    userdata: bool,
 ) -> bool {
     if let Some(partition) = command.strip_prefix("flash:") {
-        return flashable.iter().any(|p| p == partition) && on_the_fixed_list_for(partition, slot);
+        let fixed = if userdata {
+            on_the_fixed_list_for(partition, slot)
+        } else {
+            on_the_repair_list_for(partition, slot)
+        };
+        return flashable.iter().any(|p| p == partition) && fixed;
     }
     if command == GET_UNLOCK_ABILITY || command.starts_with("getvar:") {
         return true;
@@ -454,6 +472,9 @@ pub(crate) struct Client<T> {
     slot: Slot,
     /// Whether `set_active:b` may leave: format 1's writer only.
     set_active: bool,
+    /// Whether `userdata` is on the gate's fixed list: not for a Repair's
+    /// writer ([`Grant::Repair`]).
+    userdata: bool,
 }
 
 impl<T> Client<T> {
@@ -464,11 +485,12 @@ impl<T> Client<T> {
 
     /// A client with what it may send beyond questions fixed for its life.
     pub(crate) fn granted(transport: T, grant: Grant) -> Self {
-        let (flashable, slot_probe, slot, set_active) = match grant {
-            Grant::Ask => (Vec::new(), false, Slot::B, false),
-            Grant::SlotProbe => (Vec::new(), true, Slot::B, false),
-            Grant::Write(list) => (list, false, Slot::B, true),
-            Grant::WriteRunning(slot, list) => (list, false, slot, false),
+        let (flashable, slot_probe, slot, set_active, userdata) = match grant {
+            Grant::Ask => (Vec::new(), false, Slot::B, false, true),
+            Grant::SlotProbe => (Vec::new(), true, Slot::B, false, true),
+            Grant::Write(list) => (list, false, Slot::B, true, true),
+            Grant::WriteRunning(slot, list) => (list, false, slot, false, true),
+            Grant::Repair(slot, list) => (list, false, slot, false, false),
         };
         Client {
             transport,
@@ -477,6 +499,7 @@ impl<T> Client<T> {
             slot_probe,
             slot,
             set_active,
+            userdata,
         }
     }
 
@@ -485,23 +508,26 @@ impl<T> Client<T> {
     /// a write, and the gate would not pass one.
     #[cfg(test)]
     fn for_session(transport: T, flashable: Vec<String>, dry_run: bool) -> Self {
-        Self::for_session_on(transport, flashable, dry_run, None)
+        Self::for_session_on(transport, flashable, dry_run, None, false)
     }
 
     /// As [`Self::for_session`]; `running`: a format-2 session, writing
-    /// the slot the phone runs from.
+    /// the slot the phone runs from; `repair`: a Repair of it, which writes
+    /// that slot's boot images and nothing else.
     fn for_session_on(
         transport: T,
         flashable: Vec<String>,
         dry_run: bool,
         running: Option<Slot>,
+        repair: bool,
     ) -> Self {
         Self::granted(
             transport,
-            match (dry_run, running) {
-                (true, _) => Grant::Ask,
-                (false, None) => Grant::Write(flashable),
-                (false, Some(slot)) => Grant::WriteRunning(slot, flashable),
+            match (dry_run, running, repair) {
+                (true, _, _) => Grant::Ask,
+                (false, None, _) => Grant::Write(flashable),
+                (false, Some(slot), false) => Grant::WriteRunning(slot, flashable),
+                (false, Some(slot), true) => Grant::Repair(slot, flashable),
             },
         )
     }
@@ -552,6 +578,7 @@ impl<T: Transport> Client<T> {
             self.slot_probe,
             self.slot,
             self.set_active,
+            self.userdata,
         ) {
             return Err(Error::Refused(format!(
                 "'{command}' is not a command this installer sends"
@@ -680,6 +707,16 @@ pub struct PhoneOptions {
     /// (`vendor_kernel_boot`, else `vendor_boot`) is written with it, and
     /// every other image as the release signed it.
     pub owner_ssh_key: Option<String>,
+    /// A Repair (docs/DESIGN.md §11, "Repair"): only for a release that
+    /// installs on the slot the phone runs from (format 2), it writes that
+    /// slot's boot images again and nothing else. The gate's list is the
+    /// slot's boot images without `userdata`, and the gate's own fixed list
+    /// for it holds no `userdata` either, so `flash:userdata` is refused
+    /// there whatever a list says. No answers are taken, `userdata` is never
+    /// begun, and after the last boot image come the read-back and `reboot`.
+    /// Whether a session writes is still not an option: a Repair's dry run
+    /// writes nothing, like every other.
+    pub repair: bool,
 }
 
 impl Default for PhoneOptions {
@@ -691,6 +728,7 @@ impl Default for PhoneOptions {
             maintainer_skip_bootloader_slot_check: false,
             other_slot_measured: None,
             owner_ssh_key: None,
+            repair: false,
         }
     }
 }
@@ -769,6 +807,9 @@ pub struct Session<T: Transport> {
     /// this session writes and reads again before the first write and
     /// after the last. `None`: format 1 (slot B, then `set_active:b`).
     running: Option<Slot>,
+    /// A Repair ([`PhoneOptions::repair`]): the running slot's boot images,
+    /// then the read-back and `reboot`; no `userdata`, no answers.
+    repair: bool,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -838,6 +879,21 @@ impl<T: Transport> Session<T> {
         }
         let m: &Manifest = release.manifest();
         let on_running = m.on_running_slot();
+        let repair = options.repair;
+        // A Repair writes the running slot's boot images and keeps userdata:
+        // there is no such thing for a release that writes slot B and makes
+        // it active (format 1), and nothing of the answers goes with it
+        if repair && !on_running {
+            return Err(Error::Refused(
+                "a repair is only for a release that installs on the slot the phone runs from (manifest format 2)".into(),
+            ));
+        }
+        if repair && options.owner_ssh_key.is_some() {
+            return Err(Error::Refused(
+                "a repair writes the release's boot images as they were signed: no SSH key is added"
+                    .into(),
+            ));
+        }
         // A format-2 install switches no slot: what a session would do with
         // a measurement of the other slot has no place in it
         if on_running && options.other_slot_measured.is_some() {
@@ -958,7 +1014,15 @@ impl<T: Transport> Session<T> {
             .iter()
             .map(|w| w.partition(target).name().to_string())
             .collect();
-        flashable.push(m.root_image.partition.name().to_string());
+        // A Repair: the boot images alone. userdata is not on its list, and
+        // not on the gate's fixed list for it either
+        if repair {
+            client.log.push(format!(
+                "repair: slot {target}'s boot images only; userdata is not written"
+            ));
+        } else {
+            flashable.push(m.root_image.partition.name().to_string());
+        }
         let mut client = Client {
             log: core::mem::take(&mut client.log),
             ..Client::for_session_on(
@@ -966,6 +1030,7 @@ impl<T: Transport> Session<T> {
                 flashable,
                 dry_run,
                 on_running.then_some(target),
+                repair,
             )
         };
         let max_download_size = parse_size(&client.getvar("max-download-size").await?)
@@ -1036,6 +1101,7 @@ impl<T: Transport> Session<T> {
             answers_sent: Vec::new(),
             owner_key,
             running: on_running.then_some(target),
+            repair,
         })
     }
 
@@ -1098,6 +1164,11 @@ impl<T: Transport> Session<T> {
     /// where they go: a piece that covers one of their blocks must carry
     /// them there, and `userdata` is not finished until each block was sent.
     pub(crate) fn set_answers(&mut self, answers: RootAnswers) -> Result<()> {
+        if self.repair {
+            return Err(Error::Refused(
+                "a repair writes no userdata, so it takes no answers".into(),
+            ));
+        }
         if !matches!(self.state, State::Boot(_)) {
             return Err(Error::Refused(
                 "the answers go in before userdata is begun".into(),
@@ -1128,7 +1199,9 @@ impl<T: Transport> Session<T> {
     /// write, and its image is written as the release signed it, with no
     /// answers in it (docs/DESIGN.md §12).
     fn answers_ready(&self) -> Result<()> {
-        if self.is_dry_run() {
+        // A Repair writes the boot images alone, and userdata never: the
+        // account on the phone is the one it has
+        if self.is_dry_run() || self.repair {
             return Ok(());
         }
         if self.release.manifest().install_link.is_some() {
@@ -1233,6 +1306,9 @@ impl<T: Transport> Session<T> {
     /// checked against its partition before anything is written. The root
     /// image that is then streamed must be that size.
     pub async fn preflight_userdata(&mut self, image_len: u64) -> Result<()> {
+        if self.repair {
+            return Err(Error::Refused("a repair writes no userdata".into()));
+        }
         if self.state != State::Boot(0) {
             return Err(Error::Refused(
                 "userdata's size is checked before the first write".into(),
@@ -1281,11 +1357,21 @@ impl<T: Transport> Session<T> {
             m.root_image.partition.name(),
             m.root_image.name
         ));
+        // A Repair's list ends with the boot images
+        if self.repair {
+            out.pop();
+        }
         if self.running.is_none() {
             out.push("set_active b".into());
         }
         out.push("reboot".into());
         out
+    }
+
+    /// Whether this session is a Repair ([`PhoneOptions::repair`]): the
+    /// running slot's boot images and nothing else.
+    pub fn repairs(&self) -> bool {
+        self.repair
     }
 
     /// The slot this session writes, for a format-2 release: the one the
@@ -1480,6 +1566,12 @@ impl<T: Transport> Session<T> {
         proof: &VerifiedRootImage,
         image_len: u64,
     ) -> Result<()> {
+        // Not in a Repair, at any point: userdata keeps what the phone has
+        if self.repair {
+            return self.fail(Error::Refused(
+                "a repair writes no userdata: nothing more is sent".into(),
+            ));
+        }
         let boots = self.release.manifest().boot_writes.len();
         if self.state != State::Boot(boots) {
             return Err(Error::Refused(
@@ -1630,10 +1722,23 @@ impl<T: Transport> Session<T> {
     /// still be the one written; the slot flags are logged), and restart,
     /// with no slot made active.
     pub async fn activate_and_reboot(&mut self) -> Result<()> {
-        if self.state != State::UserdataDone {
+        // A Repair ends after the last boot image: the read-back, then the
+        // restart. Every other session, after userdata
+        let boots = self.release.manifest().boot_writes.len();
+        let ready = if self.repair {
+            self.state == State::Boot(boots)
+        } else {
+            self.state == State::UserdataDone
+        };
+        if !ready {
             return Err(Error::Refused(
                 "slot B is made active only after every write succeeded".into(),
             ));
+        }
+        // Every boot image is written and confirmed: that is all a Repair
+        // writes
+        if self.repair && !self.is_dry_run() {
+            self.reach = WriteReach::Written;
         }
         if let Err(e) = self.still_pinned().await {
             return self.fail(e);
@@ -2101,7 +2206,8 @@ mod tests {
                 assert!(!on_the_fixed_list_for(p, slot), "{p}");
             }
             // A dry run on the running slot has no list, as every dry run
-            let dry = Client::for_session_on(Recorder::default(), list.clone(), true, Some(slot));
+            let dry =
+                Client::for_session_on(Recorder::default(), list.clone(), true, Some(slot), false);
             assert!(dry.flashable.is_empty() && !dry.set_active);
         }
         // Format 1's writer still sends set_active:b, and only that one
@@ -2109,6 +2215,74 @@ mod tests {
         assert!(block_on(c.simple("set_active:b")).is_ok());
         assert!(block_on(c.simple("set_active:a")).is_err());
         assert!(block_on(c.simple("flash:boot_a")).is_err());
+    }
+
+    /// The boot images of `slot`, without userdata: a Repair's list.
+    fn boot_images_on(slot: Slot) -> Vec<String> {
+        ours_on(slot)
+            .into_iter()
+            .filter(|p| p != "userdata")
+            .collect()
+    }
+
+    #[test]
+    fn a_repairs_writer_flashes_its_slots_boot_images_only_never_userdata_and_no_set_active() {
+        for slot in [Slot::A, Slot::B] {
+            let list = boot_images_on(slot);
+            let other = boot_images_on(slot.other());
+            // A list that holds everything there is: the gate's own fixed
+            // list for a Repair is what refuses
+            let mut everything = list.clone();
+            everything.extend(other.iter().cloned());
+            everything.push("userdata".into());
+            let client =
+                || Client::granted(Recorder::default(), Grant::Repair(slot, everything.clone()));
+            // Its slot's boot images, a download and the restart
+            for command in list
+                .iter()
+                .map(|p| format!("flash:{p}"))
+                .chain(["download:00000010".to_string(), "reboot".to_string()])
+            {
+                let mut c = client();
+                assert!(block_on(c.simple(&command)).is_ok(), "{slot}: {command}");
+                assert_eq!(c.transport.sent, [command]);
+            }
+            // Never userdata, never the other slot, never a slot command,
+            // even with each name on the session's own list
+            for command in other.iter().map(|p| format!("flash:{p}")).chain(
+                [
+                    "flash:userdata",
+                    "set_active:a",
+                    "set_active:b",
+                    "set_active:",
+                    "reboot-bootloader",
+                    "erase:userdata",
+                ]
+                .map(String::from),
+            ) {
+                let mut c = client();
+                assert!(block_on(c.simple(&command)).is_err(), "{slot}: {command}");
+                assert!(c.transport.sent.is_empty(), "{slot}: {command} was sent");
+            }
+            // The fixed list of a Repair holds the slot's images, and not
+            // userdata, which the install's fixed list holds
+            for p in &list {
+                assert!(on_the_repair_list_for(p, slot), "{p}");
+            }
+            assert!(!on_the_repair_list_for("userdata", slot));
+            assert!(on_the_fixed_list_for("userdata", slot));
+            for p in &other {
+                assert!(!on_the_repair_list_for(p, slot), "{p}");
+            }
+            // A Repair's session client is made with that grant; a dry run
+            // of one has no list, as every dry run
+            let writer =
+                Client::for_session_on(Recorder::default(), list.clone(), false, Some(slot), true);
+            assert!(!writer.userdata && !writer.set_active && writer.slot == slot);
+            let dry =
+                Client::for_session_on(Recorder::default(), list.clone(), true, Some(slot), true);
+            assert!(dry.flashable.is_empty() && !dry.set_active);
+        }
     }
 
     #[test]
@@ -2167,8 +2341,9 @@ mod tests {
             maintainer_skip_bootloader_slot_check,
             other_slot_measured,
             owner_ssh_key,
+            repair,
         } = PhoneOptions::default();
-        assert!(!reinstall && !maintainer_skip_bootloader_slot_check);
+        assert!(!reinstall && !maintainer_skip_bootloader_slot_check && !repair);
         assert_eq!(other_slot_measured, None);
         assert_eq!(bootloader_slots_confirmed, None);
         assert_eq!(owner_ssh_key, None);

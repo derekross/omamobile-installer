@@ -215,3 +215,61 @@ fn the_session_that_writes_refuses_userdata_without_the_answers() {
         assert!(phone.written().is_empty());
     }
 }
+
+/// A Repair at the write step, with the codename typed.
+fn repair_at_the_write(bundle: &TestBundle, phone: &FakePhone) -> Flow {
+    let options = FlowOptions {
+        write: true,
+        repair: true,
+        ..Default::default()
+    };
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), options);
+    drive(&mut flow, bundle, phone, "cheetah", "write");
+    assert!(matches!(flow.step, Step::Write(_)), "{:?}", flow.step);
+    flow
+}
+
+/// `begin_write` of a Repair writes only what the owner confirmed for a
+/// Repair: a plan that names userdata, or a flow that is no longer a
+/// Repair at the write, is refused with nothing sent. No order of the
+/// public steps reaches either.
+#[test]
+fn begin_write_itself_refuses_a_repair_whose_plan_is_not_the_boot_images_alone() {
+    let bundle = TestBundle::running(&["a"]);
+    let phone = FakePhone::scenario("running-a").unwrap();
+    // userdata slipped into the plan the owner confirmed
+    let mut flow = repair_at_the_write(&bundle, &phone);
+    if let Step::Write(plan) = &mut flow.step {
+        plan.writes.push(PlannedWrite {
+            partition: "userdata".into(),
+            source: "root".into(),
+            bytes: 1,
+            partition_bytes: 1,
+            pieces: Some(1),
+        });
+    }
+    refused_with_nothing_sent(flow, &phone, "not this run's");
+    // The flow said to be an install at the write, with a Repair's plan
+    // (and no build index, which a Repair never read)
+    let mut flow = repair_at_the_write(&bundle, &phone);
+    flow.options.repair = false;
+    refused_with_nothing_sent(flow, &phone, "nothing is written");
+    // ... and with the index there too: the plan is still a Repair's
+    let mut flow = repair_at_the_write(&bundle, &phone);
+    flow.options.repair = false;
+    flow.index = Some(
+        flow.release
+            .as_ref()
+            .unwrap()
+            .build_index(bundle.index().unwrap())
+            .unwrap(),
+    );
+    refused_with_nothing_sent(flow, &phone, "not this run's");
+    // The control: as it was, the Repair's session opens
+    let mut flow = repair_at_the_write(&bundle, &phone);
+    let session = block_on(flow.begin_write(phone.clone()))
+        .unwrap()
+        .expect("the Repair's writing session");
+    assert!(session.repairs() && !session.may_flash().contains(&"userdata".to_string()));
+    assert!(phone.changes().is_empty());
+}
