@@ -92,6 +92,15 @@ if [ -n "$v" ]; then printf %s "$v" | sha256sum | cut -d" " -f1; else echo no-se
     /// phone whose image carries no first-start answers never makes one;
     /// its first start is over when systemd has finished starting.
     pub const FIRST_START_DONE: &str = "test -e /var/lib/omamobile/firstboot/done || { ! test -e /etc/omamobile/firstboot.conf && systemctl is-system-running 2>/dev/null | grep -cE '^(running|degraded)$' >/dev/null; }";
+    /// Holds off the phone's sleep while the steps after the write work on
+    /// it, as Omarchy Mobile's `tools/install-guided` does (#814): a freshly
+    /// written phone has no firmware yet, so its modem and the modem's sleep
+    /// inhibitor can't start, and auto-sleep put it to sleep between its
+    /// first start and the radio backup, which drops USB (2026-11-15). A
+    /// transient unit in RAM, restarted at each step so each has its own
+    /// hour; a restart ends it and the check stops it.
+    pub const KEEP_AWAKE: &str = "systemctl stop omamobile-install-awake 2>/dev/null; systemd-run --quiet --collect --unit=omamobile-install-awake -p RuntimeMaxSec=3600 systemd-inhibit --what=sleep --who=omamobile-install --why='the installer is setting up the phone' --mode=block sleep infinity";
+    pub const RELEASE_AWAKE: &str = "systemctl stop omamobile-install-awake";
     pub const BOOT_ID: &str = "cat /proc/sys/kernel/random/boot_id";
     pub const SYSTEM: &str = "systemctl is-system-running";
     /// install-guided's restart: the modem's unit is stopped first, since
@@ -1115,6 +1124,16 @@ impl After {
         }
     }
 
+    /// The sleep hold (`ask::KEEP_AWAKE`); a phone that refuses it is told
+    /// about, not stopped for.
+    fn keep_awake(&mut self, watch: &mut dyn Watch) {
+        if self.phone(ask::KEEP_AWAKE).is_some() {
+            watch.note("the phone is kept from sleeping until its setup is done (its screen still goes dark)");
+        } else {
+            watch.note("the phone couldn't be asked to stay awake; if it goes dark and stops answering, press its power key once and try again");
+        }
+    }
+
     fn first_start(&mut self, watch: &mut dyn Watch) -> Res<()> {
         self.tools_ready()?;
         let began = Instant::now();
@@ -1157,6 +1176,7 @@ impl After {
             return Ok(());
         }
         watch.note("the first start has finished");
+        self.keep_awake(watch);
         self.put("first_start", json!(true))?;
         self.step = Step::Backup;
         Ok(())
@@ -1207,6 +1227,7 @@ impl After {
         if !self.written_phone() {
             return Ok(());
         }
+        self.keep_awake(watch);
         let dir = self.backup_dir();
         if let Some(parent) = dir.parent() {
             fs::create_dir_all(parent)?;
@@ -1253,6 +1274,7 @@ impl After {
         if !self.written_phone() {
             return Ok(());
         }
+        self.keep_awake(watch);
         let backup = PathBuf::from(self.record.get("backup_dir").unwrap_or_default());
         let args = [
             std::ffi::OsStr::new("--first-install"),
@@ -1346,6 +1368,7 @@ impl After {
         let mut rows = Vec::new();
         let mut needed_failed = false;
         if has_smoke {
+            self.keep_awake(watch);
             let tools = self.tools.clone().unwrap_or_default();
             let mut c = Command::new("bash");
             c.arg(tools.join(SMOKE))
@@ -1354,6 +1377,7 @@ impl After {
                 .stdin(Stdio::null())
                 .stderr(Stdio::piped());
             let out = c.output()?;
+            self.phone(ask::RELEASE_AWAKE);
             private_file(&report_path, &out.stdout)?;
             for line in String::from_utf8_lossy(&out.stderr).lines() {
                 watch.note(line);

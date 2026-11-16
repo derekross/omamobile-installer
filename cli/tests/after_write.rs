@@ -442,6 +442,27 @@ fn after_the_write_the_phone_is_set_up_with_the_releases_tools_step_by_step() {
         );
         since = at + 1;
     }
+    // The phone is held awake for the backup, the firmware and the check (a
+    // freshly written phone has no modem yet to hold it, and auto-sleep drops
+    // USB), and the hold is let go once the check has run
+    let mut since = 0;
+    for step in ["nv-backup", "phone-provision", "phone-smoke"] {
+        let at = log.iter().position(|l| l.starts_with(step)).unwrap();
+        assert!(
+            log[since..at]
+                .iter()
+                .any(|l| l.starts_with("ssh ") && l.contains("omamobile-install-awake") && l.contains("--what=sleep")),
+            "the phone was held awake before {step}: {:?}",
+            &log[since..at]
+        );
+        since = at + 1;
+    }
+    let smoke = log.iter().position(|l| l.starts_with("phone-smoke")).unwrap();
+    assert!(
+        log[smoke..].iter().any(|l| l.trim() == "ssh systemctl stop omamobile-install-awake"),
+        "the hold is let go after the check: {:?}",
+        &log[smoke..]
+    );
     let stderr = tool.finish();
     // The pretend phone in Fastboot Mode received the write and nothing after
     assert!(stderr.contains("partitions written: 6"), "{stderr}");
