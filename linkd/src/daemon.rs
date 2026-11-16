@@ -794,10 +794,28 @@ impl Daemon {
             Some("no") => "no",
             _ => "yes",
         };
+        // A release on the running slot (INSTALL_SLOT=active, manifest
+        // format 2): the hook writes `<image>_<SLOT>` and only while the
+        // phone runs from it, so SLOT= names the slot this boot runs from,
+        // on its own line before AUTO_WRITE=. A slot that can't be read
+        // turns the hook off rather than leave it to guess. Format 1 (slot
+        // B) writes no SLOT= line: absent means b
+        let (slot, auto) = if self.desc.get("INSTALL_SLOT") == Some("active") {
+            match found::running_slot(&self.root) {
+                Some(slot) => (format!("SLOT={slot}\n"), auto),
+                None => (
+                    "# The slot this phone runs from could not be read, so kernel updates are off.\n"
+                        .to_string(),
+                    "no",
+                ),
+            }
+        } else {
+            (String::new(), auto)
+        };
         let text = format!(
             "# Written by the install link: a release install takes kernel updates through\n\
              # omamobile-boot-update's pacman hook (docs/RELEASES.md §5.3). AUTO_WRITE=no stops it.\n\
-             AUTO_WRITE={auto}\n"
+             {slot}AUTO_WRITE={auto}\n"
         );
         durable::write(&self.root.boot_update_conf(), text.as_bytes(), 0o644)
     }

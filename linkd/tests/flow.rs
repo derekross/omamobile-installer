@@ -176,3 +176,55 @@ fn a_whole_install_from_the_code_to_finished() {
     assert_eq!(status, 0);
     assert_eq!(out, "link: ended\nreason: finished\n");
 }
+
+/// A release on the running slot (INSTALL_SLOT=active, manifest format 2):
+/// boot-update.conf names the slot this boot runs from, on its own line
+/// before AUTO_WRITE=; a slot that can't be read turns the hook off; and a
+/// format-1 release writes no SLOT= line.
+#[test]
+fn boot_update_conf_names_the_running_slot_for_a_release_on_it() {
+    let desc = "CODENAME=cheetah\nCOMPATIBLE=\"google,gs201-cheetah\"\nNV_PARTS=\"efs persist modem_a\"\nNV_BACKUP_EXTRA=\"devinfo\"\n";
+    for (active, suffix, want_slot, want_auto) in [
+        (true, Some("_a"), Some("a"), "yes"),
+        (true, Some("_b"), Some("b"), "yes"),
+        (true, None, None, "no"),
+        (false, Some("_a"), None, "yes"),
+    ] {
+        let p = Phone::new();
+        let conf = if active {
+            format!("{desc}INSTALL_SLOT=active\nINSTALL_ACTIVE_SLOTS=\"a b\"\n")
+        } else {
+            desc.to_string()
+        };
+        p.write("/usr/share/omamobile/device.conf", conf.as_bytes());
+        let boot = match suffix {
+            Some(s) => {
+                format!("androidboot.slot_suffix = \"{s}\"\nandroidboot.serialno = \"{SERIAL}\"\n")
+            }
+            None => format!("androidboot.serialno = \"{SERIAL}\"\n"),
+        };
+        p.write("/proc/bootconfig", boot.as_bytes());
+        let mut d = p.daemon();
+        assert!(d.settled());
+        let mut i = Installer::new();
+        i.pair_at_screen(&mut d);
+        i.step(&mut d, Command::Answers(answers()));
+        assert!(
+            i.saw(|e| *e == Event::AnswersAccepted),
+            "{:?}",
+            i.host.events
+        );
+        let text = p.read("/etc/omamobile/boot-update.conf").unwrap();
+        assert!(
+            text.ends_with(&format!("AUTO_WRITE={want_auto}\n")),
+            "{text}"
+        );
+        match want_slot {
+            Some(slot) => assert!(
+                text.contains(&format!("\nSLOT={slot}\nAUTO_WRITE=yes\n")),
+                "{text}"
+            ),
+            None => assert!(!text.contains("SLOT="), "{text}"),
+        }
+    }
+}
