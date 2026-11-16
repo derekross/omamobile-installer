@@ -424,17 +424,20 @@ pub struct FlowOptions {
     /// format 2 ([`StopKind::RepairNotForRelease`] otherwise), both stopped
     /// in [`Flow::begin`]. `userdata` is never written, so the phone keeps
     /// its account and everything on it; no slot is made active, and the
-    /// other slot is never written. There is no build index lookup, no
-    /// factory image and no answers: no firmware is written. A locked phone
-    /// stops ([`StopKind::RepairLocked`]): unlocking would erase what a
-    /// Repair keeps. The SSH key and the steps after the write are not for
-    /// it, and are ignored.
+    /// other slot is never written. No factory image and no answers: no
+    /// firmware is written. The build index is read as for an install, and
+    /// the phone's bootloader must be one it lists
+    /// ([`StopKind::BuildNotListed`] otherwise). A locked phone stops
+    /// ([`StopKind::RepairLocked`]): unlocking would erase what a Repair
+    /// keeps. [`Self::owner_ssh_key`] is taken as an install takes it, into
+    /// the image that carries the initramfs; the steps after the write are
+    /// not for it.
     pub repair: bool,
 }
 
 /// What a front end says where it offers Repair (the command line's
 /// `repair`): exactly what is written and what is kept.
-pub const REPAIR_HELP: &str = "Repairs a phone that runs Omarchy Mobile from a release that installs on the slot the phone runs from (manifest format 2), when a kernel update left it unable to start: it writes the release's boot images again to the slot the phone runs from (each to its partition with that slot's suffix), then restarts the phone. Nothing else: userdata is NOT written, so your account and everything on the phone are kept; no slot is made active; the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. It needs no factory image and no answers. The phone's drivers are kernel modules kept in its system on userdata for one kernel version each: use the release whose kernel is the one the phone last started, or the phone starts without its drivers (no screen graphics, Wi-Fi, modem, charging readings or temperature limits) and is put right over USB SSH with omamobile-boot-update rollback, or by a full install. If the phone runs Android, don't repair it: a repair overwrites the boot images Android starts from. The phone has to be unlocked and in Fastboot Mode on the slot the release accepts. The run first checks the phone and every image against the release's signed checksums, then lists each partition and waits for you to type the phone's codename; nothing is written before that.";
+pub const REPAIR_HELP: &str = "Repairs a phone that runs Omarchy Mobile from a release that installs on the slot the phone runs from (manifest format 2), when a kernel update left it unable to start: it writes the release's boot images again to the slot the phone runs from (each to its partition with that slot's suffix), then restarts the phone. Nothing else: userdata is NOT written, so your account and everything on the phone are kept; no slot is made active; the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. It needs no factory image and no answers. The phone's drivers are kernel modules kept in its system on userdata for one kernel version each: use the release whose kernel is the one the phone last started, or the phone starts without its drivers (no screen graphics, Wi-Fi, modem, charging readings or temperature limits) and is put right over USB SSH with omamobile-boot-update rollback, run first and before any update, or by a full install. If the phone runs Android, don't repair it: a repair overwrites the boot images Android starts from. The phone has to be unlocked and in Fastboot Mode on the slot the release accepts. The run first checks the phone and every image against the release's signed checksums, then lists each partition and waits for you to type the phone's codename; nothing is written before that.";
 
 /// Said on a Repair's warning, its confirmation and its last screen: what
 /// it keeps, and the ways back if it does not help.
@@ -445,7 +448,7 @@ pub const REPAIR_KEEPS: &str = "A repair does not write userdata: your account, 
 /// under that exact kernel release, so a kernel that is not the one the
 /// phone last started finds none of them and starts with what is built in.
 pub fn repair_kernel_words(kernel_release: &str) -> String {
-    format!("The kernel this release writes is {kernel_release}. Its drivers are kernel modules, and they are not in the boot images: they live in the phone's system on userdata, which a repair keeps, in a folder for that exact kernel version. The phone's system holds them when {kernel_release} is the kernel the phone last started, so use the release whose kernel that is. If it is not, the phone starts without them: the screen's graphics, Wi-Fi, the modem, the charger and battery readings, the temperature limits and the firewall do not work, though it still starts far enough to be reached over the USB cable. The way on from there is \"omamobile-boot-update rollback\", run on the phone over USB SSH, which puts back the kernel it ran before with its own modules; or a full install, which erases the phone.")
+    format!("The kernel this release writes is {kernel_release}. Its drivers are kernel modules, and they are not in the boot images: they live in the phone's system on userdata, which a repair keeps, in a folder for that exact kernel version. The phone's system holds them when {kernel_release} is the kernel the phone last started, so use the release whose kernel that is. If it is not, the phone starts without them: the screen's graphics, Wi-Fi, the modem, the charger and battery readings, the temperature limits and the firewall do not work, though it still starts far enough to be reached over the USB cable. The way on from there is \"omamobile-boot-update rollback\", run on the phone over USB SSH first and before any update (an update on such a start would replace the copy rollback puts back), which puts back the kernel it ran before with its own modules; or a full install, which erases the phone.")
 }
 
 /// Said on a Repair's warning: it is never for a phone that runs Android.
@@ -1713,6 +1716,15 @@ impl Flow {
         flow.release = Some(release);
         match index {
             Ok(index) => flow.index = Some(index),
+            Err(None) if flow.options.repair => flow.stop(
+                StopKind::NoBuildIndex,
+                Retry::StopsAgain,
+                "This release can't repair a phone with this installer",
+                vec![
+                    format!("This release carries no list of Google's builds for the {name}, so the installer can't tell whether the phone's bootloader is one this release was made for, and does not repair the phone."),
+                    "It takes a release that carries one.".into(),
+                ],
+            ),
             Err(None) => flow.stop(
                 StopKind::NoBuildIndex,
                 Retry::StopsAgain,
@@ -4351,7 +4363,7 @@ impl Flow {
                     ),
                     format!("The phone was told to restart. It should start Omarchy Mobile from slot {slot}, the slot it ran from, with this release's kernel, {kernel_release}; no slot was made active."),
                     format!("userdata was not written, so your account and everything stored on the phone are still there. If {kernel_release} is the kernel the phone last started, its system holds that kernel's drivers and the phone should start into your account as before."),
-                    format!("If the screen stays dark or on the boot logo, or Wi-Fi, the modem or charging don't work, the phone's system holds no drivers for {kernel_release}: reach the phone over the USB cable with SSH and run \"omamobile-boot-update rollback\", which puts back the kernel it ran before, or install again, which erases the phone."),
+                    format!("If the screen stays dark or on the boot logo, or Wi-Fi, the modem or charging don't work, the phone's system holds no drivers for {kernel_release}: reach the phone over the USB cable with SSH and, first and before any update, run \"omamobile-boot-update rollback\", which puts back the kernel it ran before, or install again, which erases the phone."),
                 ];
                 s.footer = vec![REPAIR_WAY_BACK.into(), GO_BACK_TO_ANDROID.into()];
             }

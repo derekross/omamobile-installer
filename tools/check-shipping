@@ -180,6 +180,16 @@ once "--write is the one argument of install that sets it" '"--write" => write =
 # the command's name nor the repair switch sets the write switch
 none "neither the repair command nor its switch sets the flow's write switch" \
   '\b(write|may_write)\s*\|?=\s*[^=;]*(repair|command)|\.write\s*=\s*[^;]*repair|write:\s*[^,]*repair' cli/src/*.rs
+# And nothing sets a write switch to true but the two arguments named
+# --write: not a condition on the command, a switch or anything else
+set_true=$(grep -nP '\b(write|may_write)\s*\|?=\s*true\b' cli/src/*.rs /dev/null | sed -E 's/^([^:]+):[0-9]+: */\1: /' || true)
+wanted_true='cli/src/json.rs: "--write" => out.write = true,
+cli/src/main.rs: "--write" => write = true,'
+if [[ $set_true == "$wanted_true" ]]; then
+  ok "a write switch is set to true by the two --write arguments and nowhere else"
+else
+  bad "a write switch is set to true somewhere else than the two --write arguments" "$set_true"
+fi
 # The JSON mode (the desktop app's and scripts' way in): its flow writes
 # only if the tool itself was started with --write. No message carries the
 # switch, and the one place the mode makes a flow's options reads the
