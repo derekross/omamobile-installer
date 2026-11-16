@@ -91,6 +91,29 @@ fn is_download(command: &str) -> bool {
         .is_some_and(|size| size.len() == 8 && size.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// The commands the other-slot measurement adds to the gate, and the only
+/// ones: make a slot active, and restart into the bootloader. They pass
+/// only for the measurement's own client ([`Grant::SlotProbe`]), which can
+/// flash nothing and download nothing, and no other client can send them
+/// (`set_active:b` excepted, which the session that writes sends last).
+pub const SLOT_PROBE_COMMANDS: [&str; 3] = ["set_active:a", "set_active:b", "reboot-bootloader"];
+
+/// What a client may send beyond questions. Each client is made with one,
+/// and the gate reads it at the moment a command is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Grant {
+    /// `getvar:` and the one read-only question: the look at the phone,
+    /// the unlock question and every dry-run session.
+    Ask,
+    /// As `Ask`, and [`SLOT_PROBE_COMMANDS`]: the measurement of the other
+    /// bootloader slot ([`crate::slot_probe`]), whose client only the flow
+    /// can make, for a first install the owner said yes to.
+    SlotProbe,
+    /// The session that writes: these partitions (each also on the gate's
+    /// fixed list), `download:`, `set_active:b` and `reboot`.
+    Write(Vec<String>),
+}
+
 /// Every command this crate may put on the wire, and nothing more. The
 /// `flashing` entry is the whole command, compared exactly: `flashing unlock`,
 /// `flashing lock`, `flashing unlock_critical` and every `oem` command are
@@ -105,12 +128,21 @@ fn is_download(command: &str) -> bool {
 /// passes only for a partition that is on the session's list and on the
 /// gate's own fixed one ([`on_the_fixed_list`]), so the gate and the
 /// [`Partition`] type each hold without the other.
-fn allowed(command: &str, flashable: &[String]) -> bool {
+///
+/// `slot_probe` is true only for the other-slot measurement's client, whose
+/// `flashable` is always empty: it adds [`SLOT_PROBE_COMMANDS`] and nothing
+/// else. A client with a list of partitions never gets them; one that only
+/// asks gets none of them either.
+fn allowed(command: &str, flashable: &[String], slot_probe: bool) -> bool {
     if let Some(partition) = command.strip_prefix("flash:") {
         return flashable.iter().any(|p| p == partition) && on_the_fixed_list(partition);
     }
     if command == GET_UNLOCK_ABILITY || command.starts_with("getvar:") {
         return true;
+    }
+    // The measurement: its three commands, from a client that flashes nothing
+    if slot_probe {
+        return flashable.is_empty() && SLOT_PROBE_COMMANDS.contains(&command);
     }
     // What stages a write or changes the phone: only where a flash can leave
     !flashable.is_empty()
@@ -197,6 +229,15 @@ impl PhoneId {
     pub fn of_serial(serial: &str) -> Option<Self> {
         (!serial.is_empty()).then(|| PhoneId(sha256_hex(serial.as_bytes())))
     }
+    /// A phone known by its digest only ([`Self::digest`]), as a record
+    /// kept between runs names it: 64 lower-case hex digits, or `None`.
+    pub(crate) fn of_digest(digest: &str) -> Option<Self> {
+        (digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| PhoneId(digest.to_string()))
+    }
     /// The digest itself, as lower-case hex: what a later step compares the
     /// phone that answers with (over USB SSH, the phone works out the same
     /// digest of the serial its bootloader handed the kernel). It still
@@ -225,6 +266,9 @@ pub struct PhoneReport {
     pub baseband: Option<String>,
     /// Both slots' bootloader versions (a, b), when the phone reports them.
     pub slot_bootloaders: Option<(String, String)>,
+    /// The slot flags `getvar:all` reported (`slot-successful:b` and its
+    /// value, ...), for the other-slot measurement's conditions.
+    pub slot_flags: Vec<(String, String)>,
 }
 
 /// `version-bootloader` for one slot among `getvar:all`'s lines, under any
@@ -325,7 +369,9 @@ pub async fn probe<T: Transport>(transport: &mut T) -> Result<PhoneReport> {
         .filter(|v| !v.is_empty());
     let all = client.getvar_all().await?;
     let slot_bootloaders = slot_bootloader(&all, 'a').zip(slot_bootloader(&all, 'b'));
+    let slot_flags = crate::slot_probe::SlotReading::flags_of(&all);
     Ok(PhoneReport {
+        slot_flags,
         id,
         product,
         unlocked,
@@ -336,25 +382,38 @@ pub async fn probe<T: Transport>(transport: &mut T) -> Result<PhoneReport> {
     })
 }
 
-enum Reply {
+pub(crate) enum Reply {
     Okay(String),
     Data(u64),
 }
 
-struct Client<T> {
+pub(crate) struct Client<T> {
     transport: T,
-    log: Vec<String>,
+    pub(crate) log: Vec<String>,
     /// The partitions a `flash:` may name. Empty outside a [`Session`].
     flashable: Vec<String>,
+    /// The other-slot measurement's client ([`Grant::SlotProbe`]).
+    slot_probe: bool,
 }
 
 impl<T> Client<T> {
     /// A client that can ask and can't flash.
     fn reading(transport: T) -> Self {
+        Self::granted(transport, Grant::Ask)
+    }
+
+    /// A client with what it may send beyond questions fixed for its life.
+    pub(crate) fn granted(transport: T, grant: Grant) -> Self {
+        let (flashable, slot_probe) = match grant {
+            Grant::Ask => (Vec::new(), false),
+            Grant::SlotProbe => (Vec::new(), true),
+            Grant::Write(list) => (list, false),
+        };
         Client {
             transport,
             log: Vec::new(),
-            flashable: Vec::new(),
+            flashable,
+            slot_probe,
         }
     }
 
@@ -362,11 +421,14 @@ impl<T> Client<T> {
     /// gets no list, like a client that only asks: the session never forms
     /// a write, and the gate would not pass one.
     fn for_session(transport: T, flashable: Vec<String>, dry_run: bool) -> Self {
-        Client {
+        Self::granted(
             transport,
-            log: Vec::new(),
-            flashable: if dry_run { Vec::new() } else { flashable },
-        }
+            if dry_run {
+                Grant::Ask
+            } else {
+                Grant::Write(flashable)
+            },
+        )
     }
 }
 
@@ -406,10 +468,10 @@ impl<T: Transport> Client<T> {
         Err(Error::Protocol(format!("'{command}' never finished")))
     }
 
-    async fn command(&mut self, command: &str, info: &mut Vec<String>) -> Result<Reply> {
+    pub(crate) async fn command(&mut self, command: &str, info: &mut Vec<String>) -> Result<Reply> {
         debug_assert!(command.len() <= 64, "the original protocol's command limit");
         // The one place a command leaves: nothing off the list is sent
-        if !allowed(command, &self.flashable) {
+        if !allowed(command, &self.flashable, self.slot_probe) {
             return Err(Error::Refused(format!(
                 "'{command}' is not a command this installer sends"
             )));
@@ -422,14 +484,14 @@ impl<T: Transport> Client<T> {
         self.read_reply(command, info).await
     }
 
-    async fn simple(&mut self, command: &str) -> Result<String> {
+    pub(crate) async fn simple(&mut self, command: &str) -> Result<String> {
         match self.command(command, &mut Vec::new()).await? {
             Reply::Okay(text) => Ok(text),
             Reply::Data(_) => Err(Error::Protocol(format!("DATA in answer to '{command}'"))),
         }
     }
 
-    async fn getvar(&mut self, name: &str) -> Result<String> {
+    pub(crate) async fn getvar(&mut self, name: &str) -> Result<String> {
         Ok(self
             .simple(&format!("getvar:{name}"))
             .await?
@@ -438,7 +500,7 @@ impl<T: Transport> Client<T> {
     }
 
     /// `getvar:all`: the `key:value` INFO lines.
-    async fn getvar_all(&mut self) -> Result<Vec<String>> {
+    pub(crate) async fn getvar_all(&mut self) -> Result<Vec<String>> {
         let mut info = Vec::new();
         match self.command("getvar:all", &mut info).await? {
             Reply::Okay(_) => Ok(info),
@@ -526,6 +588,11 @@ pub struct PhoneOptions {
     /// The session that writes is refused with it before anything is sent
     /// ([`Error::OverrideOutsideDryRun`]).
     pub maintainer_skip_bootloader_slot_check: bool,
+    /// The other bootloader slot's version, as this run's measurement read
+    /// it on this phone ([`crate::slot_probe`]); only the measurement makes
+    /// one. The session takes it when the phone still runs from the slot it
+    /// was measured from, with the same version: the copies are equal.
+    pub other_slot_measured: Option<crate::slot_probe::MeasuredSlot>,
     /// This computer's SSH public key (one OpenSSH line), appended to slot
     /// B's initramfs as `tools/install-phone` appends it
     /// ([`crate::ramdisk_key`]): the image that carries the vendor ramdisk
@@ -541,6 +608,7 @@ impl Default for PhoneOptions {
             reinstall: false,
             bootloader_slots_confirmed: None,
             maintainer_skip_bootloader_slot_check: false,
+            other_slot_measured: None,
             owner_ssh_key: None,
         }
     }
@@ -772,6 +840,16 @@ impl<T: Transport> Session<T> {
                 client.log.push("bootloader: slot b's, which the phone runs (a reinstall); no slot is switched".into());
             }
             (_, _, Some(_)) => {}
+            // Measured in this run on this phone, from the slot it runs from
+            _ if options.other_slot_measured.as_ref().is_some_and(|m| {
+                m.phone() == expected && current_slot == m.first().to_string()
+            }) => {
+                let measured = options.other_slot_measured.as_ref().map(|m| m.version().to_string()).unwrap_or_default();
+                if measured != bootloader {
+                    return Err(Error::Phone(format!("the other slot was measured as {measured}, but slot {current_slot} has {bootloader}")));
+                }
+                client.log.push(format!("bootloader: {bootloader} on both slots (the other measured in this run)"));
+            }
             // Only the unknown case, and only in a dry run (checked above too)
             _ if options.maintainer_skip_bootloader_slot_check && dry_run => {
                 slot_check_skipped = true;
@@ -1417,11 +1495,10 @@ mod tests {
     ];
 
     fn try_command(command: &str) -> (Result<String>, Vec<String>) {
-        let mut client = Client {
-            transport: Recorder::default(),
-            log: Vec::new(),
-            flashable: OURS.iter().map(|p| p.to_string()).collect(),
-        };
+        let mut client = Client::granted(
+            Recorder::default(),
+            Grant::Write(OURS.iter().map(|p| p.to_string()).collect()),
+        );
         let result = block_on(client.simple(command));
         assert_eq!(client.log, client.transport.sent);
         (result, client.transport.sent)
@@ -1607,11 +1684,10 @@ mod tests {
         ];
         for name in wrong {
             assert!(!on_the_fixed_list(name), "{name:?}");
-            let mut client = Client {
-                transport: Recorder::default(),
-                log: Vec::new(),
-                flashable: wrong.iter().map(|p| p.to_string()).collect(),
-            };
+            let mut client = Client::granted(
+                Recorder::default(),
+                Grant::Write(wrong.iter().map(|p| p.to_string()).collect()),
+            );
             let result = block_on(client.simple(&format!("flash:{name}")));
             assert!(matches!(result, Err(Error::Refused(_))), "{name:?}");
             assert!(client.transport.sent.is_empty(), "flash:{name:?} was sent");
@@ -1647,6 +1723,70 @@ mod tests {
             client.transport.sent,
             ["getvar:product", GET_UNLOCK_ABILITY]
         );
+    }
+
+    #[test]
+    fn the_measurements_client_adds_its_three_commands_and_nothing_else() {
+        assert_eq!(
+            SLOT_PROBE_COMMANDS,
+            ["set_active:a", "set_active:b", "reboot-bootloader"]
+        );
+        // Its three, and questions
+        for command in SLOT_PROBE_COMMANDS
+            .iter()
+            .map(|c| c.to_string())
+            .chain(["getvar:all".to_string(), GET_UNLOCK_ABILITY.to_string()])
+        {
+            let mut client = Client::granted(Recorder::default(), Grant::SlotProbe);
+            assert!(block_on(client.simple(&command)).is_ok(), "{command:?}");
+            assert_eq!(client.transport.sent, [command]);
+        }
+        // Nothing that writes or stages a write, and nothing near its three
+        let near = [
+            "set_active:c",
+            "set_active:",
+            "set_active:a ",
+            "set_active:_a",
+            "set_active:A",
+            "set_active:ab",
+            "set_active",
+            "reboot-bootloader ",
+            "reboot bootloader",
+            "reboot-recovery",
+            "reboot-fastboot",
+            "reboot",
+            "boot",
+            "continue",
+            "flashing unlock",
+            "oem unlock",
+            "erase:misc",
+        ];
+        // (set_active:b is one of its three, tried above)
+        for command in every_write()
+            .into_iter()
+            .filter(|c| c != "set_active:b")
+            .chain(near.iter().map(|c| c.to_string()))
+        {
+            let mut client = Client::granted(Recorder::default(), Grant::SlotProbe);
+            let result = block_on(client.simple(&command));
+            assert!(
+                matches!(&result, Err(Error::Refused(why)) if why.contains("not a command this installer sends")),
+                "{command:?}: {result:?}"
+            );
+            assert!(client.transport.sent.is_empty(), "{command:?} was sent");
+        }
+        // The gate itself: a list of partitions never comes with the grant,
+        // and the three never pass without it
+        let list: Vec<String> = OURS.iter().map(|p| p.to_string()).collect();
+        assert!(!allowed("set_active:a", &list, true));
+        assert!(!allowed("reboot-bootloader", &list, true));
+        for command in ["set_active:a", "reboot-bootloader"] {
+            assert!(!allowed(command, &[], false), "{command}");
+            assert!(!allowed(command, &list, false), "{command}");
+        }
+        // set_active:b is the writer's last command, as before, and nothing else
+        assert!(allowed("set_active:b", &list, false));
+        assert!(!allowed("set_active:b", &[], false));
     }
 
     #[test]
@@ -1703,9 +1843,11 @@ mod tests {
             reinstall,
             bootloader_slots_confirmed,
             maintainer_skip_bootloader_slot_check,
+            other_slot_measured,
             owner_ssh_key,
         } = PhoneOptions::default();
         assert!(!reinstall && !maintainer_skip_bootloader_slot_check);
+        assert_eq!(other_slot_measured, None);
         assert_eq!(bootloader_slots_confirmed, None);
         assert_eq!(owner_ssh_key, None);
     }

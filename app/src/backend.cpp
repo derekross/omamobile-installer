@@ -389,6 +389,15 @@ void Backend::handle(const QByteArray &raw) {
         }
         m_sentLines << message.value("line").toString();
         emit sentLinesChanged();
+    } else if (type == "probe") {
+        // The other-slot measurement's lines (protocol 6): each command it
+        // sent and each reading, in the box of what was sent to the phone
+        if (!message.value("line").isString()) {
+            malformed(QStringLiteral("a probe message without a line"));
+            return;
+        }
+        m_sentLines << message.value("line").toString();
+        emit sentLinesChanged();
     } else if (type == "account") {
         if (!isTexts(message.value("lines"))) {
             malformed(QStringLiteral("an account message without lines"));
@@ -570,13 +579,13 @@ bool Backend::answerChoice(const QString &answer) {
     if (!offered || m_busy)
         return false;
     const QString current = action();
-    if (current != "slot-b" && current != "after")
+    if (current != "slot-b" && current != "slot-probe" && current != "after")
         return false;
     // Putting the firmware on the phone is not cut off by the window, as
     // a write is not: the tool finishes it, and the window waits.
     const bool holds = current == "after" && answer == "firmware";
     m_writeInHand = holds;
-    if (sendFor({"slot-b", "after"}, {{"type", current}, {"answer", answer}}))
+    if (sendFor({"slot-b", "slot-probe", "after"}, {{"type", current}, {"answer", answer}}))
         return true;
     m_writeInHand = false;
     return false;

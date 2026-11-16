@@ -35,7 +35,7 @@ ApplicationWindow {
     readonly property bool overlayOpen: helpVisible || confirmQuit || choosingPhone || writeHold
     // A step is in hand: the tool was given something and has not answered.
     readonly property bool stepRunning: backend.busy && backend.hasScreen
-    readonly property bool knownAction: ["acknowledge", "read-phone", "slot-b", "accept-terms", "download", "take-file",
+    readonly property bool knownAction: ["acknowledge", "read-phone", "slot-b", "slot-probe", "accept-terms", "download", "take-file",
                                          "answers", "dry-run", "confirm", "write", "after", "none",
                                          "link", "wait", "pair", "backup-dir", "retry"].indexOf(action) >= 0
     readonly property bool wantsFile: action === "download" || action === "take-file"
@@ -48,7 +48,7 @@ ApplicationWindow {
     // A run that may write has one stage more, after the dry run.
     readonly property var stages: [
         { label: qsTr("Warning"), states: ["warning"] },
-        { label: qsTr("Phone"), states: ["phone", "slot-b", "unlock"] },
+        { label: qsTr("Phone"), states: ["phone", "slot-b", "slot-probe", "slot-probe-put-back", "slot-probe-running", "unlock"] },
         { label: qsTr("Factory image"), states: ["google-terms", "factory-image"] },
         { label: qsTr("About you"), states: ["answers"] },
         { label: qsTr("Dry run"), states: ["dry-run", "done"] }

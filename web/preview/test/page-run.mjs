@@ -33,7 +33,7 @@ async function run() {
   const previews = additions.begin;
   additions.begin = (files, index, reinstall) => {
     previews(files, index, reinstall).free();
-    return core.InstallFlow.selftest_write_preview(reinstall);
+    return core.InstallFlow.selftest_write_preview(reinstall, false);
   };
 
   const ready = () => new Promise((resolve) => {

@@ -13,10 +13,13 @@
 //     not checked, and the walk checks every file again);
 //   - the confirmation (what the person typed goes to the core as typed)
 //     and the write.
-// It adds no sentence about the phone, no way round a stop, and no control
-// for the other bootloader slot: a phone that tells one slot's version stops
-// here as it does on the page that ships.
+// It adds no sentence about the phone and no way round a stop. Where the
+// core asks whether it may measure the phone's other bootloader slot (a
+// release that allows it, a first install), it draws the core's answers as
+// buttons and runs the core's measurement (slot-probe.js), keeping its
+// record in this browser for the next run.
 import { additions, page } from "./app.js";
+import { runProbe } from "./slot-probe.js";
 import { match, walk, wanted } from "./write-walk.js";
 
 const { core, $, el, act } = page;
@@ -31,6 +34,26 @@ const hasPreview = () => typeof core.InstallFlow.begin_write_preview === "functi
 
 additions.loaded = "loaded (a write preview: this build can write to a phone)";
 
+// What a measurement of the other slot left for the next run, in this
+// browser only. Its loss costs the next run the offer to put slot A back;
+// the stop says how to do it by hand.
+const RECORD = "omamobile-slot-probe";
+const loadRecord = () => {
+  try {
+    return localStorage.getItem(RECORD) ?? undefined;
+  } catch {
+    return undefined;
+  }
+};
+const keepRecord = (text) => {
+  try {
+    if (text) localStorage.setItem(RECORD, text);
+    else localStorage.removeItem(RECORD);
+  } catch {
+    // Not kept: the stop's words say what to do by hand
+  }
+};
+
 additions.begin = (files, index, reinstall) => {
   if (!hasPreview()) {
     $("banner").textContent = "This page was built as a write preview, but its installer module has no write path, so it cannot write to a phone.";
@@ -41,7 +64,7 @@ additions.begin = (files, index, reinstall) => {
   $("banner").textContent = core.web_write_preview();
   $("core").textContent = additions.loaded;
   picked = [];
-  return core.InstallFlow.begin_write_preview(...files, index, reinstall);
+  return core.InstallFlow.begin_write_preview(...files, index, reinstall, loadRecord());
 };
 
 const line = (text) => {
@@ -151,6 +174,24 @@ additions.controls = (s) => {
     return b;
   };
   switch (s.action) {
+    case "slot-probe": {
+      // The core's answers, as it words them; it runs what the answer asks
+      for (const choice of s.choices) {
+        row.append(
+          go(`probe-${choice.answer}`, choice.label, async () => {
+            if (!page.flow.slot_probe_answer(choice.answer)) return;
+            if (!page.phone) page.phone = await core.request_phone();
+            walking = true;
+            try {
+              page.phone = await runProbe(page.flow, core, navigator.usb, page.phone, { say: line, keep: keepRecord });
+            } finally {
+              walking = false;
+            }
+          }),
+        );
+      }
+      return el("div", {}, row, progress);
+    }
     case "dry-run": {
       if (page.large) {
         const ready = el("p", { id: "release-ready", textContent: "The release's files are the ones the page downloaded or read above, each checked against the signed release. The dry run reads and checks them again." });

@@ -230,6 +230,84 @@ The reinstall takes its own radio backup into a new, dated folder (`~/omamobile-
 - **A locked phone,** and the unlock question `flashing get_unlock_ability`: this phone is unlocked and is never locked for a test.
 - **A phone that reports both bootloader slots.**
 
+## A first install that measures the other slot (the reference Pixel 7 Pro)
+
+Status: **not run.** Written offline on 2026-11-14 with the measurement (DESIGN §6, "Measuring the other slot") and Omarchy Mobile's `tools/install-phone` slot check (#639, brought up to date in the shell PR of the same day). Neither has met a phone. This run is what a device's `BOOTLOADER_SLOT_PROBE=yes` waits for: the line goes into `device/cheetah/device.conf` as its own change, once this run's results are in the cheetah NOTES, and only by the maintainer's decision.
+
+A first install starts from stock Android on slot A. The reference phone runs Omarchy Mobile from slot B, so **stock Android is put back on slot A first** (part P0), and that is a stock start, which rewrites `efs`, `persist` and `modem_userdata`: the radio backup no longer matches afterwards, and a fresh one is taken at the first Linux start after the install (P5), before anything touches the radio.
+
+Identifiers stay out of everything committed, as in the rest of this file. Readings are taken with `fastboot getvar all 2>&1 | grep -E '^\(bootloader\) (current-slot|unlocked|version-bootloader|version-baseband|slot-)'`, which leaves the serial number out; call it **the slot reading** below.
+
+| Placeholder | What it is |
+| --- | --- |
+| `<FACTORY_ZIP>` | Google's factory image for the build this release lists as tested, saved by the owner from Google's page. Never one older than the build on the phone (CONTRIBUTING: Pixels enforce bootloader anti-rollback) |
+| `<NV_BACKUP_DIR>` | the radio backup from before this run |
+| `<NEW_NV_BACKUP_DIR>` | an empty new directory, outside every repository, for the backup after the stock start |
+| `<RELEASE_DIR>`, `<OMARCHY_MOBILE>` | as above |
+
+### P0. Stock Android on slot A (the owner's own flash)
+
+| Step | Command | Expect | Stop if | Way back | Risk |
+| --- | --- | --- | --- | --- | --- |
+| P0.1 | With Omarchy Mobile running: `tools/nv-backup --check <NV_BACKUP_DIR>` | every partition matches | anything differs: find out why first (AGENTS.md section 1) | none needed | read-only |
+| P0.2 | Announce it; then `tools/phone-ssh 'systemctl stop omamobile-modem'` and the restart into the bootloader (`reboot-to bootloader`, or Volume Down + Power held about 20 s) | Fastboot Mode; the slot reading shows `current-slot:b`, unlocked, no per-slot versions. Write the slot flags down | not Fastboot Mode | Power to start Omarchy Mobile again | low |
+| P0.3 | Open `<FACTORY_ZIP>` and read its `flash-all.sh` before anything runs: which partitions it flashes, and whether its bootloader line names a slot (`--slot=other`, `--slot=all`) | the script, read; note what it does to the bootloader of each slot | it flashes something this runbook did not expect | none needed | read-only |
+| P0.4 | `fastboot --set-active=a`, then `fastboot reboot-bootloader` | Fastboot Mode again, `current-slot:a` | the phone starts a system, or does not come back: choose nothing on any screen | Volume Down + Power about 20 s; `fastboot --set-active=b` and `fastboot reboot` start Omarchy Mobile again | medium: starts slot A's bootloader |
+| P0.5 | **The owner** runs Google's `flash-all.sh` from the unpacked `<FACTORY_ZIP>`. This is the owner's own action with Google's tools: it flashes the bootloader and radio of the current slot and wipes `userdata`. No agent runs it, and nothing of Omarchy Mobile's does | the script ends with the phone restarting into Android | the script fails partway: run it again as Google's page says, by hand | Google's Android Flash Tool | high: bootloader and radio |
+| P0.6 | Let Android start once from slot A; skip its setup; no account. Then back to Fastboot Mode (`adb reboot bootloader` with USB debugging, or the buttons) | Android starts; the slot reading: `current-slot:a`, unlocked | Android asks for a factory reset or shows recovery: choose nothing, buttons to Fastboot Mode, stop | as P0.5 | a stock start: the radio backup no longer matches (P5) |
+| P0.7 | The slot reading | `current-slot:a`; no per-slot versions; `slot-unbootable:b:yes` or `slot-successful:b:no` | slot B reads `slot-successful:b:yes` with `slot-unbootable:b:no`: the installers do not measure such a slot (it looks like an installed system). Go on with P1.2 and P1.3' only, to learn what `set_active` does to the flags, and decide before going further | none needed | read-only |
+
+### P1. The round trip by hand, before either tool
+
+The questions both tools rest on, answered first with Google's `fastboot`, one command at a time.
+
+| Step | Command | Expect | Stop if | Way back | Risk |
+| --- | --- | --- | --- | --- | --- |
+| P1.1 | The slot reading | as P0.7. Write it down | as P0.7 | none needed | read-only |
+| P1.2 | `fastboot --set-active=b`, then `fastboot getvar current-slot` and `fastboot getvar version-bootloader`, **with no restart** | `current-slot` still `a`, the version still slot A's (DESIGN §9: which bootloader answers right after a `set_active`). Write down what the slot reading's flags became | `current-slot` reads `b`: on this bootloader neither tool can measure (`CurrentFollowsFlag`). `fastboot --set-active=a`, the slot reading, and the run ends here | `fastboot --set-active=a` | slot flags written |
+| P1.3' | (Only when P0.7 or P1.2 stopped) `fastboot --set-active=a`, the slot reading | slot A active again | slot A unbootable, or no tries left | as above | slot flags written |
+| P1.3 | `fastboot reboot-bootloader`; time it | the phone leaves the bus and is back in Fastboot Mode within 90 s, `current-slot:b`; `fastboot getvar version-bootloader` is **slot B's version**: write it down; the slot reading | a system starts (choose nothing), or it is not back in 2 minutes | Volume Down + Power about 20 s to Fastboot Mode, then `fastboot --set-active=a` and `fastboot reboot-bootloader` | **starts slot B's bootloader before its version is known** |
+| P1.4 | `fastboot --set-active=a`, `fastboot reboot-bootloader`, the slot reading | back within 90 s, `current-slot:a`, slot A's version as in P1.1 | as P1.3 | as P1.3 | slot flags written |
+| P1.5 | Compare P1.3's version with P1.1's | the same | they differ: no install on this phone as it is. Never flash a bootloader by hand (CONTRIBUTING §3.1); ask in an issue | none needed | none |
+| P1.6 | `fastboot reboot`; Android starts from slot A; back to Fastboot Mode; the slot reading | Android starts; whether `slot-successful:a` reads yes again, and the retry counts, written down | Android does not start, or offers recovery: choose nothing, buttons to Fastboot Mode, stop | as P0.5 | a stock start (P5 covers it) |
+
+### P2. Omarchy Mobile's `tools/install-phone`, measuring only
+
+`<OMARCHY_MOBILE>` at the commit of the shell PR, in repository mode, with this release's images and root image. Add `BOOTLOADER_SLOT_PROBE=yes` to `device/cheetah/device.conf` **locally, for this run only, never committed**; `git checkout device/cheetah/device.conf` after.
+
+| Step | Command | Expect | Stop if | Way back | Risk |
+| --- | --- | --- | --- | --- | --- |
+| P2.1 | `tools/install-phone --dry-run` (and the images and root image as its help says) | the slot check explained, the slot flags, the way back, seven `would run` lines of the round trip, and a last line saying that the other bootloader slot was not checked | anything but `getvar` reaches the phone | none needed | read-only |
+| P2.2 | `tools/install-phone` in a terminal; `yes` at the slot check; the owner's answers made up; **a wrong codename** at the last question | two restarts, each seen to leave and come back; "bootloader … on both slots (slot b measured)"; the three flag lines and "changed by the check: …"; then the install declined, nothing flashed | any stop of the slot check (exit status 3): its message says which slot is active and what to type; follow it and end the run | the message's commands; Volume Down + Power about 20 s, then `fastboot --set-active=a` | as P1.3 |
+| P2.3 | The slot reading | `current-slot:a`, slot A's version | slot A unbootable, or no tries | `fastboot --set-active=a` | read-only |
+
+### P3. This installer, measuring only
+
+This part waits for a signed release whose `device.conf` says `BOOTLOADER_SLOT_PROBE=yes` (the descriptor line's own change, after P1 and P2 are recorded). Until then, stop after P2. Build as in "Before anything".
+
+| Step | Command | Expect | Stop if | Way back | Risk |
+| --- | --- | --- | --- | --- | --- |
+| P3.1 | `omamobile-install install <RELEASE_DIR> --serial "$S" --dry-run --factory-zip <FACTORY_ZIP>` | stops at `bootloader-slots-unknown`, saying that a dry run does not measure; the tool sent `getvar` only | anything else reached the phone | none needed | read-only |
+| P3.2 | `omamobile-install install <RELEASE_DIR> --serial "$S" --write --factory-zip <FACTORY_ZIP>` in a terminal; `measure` at the question; the answers made up; at the confirmation, **anything but the codename** | the question's screen with the way back; the measurement's lines (each command, the three readings, each restart seen); the confirmation: "Bootloader … on both copies: the installer measured slot B's bootloader in this run …" and the flags it changed; then `not-confirmed`, nothing written | any `slot-probe-stopped`: its closing lines say which slot is active; a record `slot-probe` is in the work directory when slot B may be active: run the same command again, which offers to put slot A back | the stop's command; Volume Down + Power about 20 s, then `fastboot --set-active=a` | as P1.3 |
+| P3.3 | The slot reading; `ls ~/.cache/omamobile-installer/slot-probe` | `current-slot:a`; no record | a record is there after a measurement that came back: report it | `fastboot --set-active=a` | read-only |
+| P3.4 | (Optional) the desktop app started with `--write`, to the confirmation, as app/docs/STATUS.md Part B1, with the question answered by its button | the same lines in its box of what was sent, the same confirmation | as P3.2 | as P3.2 | as P3.2 |
+
+### P4. The install (the maintainer's go)
+
+With the phone measured, an install puts Omarchy Mobile back on slot B: `tools/install-guided --start-over` from `<OMARCHY_MOBILE>` with the local descriptor line (it asks to measure again, then writes, then does the steps after the write), or this installer's `json --write` through the app (app/docs/STATUS.md Part B2). Not the terminal's `install --write`: it puts no SSH key on the phone, so no radio backup could follow. Expect, Stop, Way back and Risk as for those runs; the measurement's stops all come before the first write.
+
+### P5. The radio backup after the stock start
+
+| Step | Command | Expect | Stop if | Way back | Risk |
+| --- | --- | --- | --- | --- | --- |
+| P5.1 | At the first Linux start, before any modem or radio work: the guided installer's radio-backup step into `<NEW_NV_BACKUP_DIR>` (or `tools/nv-backup <NEW_NV_BACKUP_DIR>`), never into `<NV_BACKUP_DIR>` | the backup verified against a second read on the phone | any partition not read-only or mounted: the tool refuses; stop | none needed | read-only |
+| P5.2 | `tools/nv-backup --check <NV_BACKUP_DIR>` | differences in `efs`, `persist` and `modem_userdata` only (stock's writes, AGENTS.md section 1); write down which | `modem_a`, `modem_b` or `efs_backup` differ: stop and ask | none needed | read-only |
+| P5.3 | Keep both backups; from now on `<NEW_NV_BACKUP_DIR>` is the one the checks use, and the modem's NV overlay, bound to the old checksums, is set aside by the new backup's (AGENTS.md section 1) | | | | none |
+
+### What this run records
+
+In `device/cheetah/NOTES.md` (no serial), and in the results below: the date, both tools' commits, `flash-all.sh`'s bootloader line (P0.3), the slot readings of P0.7, P1.1 to P1.6, P2.3 and P3.3 side by side, the time of each restart, what `--set-active` does to each slot's `slot-successful`, `slot-unbootable` and `slot-retry-count`, whether `current-slot` follows the flag before a restart, both slots' versions, and which radio partitions the stock start changed.
+
 ## Results
 
 Not run yet. For each run: the date, the installer's commit (`git rev-parse --short HEAD`), the release's version, each step's outcome in a line, the number of `userdata` pieces and the two `userdata,` lines of step 5 (the piece that covered the most blocks with its flash time, and the slowest flash), the longest wait in `write.timing` after the codename, step 2's and step 6's `getvar` values side by side (no serial), and what step 7 saw.

@@ -202,10 +202,10 @@ impl Tool {
         let hello = tool.hear();
         assert_eq!(
             (hello["type"].as_str(), hello["protocol"].as_u64()),
-            (Some("hello"), Some(5))
+            (Some("hello"), Some(6))
         );
         assert_eq!(hello["writes"], write);
-        tool.say(json!({"type": "hello", "protocol": 5, "app": "the tests", "version": "0"}));
+        tool.say(json!({"type": "hello", "protocol": 6, "app": "the tests", "version": "0"}));
         tool
     }
 

@@ -26,7 +26,7 @@ only_node=0
 command -v node >/dev/null || { echo "preview-test: node is needed" >&2; exit 1; }
 
 "$here/build.sh" web-write-preview selftest >/dev/null
-node --test "$here/preview/test/write.test.mjs"
+node --test "$here/preview/test/write.test.mjs" "$here/preview/test/slot-probe.test.mjs"
 (( only_node )) && exit 0
 
 browser=${CHROMIUM:-}

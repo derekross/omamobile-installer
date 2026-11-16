@@ -381,7 +381,7 @@ test("no command outside the gate can be sent: the module has no way to name one
     Object.keys(core)
       .filter((n) => !["default", "initSync"].includes(n))
       .sort(),
-    ["InstallFlow", "LinkPreview", "Phone", "Release", "RootCheck", "fake_phone", "fake_phone_scenarios", "request_phone", "selftest", "selftest_factory_zip", "selftest_verify_release", "verify_release", "web_write_preview"],
+    ["InstallFlow", "LinkPreview", "Phone", "Release", "RootCheck", "fake_phone", "fake_phone_scenarios", "phone_of_device", "request_phone", "selftest", "selftest_factory_zip", "selftest_verify_release", "verify_release", "web_write_preview"],
   );
   // The install link's preview, in the same build: its steps take a code or
   // nothing, and its pretend phone (pretend, pretend_shows, pretend_report)
@@ -416,6 +416,12 @@ test("no command outside the gate can be sent: the module has no way to name one
     "session_open",
     "session_progress",
     "session_root_feed",
+    "slot_probe_answer",
+    "slot_probe_done",
+    "slot_probe_kept",
+    "slot_probe_record",
+    "slot_probe_restart_seen",
+    "slot_probe_step",
     "zip_begin",
     "zip_done",
     "zip_update",
@@ -423,8 +429,11 @@ test("no command outside the gate can be sent: the module has no way to name one
   const makers = Object.getOwnPropertyNames(core.InstallFlow).filter((n) => !["length", "name", "prototype", "__wrap"].includes(n));
   assert.deepEqual(makers.sort(), ["begin", "begin_write_preview", "selftest", "selftest_write_preview"]);
   // Nothing states the other bootloader slot, and nothing sets the override
-  // in a flow that writes
-  const names = [...Object.keys(core), ...steps, ...makers].join(" ");
+  // in a flow that writes. The other-slot measurement's steps (slot_probe_*)
+  // take one of the screen's answers, a phone, or what the page saw of a
+  // restart: its commands are the core's (SLOT_PROBE_COMMANDS), and
+  // slot-probe.test.mjs reads what reached the phone
+  const names = [...Object.keys(core), ...steps, ...makers].filter((n) => !n.startsWith("slot_probe_")).join(" ");
   assert.doesNotMatch(names, /slot|override|maintainer|unlock|command|partition|erase|oem|token/i);
 });
 
