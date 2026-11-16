@@ -108,7 +108,7 @@ Run [docs/WRITE-RUNBOOK.md](../../docs/WRITE-RUNBOOK.md) as written, with this c
 
 ### Part B1. The app against the real phone, read-only up to the confirmation
 
-Status: **not run.** Written offline, with no phone. Nothing in this section has been tried on hardware.
+Status: **passed on 2026-11-15** (Results below).
 
 This run is read-only from its first step to its last. Without saying it is a reinstall the window asks what slot B holds, and "I am not sure" ends it there; said to be a reinstall, it goes to the dry run's end, and in a window started with `--write` to the confirmation, where "Do not install" ends it with nothing written. Its purpose is what only a real phone and a real desktop can show: that the `json` mode finds and opens a phone over USB, that the window draws a real phone's stop, and what the app looks like under Omarchy. **It does not write, and it is not the write path's first run.** That is part A (WRITE-RUNBOOK), and it comes first: this run should not be the first time this code talks to a real bootloader.
 
@@ -243,11 +243,20 @@ fastboot -s "$serial" reboot
 
 #### Results
 
-Not run yet. For each run: the date, the commit, the release's version, each step's outcome in a line, the title of each stop as shown, step 2's and step 6's `getvar` values side by side (no serial), and step 7's notes.
+**2026-11-15, installer `f968947` (installer-next), Omarchy Mobile 2026.11.15 release candidate (signed bundle), the reference Pixel 7 Pro, the app built from the checkout (not yet from the release workflow's package).** Passed.
+
+- 0: `cargo build`, `web/build.sh`, `app/bin/build`, `app/bin/test`, `tools/check-shipping --built`: every line ok. `omamobile-install verify`: 24 files match the signed manifest, the build index passes (2 builds, 1 tested), both placeholders found.
+- 1: `omainstall check`: the tool, version 0.0.1, protocol 5 (the app speaks 5).
+- 2: one phone; `product: cheetah`, `unlocked: yes`, `current-slot: b`, `slot-successful:b: yes`, `slot-unbootable:b: no`, `slot-retry-count:b: 2`.
+- 3: the dry run without the reinstall flag: "Dry run" in the header, the warning, "Connect the Pixel 7 Pro", the question "What is on this phone's slot B?"; "I am not sure" ended at "Find out what is on slot B first". The first time the `json` mode listed and opened a real phone.
+- 4: the dry run as a reinstall, the factory image handed in: "The dry run passed. Nothing was written".
+- 5: `--write --reinstall`: the red "Install" header, the confirmation "This is what the installer will write"; nothing typed, "Do not install".
+- 6: the `getvar` values read again after step 5: every one as in step 2.
+- 7: the window followed the theme; no picture kept.
 
 ### Part B2. The app from the write to a working phone, on a release with the placeholders
 
-Status: **not run.** Written offline on 2026-11-13, with no phone. Nothing in this section has been tried on hardware.
+Status: **passed on 2026-11-15, with the sleep hold put on by hand** (Results below).
 
 What it tests: the whole run as an owner meets it, in one window started with `--write`: the write with the owner's answers and this computer's SSH key in the release image's placeholders (DESIGN §12), the phone's first start setting up the account and the key from them, then the steps after the write with the release's tools (DESIGN §13): the USB connection, the radio backup, the firmware, the restart and the check. It comes after part B1 and after part A, and its step 3 is a write (a reinstall from slot B): **every step that writes, restarts or changes this computer is the maintainer's to approve at the keyboard.** Omarchy Mobile's AGENTS.md section 1 applies throughout: a fresh radio-backup check before radio work, the modem stopped before a restart the installer does not make, and nothing sent to a phone that stopped answering.
 
@@ -374,7 +383,19 @@ tools/nv-backup --check <NV_BACKUP_DIR>
 
 #### Results
 
-Not run yet. For each run: the date, the commit, the release's version, the kernel release (`uname -r`), each step's outcome in a line, the title of each screen where it stopped, and step 1's and step 5's notes. No serial number, no IMEI, no backup contents, no network name.
+**2026-11-15, the same commit, release candidate and phone as part B1's run, straight after it; kernel `7.3.0-rc6-omamobile-gda171eae4cb7`.** Passed, with one gap the bundle's own installer has since closed (below).
+
+- 0: as B1's step 0; `verify` lists both placeholders.
+- 1: an owner key in `~/.ssh/id_ed25519.pub`, a saved `omamobile-phone` connection, no `after.json`.
+- 2: the radio partitions matched the backup that morning's guided install had taken on the same release (no stock boot since).
+- 3: the write as a reinstall, real answers, the codename typed: the writes, then "Omarchy Mobile is written, and the phone is restarting".
+- 4: "Set up the phone": the first start finished; the phone answered with the key from the answers. A sleep hold was put on the phone by hand at 21:55:49 (see below).
+- 5: the radio backup into `~/omamobile-backup/cheetah-radio-backup-<date>-<time>`: every NV partition the same as the reference backup; `devinfo` differs, as it does after every switch to slot B.
+- 6: the firmware: done.
+- 7: the restart and the check: `after.json` says `"check": "passed"` and `"finished"`; the phone came up locked into the account. The check's report: every required row ok, cameras skipped (no libcamera tools in the image), and "new dmesg errors" not ok for CPIF's `cp2ap_wakeup work pending/resume` lines, which a 7 Pro that sleeps with the modem up logs at every modem-woken sleep (Omarchy Mobile #834 makes them known lines).
+- 8: on the phone: device-cheetah 0.1.60, omamobile-modem-sit 0.3.43, omamobile-omarchy 0.1.47; `firstboot.conf` gone; no hash or Wi-Fi key in the first-start log; no "Initramfs unpacking failed"; no UFS error-handler line; mobile data 3/3; the sleep policy says the phone may sleep with the modem up.
+
+**The gap:** a freshly written phone has no firmware yet, so its modem (and the modem's sleep inhibitor) can't start, and auto-sleep can put it to sleep between the first start and the radio backup, which drops USB. The same release's guided install failed on that the same morning. The app's steps after the write hold no sleep inhibitor of their own; this run had one put on by hand. Omarchy Mobile's `tools/install-guided` now holds one (#814); the app's steps after the write should do the same before the next run.
 
 ### Part C. The web page in a real browser
 
