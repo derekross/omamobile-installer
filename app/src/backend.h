@@ -159,6 +159,9 @@ public:
     // run that writes (canRepair). Whether it writes stays what the window
     // was started with: the tool is started with --write as before, by the
     // one line that passes it, and the core stops a Repair that can't write.
+    // It stays a Repair for the rest of the window's life: "Start again"
+    // after a stop starts a Repair again, and an install takes a new window
+    // (the Repair's warning and its codename are the places to stop).
     Q_INVOKABLE bool startRepair();
 
     // One per message of the protocol. Each returns whether it was sent: an

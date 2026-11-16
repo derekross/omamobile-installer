@@ -176,6 +176,10 @@ else
   bad "the flow's write switch is set somewhere else than the command-line tool's two lines" "$switches"
 fi
 once "--write is the one argument of install that sets it" '"--write" => write = true,' cli/src/main.rs
+# Repair (DESIGN §11) is a run that writes only with --write too: neither
+# the command's name nor the repair switch sets the write switch
+none "neither the repair command nor its switch sets the flow's write switch" \
+  '\b(write|may_write)\s*\|?=\s*[^=;]*(repair|command)|\.write\s*=\s*[^;]*repair|write:\s*[^,]*repair' cli/src/*.rs
 # The JSON mode (the desktop app's and scripts' way in): its flow writes
 # only if the tool itself was started with --write. No message carries the
 # switch, and the one place the mode makes a flow's options reads the

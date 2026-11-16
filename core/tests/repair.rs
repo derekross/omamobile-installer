@@ -16,7 +16,8 @@ mod support;
 use omamobile_installer_core::bundle::ReleaseFiles;
 use omamobile_installer_core::fastboot::{PhoneOptions, Session, WriteReach};
 use omamobile_installer_core::flow::{
-    Flow, FlowOptions, PhoneFact, Retry, Step, Stop, REPAIR_KEEPS, REPAIR_WAY_BACK,
+    repair_kernel_words, Flow, FlowOptions, PhoneFact, Retry, Step, Stop, REPAIR_ANDROID,
+    REPAIR_KEEPS, REPAIR_WAY_BACK,
 };
 use omamobile_installer_core::install::flash_userdata_from_reader;
 use omamobile_installer_core::manifest::Slot;
@@ -203,11 +204,31 @@ fn a_repair_on_slot_b_writes_slot_b_only() {
 }
 
 #[test]
-fn a_repair_needs_no_build_index_no_factory_image_and_no_answers() {
+fn a_repair_needs_no_factory_image_and_no_answers_and_reads_the_build_index() {
     let bundle = TestBundle::running(&["a"]);
+    // The index is read as for an install: not fetched, the run stops
+    // before any phone is asked
     let phone = FakePhone::scenario("running-a").unwrap();
-    // The index is not even handed in: a Repair reads none
-    let mut flow = Flow::begin(&bundle.files(), None, &bundle.trusted(), repair());
+    let flow = Flow::begin(&bundle.files(), None, &bundle.trusted(), repair());
+    assert_eq!(stop(&flow).id(), "build-index-refused");
+    // A bootloader the index does not list: a phone back on another
+    // Android build is not repaired, and is only asked what it is
+    let other = FakePhone::scenario("running-a").unwrap();
+    other.edit(|s| {
+        s.slot_versions = Some(("fake-7.7".into(), "fake-1.0".into()));
+        s.vars
+            .insert("version-bootloader".into(), "fake-7.7".into());
+    });
+    let (flow, _) = run(&bundle, &other, repair());
+    let s = stop(&flow);
+    assert_eq!(s.id(), "build-not-listed");
+    assert!(s
+        .message
+        .join(" ")
+        .contains("If the phone runs Android, don't repair it"));
+    assert!(other.not_reads().is_empty(), "{:?}", other.not_reads());
+    // A listed bootloader: no factory image, no answers
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), repair());
     drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
     assert_eq!(flow.screen().state, "confirm");
     // Nothing of an install's steps is taken
@@ -299,7 +320,7 @@ fn a_repair_session_holds_the_slots_boot_images_only_and_refuses_userdata_at_eve
 }
 
 #[test]
-fn a_repair_session_is_only_for_a_release_on_the_running_slot_and_takes_no_key() {
+fn a_repair_session_is_only_for_a_release_on_the_running_slot() {
     let phone = FakePhone::scenario("running-a").unwrap();
     // Format 1: refused before a question is asked
     let one = TestBundle::new().verify().unwrap();
@@ -318,24 +339,53 @@ fn a_repair_session_is_only_for_a_release_on_the_running_slot_and_takes_no_key()
         "{err}"
     );
     assert!(phone.log().is_empty(), "{:?}", phone.log());
-    // A Repair writes the images as signed: no SSH key goes in
-    let two = TestBundle::running(&["a"]).verify().unwrap();
-    let err = block_on(Session::connect(
-        phone.clone(),
-        &two,
-        SERIAL,
-        PhoneOptions {
-            repair: true,
-            owner_ssh_key: Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA test".into()),
-            ..Default::default()
-        },
-    ))
-    .unwrap_err();
+}
+
+/// A made-up SSH public key line in an Ed25519 key's form; never a real key.
+const TEST_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRepairTestKeyRepairTestKeyRepairTestKeyRepairTestKey01 installer-test";
+
+#[test]
+fn a_repair_keeps_this_computers_ssh_key_in_the_initramfs_and_says_so() {
+    // The rescue SSH is the way into a phone whose root does not start:
+    // a Repair handed a key (the JSON mode's, for the app) appends it to
+    // the image that carries the initramfs, as an install does
+    let bundle = TestBundle::running(&["a"]);
+    let phone = FakePhone::scenario("running-a").unwrap();
+    let options = FlowOptions {
+        owner_ssh_key: Some(TEST_KEY.into()),
+        ..repair()
+    };
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), options);
+    drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
+    let body = flow.screen().body.join(" ");
     assert!(
-        matches!(&err, Error::Refused(why) if why.contains("no SSH key")),
-        "{err}"
+        body.contains("vendor_kernel_boot_a is written with this computer's SSH public key"),
+        "{body}"
     );
-    assert!(phone.log().is_empty());
+    drive(&mut flow, &bundle, &phone, "cheetah", "");
+    assert!(
+        matches!(flow.step(), Step::Repaired(_)),
+        "{:?}",
+        flow.step()
+    );
+    let keyed = omamobile_installer_core::ramdisk_key::with_owner_key(
+        bundle.image("vendor_kernel_boot"),
+        TEST_KEY,
+    )
+    .unwrap();
+    assert!(phone.partition("vendor_kernel_boot_a")[..keyed.len()] == keyed[..]);
+    // The others as signed, and still nothing but the five
+    assert!(phone.partition("boot_a")[..16 << 10] == *bundle.image("boot"));
+    only_the_slots_boot_images(&phone, "a");
+    // Without a key, the confirmation says the rescue SSH is not kept
+    let plain = FakePhone::scenario("running-a").unwrap();
+    let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), repair());
+    drive(&mut flow, &bundle, &plain, "cheetah", "confirm");
+    assert!(flow
+        .screen()
+        .body
+        .join(" ")
+        .contains("No SSH key is added to the initramfs in this run"));
 }
 
 // ---- What a Repair refuses ---------------------------------------------------
@@ -501,6 +551,14 @@ fn the_screens_of_a_repair_say_what_is_written_and_what_is_kept() {
         "{steps:?}"
     );
     assert!(steps.iter().any(|s| s.starts_with(REPAIR_WAY_BACK)));
+    assert!(steps.contains(&REPAIR_ANDROID), "{steps:?}");
+    // The kernel it writes, by its release, and what it needs of the
+    // phone's system: never "use the newest release"
+    let kernel = repair_kernel_words("7.3.0-test");
+    assert!(steps.iter().any(|s| s.contains(&kernel)), "{steps:?}");
+    assert!(kernel.contains("the kernel the phone last started"));
+    assert!(kernel.contains("omamobile-boot-update rollback"));
+    assert!(!steps.join(" ").contains("newest"), "{steps:?}");
     drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
     let confirm = flow.screen();
     assert_eq!(confirm.title, "This is what the repair will write");
@@ -516,6 +574,7 @@ fn the_screens_of_a_repair_say_what_is_written_and_what_is_kept() {
     want.push("then: restart the phone (reboot)".into());
     assert_eq!(confirm.plan, want);
     let all = [confirm.body.join(" "), confirm.footer.join(" ")].join(" ");
+    assert!(confirm.body.contains(&kernel), "{all}");
     for line in [
         "userdata is not written: your account, your files and everything else stored on the phone are kept.",
         "No slot is made active: the phone keeps starting from slot a.",
@@ -541,7 +600,22 @@ fn the_screens_of_a_repair_say_what_is_written_and_what_is_kept() {
     drive(&mut flow, &bundle, &phone, "cheetah", "");
     let last = flow.screen();
     assert_eq!(last.state, "repaired");
-    assert!(last.body.join(" ").contains("userdata was not written"));
+    let words = last.body.join(" ");
+    assert!(words.contains("userdata was not written"));
+    // What it should do, and what it can't promise
+    assert!(
+        words.contains("It should start Omarchy Mobile from slot a"),
+        "{words}"
+    );
+    assert!(
+        words.contains("with this release's kernel, 7.3.0-test"),
+        "{words}"
+    );
+    assert!(words.contains("omamobile-boot-update rollback"), "{words}");
+    assert!(
+        !words.contains("starts into your account as it was"),
+        "{words}"
+    );
     assert!(
         last.body[0].contains("boot_a, init_boot_a, vendor_boot_a, vendor_kernel_boot_a, dtbo_a")
     );

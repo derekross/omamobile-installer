@@ -1093,10 +1093,10 @@ impl<P: Phones> Driver<P> {
         // In a run that writes, the key the phone will take from this
         // computer goes into slot B's initramfs, and the steps after the
         // write follow when the release ships the tools for them. A Repair
-        // writes the boot images as the release signed them, and nothing
-        // comes after it but the restart: no key, no steps after the write,
-        // and no unfinished setup offered
-        if self.may_write && !repair {
+        // takes the key too (the rescue SSH is the way into a phone whose
+        // root does not start), and nothing comes after it but the restart:
+        // no steps after the write, and no unfinished setup offered
+        if self.may_write {
             if let Some(seams) = &self.seams {
                 let key = after::choose_key(seams).map_err(|e| {
                     Fatal(format!(
@@ -1125,7 +1125,7 @@ impl<P: Phones> Driver<P> {
                 None
             },
             owner_ssh_key: self.key.as_ref().map(|k| k.public.clone()),
-            after_write_steps: self.key.is_some() && after::release_has_tools(&dir),
+            after_write_steps: !repair && self.key.is_some() && after::release_has_tools(&dir),
             repair,
             ..Default::default()
         };

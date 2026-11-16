@@ -273,3 +273,41 @@ fn begin_write_itself_refuses_a_repair_whose_plan_is_not_the_boot_images_alone()
     assert!(session.repairs() && !session.may_flash().contains(&"userdata".to_string()));
     assert!(phone.changes().is_empty());
 }
+
+/// A Repair's writing session takes no answers, whoever hands them in: it
+/// writes no userdata. The control is an install's session on the same
+/// phone and release, which takes the same answers.
+#[test]
+fn a_repairs_writing_session_refuses_the_answers() {
+    let bundle = TestBundle::running(&["a"]);
+    let release = bundle.verify().unwrap();
+    let answers = || {
+        root_answers_on(
+            &release,
+            &support::drive::answers(),
+            None,
+            support::drive::SALT,
+            Some(Slot::A),
+        )
+        .unwrap()
+    };
+    let phone = FakePhone::scenario("running-a").unwrap();
+    let mut flow = repair_at_the_write(&bundle, &phone);
+    let mut session = block_on(flow.begin_write(phone.clone())).unwrap().unwrap();
+    let err = session.set_answers(answers()).unwrap_err();
+    assert!(
+        matches!(&err, Error::Refused(s) if s.contains("a repair writes no userdata")),
+        "{err}"
+    );
+    assert!(session.answers().is_none());
+    let phone = FakePhone::scenario("running-a").unwrap();
+    let (_flow, mut install) = support::drive::writing_session(
+        &bundle,
+        &phone,
+        FlowOptions {
+            write: true,
+            ..Default::default()
+        },
+    );
+    install.set_answers(answers()).unwrap();
+}

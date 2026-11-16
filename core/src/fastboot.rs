@@ -525,7 +525,11 @@ impl<T> Client<T> {
             transport,
             match (dry_run, running, repair) {
                 (true, _, _) => Grant::Ask,
-                (false, None, _) => Grant::Write(flashable),
+                // A Repair of a format-1 release is refused at `connect`;
+                // were it not, its client could still only ask: never
+                // format 1's writer, whose grant holds set_active:b
+                (false, None, true) => Grant::Ask,
+                (false, None, false) => Grant::Write(flashable),
                 (false, Some(slot), false) => Grant::WriteRunning(slot, flashable),
                 (false, Some(slot), true) => Grant::Repair(slot, flashable),
             },
@@ -882,16 +886,12 @@ impl<T: Transport> Session<T> {
         let repair = options.repair;
         // A Repair writes the running slot's boot images and keeps userdata:
         // there is no such thing for a release that writes slot B and makes
-        // it active (format 1), and nothing of the answers goes with it
+        // it active (format 1), and nothing of the answers goes with it. The
+        // owner's SSH key it takes as an install does: the rescue SSH is the
+        // way into a phone whose root does not start
         if repair && !on_running {
             return Err(Error::Refused(
                 "a repair is only for a release that installs on the slot the phone runs from (manifest format 2)".into(),
-            ));
-        }
-        if repair && options.owner_ssh_key.is_some() {
-            return Err(Error::Refused(
-                "a repair writes the release's boot images as they were signed: no SSH key is added"
-                    .into(),
             ));
         }
         // A format-2 install switches no slot: what a session would do with
@@ -2283,6 +2283,25 @@ mod tests {
                 Client::for_session_on(Recorder::default(), list.clone(), true, Some(slot), true);
             assert!(dry.flashable.is_empty() && !dry.set_active);
         }
+        // A Repair with no running slot (format 1, refused at `connect`)
+        // still never gets format 1's writer: it can only ask
+        let mut lost = Client::for_session_on(
+            Recorder::default(),
+            boot_images_on(Slot::B),
+            false,
+            None,
+            true,
+        );
+        assert!(lost.flashable.is_empty() && !lost.set_active);
+        for command in [
+            "set_active:b",
+            "flash:boot_b",
+            "reboot",
+            "download:00000010",
+        ] {
+            assert!(block_on(lost.simple(command)).is_err(), "{command}");
+        }
+        assert!(lost.transport.sent.is_empty());
     }
 
     #[test]

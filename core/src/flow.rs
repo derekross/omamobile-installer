@@ -434,11 +434,22 @@ pub struct FlowOptions {
 
 /// What a front end says where it offers Repair (the command line's
 /// `repair`): exactly what is written and what is kept.
-pub const REPAIR_HELP: &str = "Repairs a phone that runs Omarchy Mobile from a release that installs on the slot the phone runs from (manifest format 2), when a kernel update left it unable to start: it writes the release's boot images again to the slot the phone runs from (each to its partition with that slot's suffix), then restarts the phone. Nothing else: userdata is NOT written, so your account and everything on the phone are kept; no slot is made active; the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. It needs no factory image and no answers. The phone has to be unlocked and in Fastboot Mode on the slot the release accepts. The run first checks the phone and every image against the release's signed checksums, then lists each partition and waits for you to type the phone's codename; nothing is written before that.";
+pub const REPAIR_HELP: &str = "Repairs a phone that runs Omarchy Mobile from a release that installs on the slot the phone runs from (manifest format 2), when a kernel update left it unable to start: it writes the release's boot images again to the slot the phone runs from (each to its partition with that slot's suffix), then restarts the phone. Nothing else: userdata is NOT written, so your account and everything on the phone are kept; no slot is made active; the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. It needs no factory image and no answers. The phone's drivers are kernel modules kept in its system on userdata for one kernel version each: use the release whose kernel is the one the phone last started, or the phone starts without its drivers (no screen graphics, Wi-Fi, modem, charging readings or temperature limits) and is put right over USB SSH with omamobile-boot-update rollback, or by a full install. If the phone runs Android, don't repair it: a repair overwrites the boot images Android starts from. The phone has to be unlocked and in Fastboot Mode on the slot the release accepts. The run first checks the phone and every image against the release's signed checksums, then lists each partition and waits for you to type the phone's codename; nothing is written before that.";
 
 /// Said on a Repair's warning, its confirmation and its last screen: what
 /// it keeps, and the ways back if it does not help.
 pub const REPAIR_KEEPS: &str = "A repair does not write userdata: your account, your files and everything else stored on the phone are kept. No slot is made active, and the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.";
+
+/// What a Repair's kernel needs of the phone's system, said on the warning
+/// and the confirmation: its modules live on userdata, which a Repair keeps,
+/// under that exact kernel release, so a kernel that is not the one the
+/// phone last started finds none of them and starts with what is built in.
+pub fn repair_kernel_words(kernel_release: &str) -> String {
+    format!("The kernel this release writes is {kernel_release}. Its drivers are kernel modules, and they are not in the boot images: they live in the phone's system on userdata, which a repair keeps, in a folder for that exact kernel version. The phone's system holds them when {kernel_release} is the kernel the phone last started, so use the release whose kernel that is. If it is not, the phone starts without them: the screen's graphics, Wi-Fi, the modem, the charger and battery readings, the temperature limits and the firewall do not work, though it still starts far enough to be reached over the USB cable. The way on from there is \"omamobile-boot-update rollback\", run on the phone over USB SSH, which puts back the kernel it ran before with its own modules; or a full install, which erases the phone.")
+}
+
+/// Said on a Repair's warning: it is never for a phone that runs Android.
+pub const REPAIR_ANDROID: &str = "If the phone runs Android, don't repair it: a repair overwrites the boot images of the slot the phone starts from, and Android's with them. The installer checks that the phone's bootloader is one this release lists, and cannot tell more from Fastboot Mode.";
 
 /// The way on when a Repair does not get the phone to start.
 pub const REPAIR_WAY_BACK: &str = "If the phone still does not start after a repair, a full install of this release with the installer writes everything again, userdata included, which erases what is stored on the phone. Or put Android back with Google's factory image, which erases the phone too.";
@@ -1652,20 +1663,20 @@ impl Flow {
         }
         // A Repair writes the running slot's boot images again: a release
         // that writes slot B and makes it active has no such thing. It needs
-        // no place for answers and no build index, since it writes neither
-        // userdata nor firmware
-        if flow.options.repair {
-            if !release.manifest().on_running_slot() {
-                flow.stop(
-                    StopKind::RepairNotForRelease,
-                    Retry::StopsAgain,
-                    "This release can't repair a phone",
-                    vec![
-                        format!("This release of Omarchy Mobile for the {name} ({codename}) is written to slot B and makes slot B the active slot, with Android kept on slot A. A repair is for a release that installs on the slot the phone runs from, and writes that slot's boot images again."),
-                        format!("A phone installed from such a release is put right by installing it again. To repair a phone, use a release made to install on the slot the phone runs from, from {DOWNLOAD}."),
-                    ],
-                );
-            }
+        // no place for answers, since it writes no userdata. It reads the
+        // build index like an install: the phone's bootloader must be one
+        // the release lists, so that a phone back on another Android build
+        // is not mistaken for one a Repair is for
+        if flow.options.repair && !release.manifest().on_running_slot() {
+            flow.stop(
+                StopKind::RepairNotForRelease,
+                Retry::StopsAgain,
+                "This release can't repair a phone",
+                vec![
+                    format!("This release of Omarchy Mobile for the {name} ({codename}) is written to slot B and makes slot B the active slot, with Android kept on slot A. A repair is for a release that installs on the slot the phone runs from, and writes that slot's boot images again."),
+                    format!("A phone installed from such a release is put right by installing it again. To repair a phone, use a release made to install on the slot the phone runs from, from {DOWNLOAD}."),
+                ],
+            );
             flow.release = Some(release);
             return flow;
         }
@@ -1674,6 +1685,7 @@ impl Flow {
         // the owner erases a phone for it. A release whose root image
         // offers the install link takes the answers there instead
         if flow.options.write
+            && !flow.options.repair
             && release.manifest().root_image.placeholders.is_empty()
             && release.manifest().install_link.is_none()
         {
@@ -2321,9 +2333,34 @@ impl Flow {
             if let Some(stopped) = self.judge_running_slot(report) {
                 return stopped;
             }
-            // A Repair writes no firmware: no build index, no baseband and
-            // no factory image. What is left to judge is the lock
+            // A Repair writes no firmware, so it needs no factory image and
+            // no baseband. But the phone's bootloader must be one the
+            // release's build index lists: a phone that runs another
+            // Android build (stock again, say) is not one a Repair is for,
+            // and its boot images are not to be overwritten. Then the lock
             if self.options.repair {
+                let listed = self.index.as_ref().is_some_and(|i| {
+                    i.data()
+                        .builds
+                        .iter()
+                        .any(|b| b.bootloader == report.bootloader)
+                });
+                if !listed {
+                    self.stop(
+                        StopKind::BuildNotListed {
+                            bootloader: report.bootloader.clone(),
+                            baseband: report.baseband.clone().unwrap_or_default(),
+                        },
+                        Retry::StopsAgain,
+                        "This phone's bootloader isn't one this release knows",
+                        vec![
+                            format!("The {name} reports bootloader {}, and no build in the release's list of Google's builds has it. A phone that runs Omarchy Mobile from this release has a bootloader the list holds, so the installer does not repair this one.", report.bootloader),
+                            "If the phone runs Android, don't repair it: a repair overwrites the boot images of the slot the phone starts from, and Android's with them.".into(),
+                            format!("If the phone runs Omarchy Mobile, use the release it was installed from, or ask at {ISSUES}"),
+                        ],
+                    );
+                    return Judged::Stopped;
+                }
                 return if report.unlocked {
                     Judged::Repair
                 } else {
@@ -3050,9 +3087,9 @@ impl Flow {
             // What this run measured, compared again by the session
             other_slot_measured: self.measured.clone().filter(|_| slot_b),
             // So that the dry run checks the image with the key against
-            // its partition, as the write will send it. A Repair writes the
-            // images as they were signed
-            owner_ssh_key: self.options.owner_ssh_key.clone().filter(|_| !repair),
+            // its partition, as the write will send it. A Repair keeps it
+            // too: rescue SSH is the way into a phone whose root does not start
+            owner_ssh_key: self.options.owner_ssh_key.clone(),
             repair,
         };
         let opened = match Session::connect_pinned(transport, &release, &report.id, options).await {
@@ -3329,11 +3366,11 @@ impl Flow {
             ));
         }
         let repair = self.options.repair;
-        // A Repair writes no firmware, so it reads no build index; every
-        // other write needs the verified one
-        let (Some(release), true, Some(pinned)) = (
+        // Every write needs the verified build index, a Repair's too (its
+        // bootloader is looked up there)
+        let (Some(release), Some(_), Some(pinned)) = (
             self.release.clone(),
-            repair || self.index.is_some(),
+            self.index.as_ref(),
             self.pinned.clone(),
         ) else {
             return Err(Error::Refused(
@@ -3410,7 +3447,7 @@ impl Flow {
                 .filter(|_| slot_b),
             maintainer_skip_bootloader_slot_check: false,
             other_slot_measured: self.measured.clone().filter(|_| slot_b),
-            owner_ssh_key: self.options.owner_ssh_key.clone().filter(|_| !repair),
+            owner_ssh_key: self.options.owner_ssh_key.clone(),
             repair,
         };
         // Every condition above held: the one token there is, for the one
@@ -3646,6 +3683,23 @@ impl Flow {
         }))
     }
 
+    /// The confirmation's line about this computer's SSH key, when the run
+    /// was handed one: the image that carries the initramfs is written with
+    /// it appended.
+    fn keyed_image_line(&self) -> Option<String> {
+        let release = self.release.as_ref()?;
+        self.options.owner_ssh_key.as_ref()?;
+        let at = crate::fastboot::ramdisk_write(release.manifest())?;
+        let slot = self
+            .report
+            .as_ref()
+            .and_then(|p| Slot::parse(&p.current_slot))
+            .filter(|_| release.manifest().on_running_slot())
+            .unwrap_or(Slot::B);
+        let name = release.manifest().boot_writes[at].partition(slot);
+        Some(format!("{} is written with this computer's SSH public key added to the initramfs it carries, after the release's own files, as Omarchy Mobile's install-phone adds it, so that the phone's rescue SSH lets this computer in. Every other byte written is the release's.", name.name()))
+    }
+
     /// The current step as text. See [`Screen`].
     pub fn screen(&self) -> Screen {
         let (name, codename) = self.names();
@@ -3654,6 +3708,11 @@ impl Flow {
             .release
             .as_ref()
             .map(|r| r.manifest().label.clone())
+            .unwrap_or_default();
+        let kernel_release = self
+            .release
+            .as_ref()
+            .map(|r| r.manifest().kernel_release.clone())
             .unwrap_or_default();
         let mut s = Screen {
             state: "",
@@ -3688,8 +3747,12 @@ impl Flow {
                 s.body = vec!["It is the only warning; nothing will ask again.".into()];
                 s.steps = vec![
                     step(format!("A repair is for a {name} that runs Omarchy Mobile and no longer starts, for example after a kernel update: it writes this release's boot images again to the slot the phone runs from, then restarts the phone. It needs the phone unlocked and in Fastboot Mode: {keys}.")),
+                    step(REPAIR_ANDROID),
                     step(REPAIR_KEEPS),
-                    step(format!("The boot images written are this release's ({label}). Use the newest release for this phone: the system on the phone keeps the kernel modules of its own last update, and a kernel much older than them may start without some of its drivers.")),
+                    step(format!(
+                        "The boot images written are this release's ({label}). {}",
+                        repair_kernel_words(&kernel_release)
+                    )),
                     step(format!("{REPAIR_WAY_BACK} {GO_BACK_TO_ANDROID}")),
                 ];
                 s.footer = vec!["Nothing is asked of the phone until you accept.".into()];
@@ -4092,8 +4155,13 @@ impl Flow {
                 s.body = vec![
                     phone_line(&name, plan),
                     format!("The repair writes this release's boot images again to slot {slot}, the slot the phone runs from, and restarts the phone. It writes nothing else."),
-                    "Every boot image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into(),
+                    repair_kernel_words(&kernel_release),
                 ];
+                s.body.push(match self.keyed_image_line() {
+                    Some(line) => line,
+                    None => "No SSH key is added to the initramfs in this run: if the phone's rescue SSH let a computer in before, it does not after this repair, until the phone's next kernel update or install.".into(),
+                });
+                s.body.push("Every boot image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into());
                 s.plan = plan.writes.iter().map(PlannedWrite::line).collect();
                 s.plan.push("then: restart the phone (reboot)".into());
                 s.footer = vec![
@@ -4134,31 +4202,7 @@ impl Flow {
                     )
                 }));
                 s.body.push("Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:".into());
-                if let Some(at) = self
-                    .options
-                    .owner_ssh_key
-                    .as_ref()
-                    .and(self.release.as_ref())
-                    .and_then(|r| crate::fastboot::ramdisk_write(r.manifest()))
-                {
-                    let name = self
-                        .release
-                        .as_ref()
-                        .map(|r| {
-                            let slot = self
-                                .report
-                                .as_ref()
-                                .and_then(|p| Slot::parse(&p.current_slot))
-                                .filter(|_| r.manifest().on_running_slot())
-                                .unwrap_or(Slot::B);
-                            r.manifest().boot_writes[at]
-                                .partition(slot)
-                                .name()
-                                .to_string()
-                        })
-                        .unwrap_or_default();
-                    s.body.push(format!("{name} is written with this computer's SSH public key added to the initramfs it carries, after the release's own files, as Omarchy Mobile's install-phone adds it, so that the phone's rescue SSH lets this computer in. Every other byte written is the release's."));
-                }
+                s.body.extend(self.keyed_image_line());
                 s.plan = plan.writes.iter().map(PlannedWrite::line).collect();
                 if plan.running_slot.is_none() {
                     s.plan
@@ -4305,8 +4349,9 @@ impl Flow {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
-                    format!("The phone was told to restart. It starts Omarchy Mobile from slot {slot}, the slot it ran from, with this release's boot images; no slot was made active."),
-                    "userdata was not written: the phone starts into your account as it was, with everything that was stored on it.".into(),
+                    format!("The phone was told to restart. It should start Omarchy Mobile from slot {slot}, the slot it ran from, with this release's kernel, {kernel_release}; no slot was made active."),
+                    format!("userdata was not written, so your account and everything stored on the phone are still there. If {kernel_release} is the kernel the phone last started, its system holds that kernel's drivers and the phone should start into your account as before."),
+                    format!("If the screen stays dark or on the boot logo, or Wi-Fi, the modem or charging don't work, the phone's system holds no drivers for {kernel_release}: reach the phone over the USB cable with SSH and run \"omamobile-boot-update rollback\", which puts back the kernel it ran before, or install again, which erases the phone."),
                 ];
                 s.footer = vec![REPAIR_WAY_BACK.into(), GO_BACK_TO_ANDROID.into()];
             }

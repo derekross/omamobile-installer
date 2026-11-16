@@ -1211,6 +1211,44 @@ fn a_repair_is_a_run_that_writes_and_takes_none_of_an_installs_options() {
     }
     let (_, _, err) = run(&["repair", dir.to_str().unwrap(), "--serial", "X"], "");
     assert!(err.contains("repair needs --write"), "{err}");
+    // Each refused by its own words, before any USB device is looked for
+    let refusal = "a repair takes no --reinstall, no --bootloader-slots-match and no --factory-zip";
+    let d = dir.to_str().unwrap();
+    for args in [
+        vec!["repair", d, "--serial", "X", "--write", "--reinstall"],
+        vec![
+            "repair",
+            d,
+            "--serial",
+            "X",
+            "--write",
+            "--factory-zip",
+            zip.to_str().unwrap(),
+        ],
+        vec![
+            "repair",
+            d,
+            "--serial",
+            "X",
+            "--write",
+            "--bootloader-slots-match",
+            "fake-1.0",
+        ],
+        vec![
+            "flow",
+            d,
+            "--fake-phone",
+            "running-a",
+            "--write",
+            "--repair",
+            "--reinstall",
+        ],
+    ] {
+        let (code, out, err) = run(&args, "");
+        assert_eq!(code, 1, "{args:?}");
+        assert!(err.contains(refusal), "{args:?}: {err}");
+        assert!(!out.contains("pretend phone ("), "{args:?}: {out}");
+    }
     // The help says what a repair writes and keeps
     let (code, out, _) = run(&["help"], "");
     assert_eq!(code, 0);
