@@ -106,5 +106,9 @@
   "Your email address, for git (optional)": "Ihre E-Mail-Adresse, für git (optional)",
   "Choose a new, empty folder for the radio backup": "Wählen Sie einen neuen, leeren Ordner für die Funk-Sicherung",
   "No folder chooser is available on this desktop. The command line can go on from here: omamobile-install link --backup-dir FOLDER": "Auf diesem Desktop ist keine Ordnerauswahl verfügbar. Die Befehlszeile kann hier weitermachen: omamobile-install link --backup-dir ORDNER",
-  "Six-digit code": "Sechsstelliger Code"
+  "Six-digit code": "Sechsstelliger Code",
+  "Do not repair": "Nicht reparieren",
+  "Repair": "Reparatur",
+  "Repair a phone instead": "Stattdessen ein Telefon reparieren",
+  "Write the boot images": "Die Boot-Images schreiben"
 }

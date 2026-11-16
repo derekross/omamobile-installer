@@ -511,7 +511,7 @@ private slots:
         QCOMPARE(sent.count(), 2);
         QVERIFY(oneLine(sent.at(0).at(0).toByteArray()));
         QCOMPARE(json(sent.at(0).at(0).toByteArray()),
-                 (QJsonObject{{"type", "hello"}, {"protocol", 6}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
+                 (QJsonObject{{"type", "hello"}, {"protocol", 7}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}));
         QCOMPARE(json(sent.at(1).at(0).toByteArray()), (QJsonObject{{"type", "start"}, {"reinstall", false}}));
 
         Backend again;
@@ -884,7 +884,7 @@ private slots:
         QTest::newRow("a screen that lacks a field") << QByteArray("odd-screen") << "malformed" << "sent something this app cannot read" << "the screen has no \"footer\"";
         QTest::newRow("an unknown message") << QByteArray("unknown") << "malformed" << "sent something this app cannot read" << "a kind this app does not know";
         QTest::newRow("an unexpected exit") << QByteArray("exit") << "crashed" << "stopped unexpectedly (exit status 3)" << "stand-in: leaving, as the test asked";
-        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 6" << "";
+        QTest::newRow("a protocol mismatch") << QByteArray("mismatch") << "mismatch" << "speaks protocol 99 and this app speaks protocol 7" << "";
         QTest::newRow("another kind of run") << QByteArray("other-mode") << "mode" << "started a run that can write" << "";
         QTest::newRow("a fatal message") << QByteArray("fatal") << "fatal" << "reported that it failed" << "the release could not be read";
         QTest::newRow("no hello") << QByteArray("silent") << "silent" << "did not say hello" << "";
@@ -928,7 +928,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":6,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":7,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "printf '{\"type\":\"screen\",\"screen\":%s}\\n' \"$(tr -d '\\n' < '" + Tests.toUtf8() + "/fixtures/screens/phone.json')\"\n"
                      "read action\n"
@@ -1501,7 +1501,7 @@ private slots:
         QFile script(tool);
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("#!/bin/sh\n"
-                     "echo '{\"type\":\"hello\",\"protocol\":6,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
+                     "echo '{\"type\":\"hello\",\"protocol\":7,\"tool\":\"t\",\"version\":\"0\",\"writes\":false}'\n"
                      "read hello; read start\n"
                      "cat <<'END'\n"
                      + QJsonDocument(QJsonObject{{"type", "screen"}, {"screen", screen}}).toJson(QJsonDocument::Compact) + "\nEND\n"
@@ -2730,6 +2730,84 @@ private slots:
         QCOMPARE(written.value(1), QString("flash:boot_a"));
         QCOMPARE(written.last(), QString("reboot"));
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    // Repair (docs/DESIGN.md §11): the button on the first screen of a run
+    // that writes starts the tool again as a Repair, which writes the
+    // running slot's five boot images and nothing else: no userdata, no
+    // set_active, no factory image, no answers.
+    void theRealToolRepairsThePhoneFromTheRepairButton() {
+        RealTool tool("running-a");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(ReleaseRunning);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        w.settle();
+        QVERIFY(backend.canRepair());
+        QVERIFY(w.shown("repairButton"));
+        QCOMPARE(w.text("repairButton"), QString("Repair a phone instead"));
+        QVERIFY(w.click("repairButton"));
+        QVERIFY(at(backend, "warning"));
+        w.settle();
+        QVERIFY(backend.repairing() && backend.writes());
+        QCOMPARE(backend.screen().value("title").toString(), QString("Repair: read this once"));
+        QCOMPARE(w.text("mode"), QString("Repair"));
+        // Offered once: the Repair's own warning has no button for it
+        QVERIFY(!backend.canRepair() && !w.shown("repairButton"));
+        QVERIFY(backend.acknowledge());
+        QVERIFY(at(backend, "phone"));
+        QVERIFY(backend.readPhone());
+        // From the look to the dry run: no factory image, no answers
+        QVERIFY(at(backend, "dry-run"));
+        QVERIFY(backend.dryRun());
+        QVERIFY(at(backend, "confirm"));
+        w.settle();
+        const QStringList plan = backend.screen().value("plan").toStringList();
+        QCOMPARE(plan.size(), 6);
+        QVERIFY2(plan.value(0).startsWith("boot_a: "), qPrintable(plan.join("\n")));
+        QVERIFY(!plan.join("\n").contains("userdata") && !plan.join("\n").contains("set_active"));
+        QCOMPARE(w.text("primaryButton"), QString("Write the boot images"));
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QVERIFY(at(backend, "repaired"));
+        w.settle();
+        QCOMPARE(w.text("primaryButton"), QString("Close"));
+        backend.shutdown();
+        int partitions = 0;
+        const QStringList written = tool.notReads(&partitions);
+        QCOMPARE(partitions, 5);
+        QStringList flashed;
+        for (const QString &c : written) {
+            QVERIFY2(!c.startsWith("set_active") && !c.startsWith("reboot-bootloader"), qPrintable(c));
+            QVERIFY2(!c.contains("userdata") && !c.endsWith("_b"), qPrintable(c));
+            if (c.startsWith("flash:"))
+                flashed << c;
+        }
+        QCOMPARE(flashed, (QStringList{"flash:boot_a", "flash:init_boot_a", "flash:vendor_boot_a",
+                                        "flash:vendor_kernel_boot_a", "flash:dtbo_a"}));
+        QCOMPARE(written.last(), QString("reboot"));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    // A window started for a dry run has no Repair to offer: a Repair writes.
+    void aDryRunWindowOffersNoRepair() {
+        RealTool tool("running-a");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(ReleaseRunning);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(at(backend, "warning"));
+        w.settle();
+        QVERIFY(!backend.canRepair() && !w.shown("repairButton"));
+        QVERIFY(!backend.startRepair());
+        QVERIFY(!backend.repairing());
+        backend.shutdown();
+        QCOMPARE(tool.nothingButReads(), QString());
     }
 
     void theRealToolStopsAPhoneOnSlotBForARunningSlotReleaseWithoutTheQuestion() {

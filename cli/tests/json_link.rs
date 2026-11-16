@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! `omamobile-install json --write` through the install link (docs/APP.md
-//! §3, protocol 6), against the pretend phones: the fastboot one for the
+//! §3, protocol 7), against the pretend phones: the fastboot one for the
 //! write, then the one that speaks the link. A test release whose root
 //! image offers the link (fixtures/selftest-link). No USB.
 use serde_json::{json, Value};
@@ -78,7 +78,7 @@ impl Tool {
             said: Vec::new(),
         };
         assert_eq!(tool.hear()["type"], "hello");
-        tool.say(json!({"type": "hello", "protocol": 6}));
+        tool.say(json!({"type": "hello", "protocol": 7}));
         tool
     }
     fn say(&mut self, v: Value) {

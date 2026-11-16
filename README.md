@@ -43,6 +43,7 @@ Works, against the pretend phone and the fixtures:
 
 Does not work, or is not built:
 
+- **Repair, on the pretend phone only** (DESIGN §11, "Repair"). For a release that installs on the running slot (manifest format 2): `omamobile-install repair DIR --serial S --write`, the JSON mode's `start` with `"repair": true`, or the desktop window's "Repair a phone instead". It writes the running slot's five boot images again and nothing else: never `userdata`, never the other slot, no `set_active`; the slot is read again before the first flash and after the last.
 - **An install on a real phone.** The write path has never run against one. Until the maintainer's attended run, treat `install --write` as untested code that erases a phone.
 - **A phone you can use afterwards, on a real phone.** The owner's answers, and this computer's SSH key with them, reach the phone in the root image's placeholders, but only from a release built with them, and none is published yet. The steps after the write (the radio backup, firmware, the check) are built in the tool's `json --write` and so in the desktop window, with the release's own tools (DESIGN §13); the whole run, from the write to the check, has run against the pretend phone and stand-ins only.
 - **A write to any phone but the Pixel 7 Pro.** A release for another phone stops a run that writes.

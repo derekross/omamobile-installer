@@ -174,7 +174,9 @@ fn footer_is_honest(stop: &Stop) {
         }
         // The stops after a write began are tested in write_path.rs, and
         // those after a measurement of the other slot in slot_probe.rs
-        PhoneFact::WriteStopped { .. } | PhoneFact::WriteStoppedRunning { .. } => {
+        PhoneFact::WriteStopped { .. }
+        | PhoneFact::WriteStoppedRunning { .. }
+        | PhoneFact::RepairStopped { .. } => {
             panic!("no stop of this file follows a write")
         }
         PhoneFact::SlotsMeasured { .. } | PhoneFact::SlotProbeStopped { .. } => {
@@ -212,10 +214,12 @@ fn the_whole_flow_ends_at_a_dry_run_that_writes_nothing() {
         panic!("{:?}", flow.step())
     };
     assert!(plan.images_walked);
-    assert_eq!(plan.factory_zip.build, PHONE_BUILD);
-    assert_eq!(plan.answers.username, "alex");
-    assert!(plan.answers.pin && !plan.answers.wifi);
-    assert_eq!(plan.answers.hostname, "alex-phone");
+    assert_eq!(plan.factory_zip.as_ref().unwrap().build, PHONE_BUILD);
+    let answers = plan.answers.as_ref().unwrap();
+    assert_eq!(answers.username, "alex");
+    assert!(answers.pin && !answers.wifi);
+    assert_eq!(answers.hostname, "alex-phone");
+    assert!(!plan.repair);
     assert_eq!(plan.would.len(), 8, "{:?}", plan.would);
     assert!(plan.would[0].ends_with("flash:boot_b"));
     assert!(plan.would[4].ends_with("flash:dtbo_b"));

@@ -202,10 +202,10 @@ impl Tool {
         let hello = tool.hear();
         assert_eq!(
             (hello["type"].as_str(), hello["protocol"].as_u64()),
-            (Some("hello"), Some(6))
+            (Some("hello"), Some(7))
         );
         assert_eq!(hello["writes"], write);
-        tool.say(json!({"type": "hello", "protocol": 6, "app": "the tests", "version": "0"}));
+        tool.say(json!({"type": "hello", "protocol": 7, "app": "the tests", "version": "0"}));
         tool
     }
 
@@ -894,4 +894,63 @@ fn after_a_write_on_the_running_slot_the_same_steps_follow_and_the_slot_is_recor
     assert_eq!(provision.len(), 1);
     assert!(provision[0].contains("--first-install"), "{provision:?}");
     tool.finish();
+}
+
+#[test]
+fn a_repair_in_the_json_mode_keeps_this_computers_key_and_runs_no_steps_after_the_write() {
+    // The app's way to a Repair: the tool chooses this computer's key as
+    // for an install, and the Repair appends it to the initramfs, so the
+    // rescue SSH keeps letting this computer in. Nothing follows the write
+    let release = repo().join("fixtures/after-running");
+    let world = World::new("repair");
+    let mut tool = Tool::start(&world, &release, true);
+    let first = tool.act(json!({"type": "start", "repair": true}));
+    assert_eq!(first.state(), "warning", "{}", first.text());
+    assert_eq!(tool.act(json!({"type": "acknowledge"})).state(), "phone");
+    assert_eq!(tool.act(json!({"type": "read-phone"})).state(), "dry-run");
+    let confirm = tool.act(json!({"type": "dry-run"}));
+    assert_eq!(confirm.state(), "confirm", "{}", confirm.text());
+    assert!(
+        confirm
+            .text()
+            .contains("vendor_kernel_boot_a is written with this computer's SSH public key"),
+        "{}",
+        confirm.text()
+    );
+    assert!(!confirm.text().contains("No SSH key is added"));
+    assert_eq!(
+        tool.act(json!({"type": "confirm", "typed": "cheetah"}))
+            .state(),
+        "write"
+    );
+    let repaired = tool.act(json!({"type": "write"}));
+    assert_eq!(
+        (repaired.state(), repaired.action()),
+        ("repaired", "none"),
+        "{}",
+        repaired.text()
+    );
+    let sent: Vec<&str> = repaired
+        .before
+        .iter()
+        .filter(|m| m["type"] == "sent")
+        .filter_map(|m| m["command"].as_str())
+        .filter(|c| c.starts_with("flash:"))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            "flash:boot_a",
+            "flash:init_boot_a",
+            "flash:vendor_boot_a",
+            "flash:vendor_kernel_boot_a",
+            "flash:dtbo_a"
+        ]
+    );
+    // None of the steps after an install ran
+    for step in ["nv-backup", "phone-provision", "phone-smoke", "nmcli"] {
+        assert!(world.ran(step).is_empty(), "{step}: {:?}", world.ran(step));
+    }
+    let said = tool.finish();
+    assert!(said.contains("partitions written: 5"), "{said}");
 }

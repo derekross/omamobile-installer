@@ -141,6 +141,17 @@ void Backend::probe() {
     launch(true);
 }
 
+bool Backend::startRepair() {
+    // Only where nothing has been done yet: the warning, in a run that may
+    // write. The tool is started again, and says hello again
+    if (!canRepair() || m_busy)
+        return false;
+    m_repair = true;
+    emit toolChanged();
+    restart();
+    return true;
+}
+
 void Backend::restart() {
     // Not while a tool may still be writing: a new run would have to end it.
     if (m_writeInHand && m_process.state() != QProcess::NotRunning)
@@ -495,7 +506,11 @@ void Backend::handleHello(const QJsonObject &message) {
         return;
     }
     send({{"type", "hello"}, {"protocol", Protocol}, {"app", "omainstall"}, {"version", QCoreApplication::applicationVersion()}}, false);
-    send({{"type", "start"}, {"reinstall", m_reinstall}}, false);
+    // A Repair (protocol 7) is said in start; it is no reinstall
+    if (m_repair)
+        send({{"type", "start"}, {"repair", true}}, false);
+    else
+        send({{"type", "start"}, {"reinstall", m_reinstall}}, false);
 }
 
 bool Backend::send(const QJsonObject &message, bool makesBusy) {

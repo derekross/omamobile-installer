@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! `omamobile-install json`: the install flow as JSON lines, for the desktop
-//! app, agents and scripts. The protocol is docs/APP.md §3, number 6.
+//! app, agents and scripts. The protocol is docs/APP.md §3, number 7.
 //!
 //! One JSON object per line on standard input and on standard output.
 //! Standard output carries the protocol and nothing else: this file takes it
@@ -55,7 +55,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The protocol this tool speaks (docs/APP.md §3).
-pub const PROTOCOL: u64 = 6;
+pub const PROTOCOL: u64 = 7;
 /// A line longer than this is not a message of this protocol.
 const LONGEST_LINE: usize = 1 << 20;
 
@@ -1031,11 +1031,31 @@ impl<P: Phones> Driver<P> {
                         self.screen();
                         continue;
                     }
-                    let Some(reinstall) = message.get("reinstall").and_then(Value::as_bool) else {
-                        self.refuse("start needs \"reinstall\": true or false.");
-                        continue;
+                    // Repair (protocol 7): the running slot's boot images
+                    // again. Whether the run writes is still the tool's
+                    // own --write, never this message's
+                    let repair = match message.get("repair") {
+                        None => false,
+                        Some(Value::Bool(repair)) => *repair,
+                        Some(_) => {
+                            self.refuse("\"repair\" is true or false.");
+                            continue;
+                        }
                     };
-                    self.start(reinstall)?;
+                    let reinstall = match message.get("reinstall").and_then(Value::as_bool) {
+                        Some(reinstall) => reinstall,
+                        // A Repair is no install, and switches no slot
+                        None if repair => false,
+                        None => {
+                            self.refuse("start needs \"reinstall\": true or false.");
+                            continue;
+                        }
+                    };
+                    if repair && reinstall {
+                        self.refuse("A repair is no reinstall: start takes \"repair\": true with no \"reinstall\", or \"reinstall\": false.");
+                        continue;
+                    }
+                    self.start(reinstall, repair)?;
                     self.screen();
                 }
                 // A cancel that finds no download running is ignored
@@ -1058,7 +1078,7 @@ impl<P: Phones> Driver<P> {
     /// `start`: read the release and begin the flow. A release that can't be
     /// read at all is the tool's failure; one that fails its checks is the
     /// flow's first screen, a stop.
-    fn start(&mut self, reinstall: bool) -> Result<(), Fatal> {
+    fn start(&mut self, reinstall: bool, repair: bool) -> Result<(), Fatal> {
         let Some(dir) = self.release.clone() else {
             return Err(Fatal(
                 "no release was named. This version can't find or fetch a release by itself: it is started as 'omamobile-install json --release DIR'".into(),
@@ -1072,7 +1092,10 @@ impl<P: Phones> Driver<P> {
         // phone on slot B is asked about rather than stopped
         // In a run that writes, the key the phone will take from this
         // computer goes into slot B's initramfs, and the steps after the
-        // write follow when the release ships the tools for them
+        // write follow when the release ships the tools for them. A Repair
+        // takes the key too (the rescue SSH is the way into a phone whose
+        // root does not start), and nothing comes after it but the restart:
+        // no steps after the write, and no unfinished setup offered
         if self.may_write {
             if let Some(seams) = &self.seams {
                 let key = after::choose_key(seams).map_err(|e| {
@@ -1102,13 +1125,16 @@ impl<P: Phones> Driver<P> {
                 None
             },
             owner_ssh_key: self.key.as_ref().map(|k| k.public.clone()),
-            after_write_steps: self.key.is_some() && after::release_has_tools(&dir),
+            after_write_steps: !repair && self.key.is_some() && after::release_has_tools(&dir),
+            repair,
             ..Default::default()
         };
         let flow = Flow::begin(&bundle.files(), bundle.index.as_deref(), &trusted, options);
         // A setup after a write that did not finish, on this computer, for
         // this phone model: offered before a new install begins
-        if let (Some(seams), Some(key), Some(release)) = (&self.seams, &self.key, flow.release()) {
+        if let (false, Some(seams), Some(key), Some(release)) =
+            (repair, &self.seams, &self.key, flow.release())
+        {
             let codename = &release.manifest().codename;
             if let Some(record) = after::load_record(seams, codename).filter(|r| !r.finished()) {
                 self.after = Some(After::resume(
@@ -1648,8 +1674,12 @@ impl<P: Phones> Driver<P> {
                     match block_on(walk_images(&mut session, &release, &started.dir, &mut wire)) {
                         Ok(true) => {
                             started.flow.write_done(session)?;
-                            self.phones.written(n, &release);
-                            self.after_the_write()?;
+                            // A Repair wrote no userdata, and nothing comes
+                            // after it but the restart
+                            if !started.flow.repairs() {
+                                self.phones.written(n, &release);
+                                self.after_the_write()?;
+                            }
                         }
                         Ok(false) => {
                             let gone = Error::Transport(

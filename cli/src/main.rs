@@ -12,7 +12,11 @@
 //!                             [--bootloader-slots-match VERSION]
 //!                             [--factory-zip FILE] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the install flow, and the writes
-//!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--write] [--reinstall]
+//!   omamobile-install repair BUNDLE_DIR --serial SERIAL --write
+//!                                                USB: Repair (docs/DESIGN.md §11), for a release
+//!                                                on the running slot: that slot's boot images
+//!                                                again, no userdata, no set_active
+//!   omamobile-install flow BUNDLE_DIR --fake-phone STATE [--write] [--repair] [--reinstall]
 //!                             [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
 //!                                                no phone: the same flow against a pretend phone
 //!                                                (only in a build with the `fake-phone` feature)
@@ -69,7 +73,8 @@ use omamobile_installer_core::fastboot::{
     PhoneId, PieceReport, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
 };
 use omamobile_installer_core::flow::{
-    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, ProbeAnswer, Screen, WRITE_HELP,
+    AnswersInput, DownloadEnd, Flow, FlowOptions, OwnerAnswers, ProbeAnswer, Screen, REPAIR_HELP,
+    WRITE_HELP,
 };
 use omamobile_installer_core::install::{
     flash_userdata_with_progress, UserdataStream, SEGMENT_CAP,
@@ -670,13 +675,18 @@ async fn walk_images<T: Transport>(
     let writing = !session.is_dry_run();
     let mut seen = session.log().len();
     let m = release.manifest();
-    let Some(root_path) = find_root(dir, &m.root_image.name) else {
-        return Ok(false);
-    };
     if !m.boot_writes.iter().all(|w| dir.join(&w.source).is_file()) {
         return Ok(false);
     }
     let io = |e: io::Error| Error::Transport(format!("reading the release's files: {e}"));
+    // A Repair (docs/DESIGN.md §11): the boot images, and nothing of the
+    // root image, which it neither reads nor needs
+    if session.repairs() {
+        return walk_boot_images(session, release, dir, watch).await;
+    }
+    let Some(root_path) = find_root(dir, &m.root_image.name) else {
+        return Ok(false);
+    };
     // Every file is checked before the first write, the root image among
     // them: a file that is not the release's is found while the phone is
     // still as it was, not after slot B's boot partitions are written.
@@ -752,6 +762,57 @@ async fn walk_images<T: Transport>(
     let result = session.activate_and_reboot().await;
     if writing {
         show_sent(session, &mut seen, &mut **watch.borrow_mut());
+    }
+    result?;
+    Ok(true)
+}
+
+/// [`walk_images`] for a Repair's session: every boot image is read and
+/// checked against the signed manifest before the first write, then read
+/// and checked again as it is written; then the read-back and the restart.
+/// The session itself refuses userdata, so there is nothing of it here.
+async fn walk_boot_images<T: Transport>(
+    session: &mut Session<T>,
+    release: &VerifiedRelease,
+    dir: &Path,
+    watch: &mut dyn Watch,
+) -> Result<bool, Error> {
+    let writing = !session.is_dry_run();
+    let mut seen = session.log().len();
+    let m = release.manifest();
+    let io = |e: io::Error| Error::Transport(format!("reading the release's files: {e}"));
+    let once = m.boot_writes.iter().map(|w| w.size).sum::<u64>();
+    let mut done = 0u64;
+    let mut add = |watch: &mut dyn Watch, bytes: u64, sending: bool| {
+        done += bytes;
+        let (what, at, total) = match (writing, sending) {
+            (false, _) => ("dry-run", done, 2 * once),
+            (true, false) => ("verify", done, once),
+            (true, true) => ("write", done.saturating_sub(once), once),
+        };
+        watch.progress(what, at, total);
+    };
+    add(watch, 0, false);
+    for w in &m.boot_writes {
+        let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
+        release.verify_boot_image(w, &bytes)?;
+        add(watch, bytes.len() as u64, false);
+    }
+    add(watch, 0, true);
+    for w in &m.boot_writes {
+        let bytes = fs::read(dir.join(&w.source)).map_err(io)?;
+        let result = session
+            .flash_boot(&release.verify_boot_image(w, &bytes)?)
+            .await;
+        if writing {
+            show_sent(session, &mut seen, watch);
+        }
+        result?;
+        add(watch, bytes.len() as u64, true);
+    }
+    let result = session.activate_and_reboot().await;
+    if writing {
+        show_sent(session, &mut seen, watch);
     }
     result?;
     Ok(true)
@@ -1447,7 +1508,12 @@ fn run_flow<T: Transport, S: probe::ProbeSeams>(
                 )?;
                 return Ok(Ran::Link(Box::new(link), path, typed));
             }
-            _ => return Ok(Ran::Ended(matches!(screen.state, "done" | "installed"))),
+            _ => {
+                return Ok(Ran::Ended(matches!(
+                    screen.state,
+                    "done" | "installed" | "repaired"
+                )))
+            }
         }
     }
 }
@@ -1652,7 +1718,7 @@ fn cmd_fake(
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] | link [--work-dir DIR] [--backup-dir DIR] | flow DIR --fake-phone STATE [--write] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] | repair DIR --serial S --write | link [--work-dir DIR] [--backup-dir DIR] | flow DIR --fake-phone STATE [--write] [--repair] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
 
 /// What `help` says about [`SLOTS_MATCH`].
 const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written. A reinstall from slot B does not need it (--reinstall).";
@@ -1679,6 +1745,12 @@ fn cmd_help() {
         "                       ",
     );
     println!("\n  install needs --dry-run or --write, one of them: there is no default.");
+    println!("\n  repair DIR --serial S --write");
+    wrap(
+        REPAIR_HELP,
+        "                       ",
+        "                       ",
+    );
     println!("\n  install ... --reinstall");
     wrap(
         REINSTALL_HELP,
@@ -1742,11 +1814,14 @@ fn run() -> Res<bool> {
             }
             return cmd_link(work_dir, backup_dir);
         }
-        [command @ ("install" | "flow"), dir, rest @ ..] => {
+        [command @ ("install" | "flow" | "repair"), dir, rest @ ..] => {
             let (mut serial, mut fake, mut dry_run, mut write) = (None, None, false, false);
             let (mut options, mut fake_google) = (FlowOptions::default(), None);
             let (mut own_file, mut work_dir, mut proxy) = (None, None, None);
             let mut backup_dir = None;
+            // `repair DIR` on a real phone; `flow DIR --repair` on the
+            // pretend one
+            options.repair = *command == "repair";
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 match *arg {
@@ -1754,6 +1829,7 @@ fn run() -> Res<bool> {
                     "--fake-phone" => fake = it.next().copied(),
                     "--dry-run" => dry_run = true,
                     "--write" => write = true,
+                    "--repair" if *command == "flow" => options.repair = true,
                     "--reinstall" => options.reinstall = true,
                     SLOT_OVERRIDE => options.maintainer_skip_bootloader_slot_check = true,
                     // The owner's statement about the other bootloader
@@ -1797,6 +1873,23 @@ fn run() -> Res<bool> {
                     "--dry-run and --write are two different runs: give one of them".into(),
                 );
             }
+            // A Repair writes the running slot's boot images and nothing
+            // else: it is a run that writes, and an install's statements and
+            // files have no place in it
+            if options.repair {
+                if !write {
+                    return Err(Box::new(Error::Refused(
+                        "repair needs --write, and has no dry run of its own: it checks the phone and every boot image, lists what it will write and waits for the phone's codename before anything is written. 'omamobile-install help' says exactly what".into(),
+                    )));
+                }
+                if options.reinstall
+                    || options.bootloader_slots_match.is_some()
+                    || options.maintainer_skip_bootloader_slot_check
+                    || factory.own_file.is_some()
+                {
+                    return Err("a repair takes no --reinstall, no --bootloader-slots-match and no --factory-zip: it switches no slot and writes no firmware".into());
+                }
+            }
             // The one switch that lets the flow write. It is never implied.
             options.write = write;
             return match (*command, serial, fake) {
@@ -1806,10 +1899,10 @@ fn run() -> Res<bool> {
                 ("flow", ..) => {
                     Err("flow runs against a pretend phone only: --fake-phone STATE".into())
                 }
-                (_, _, Some(_)) => Err(
-                    "install is for a real phone; the pretend phone is 'flow DIR --fake-phone STATE'"
-                        .into(),
-                ),
+                (_, _, Some(_)) => Err(format!(
+                    "{command} is for a real phone; the pretend phone is 'flow DIR --fake-phone STATE'"
+                )
+                .into()),
                 _ if fake_google.is_some() => Err(
                     "a stand-in for Google's server is for the pretend phone only: 'flow DIR --fake-phone STATE'"
                         .into(),
