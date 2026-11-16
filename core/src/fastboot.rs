@@ -21,6 +21,15 @@
 //! `fastboot --set-active=b` sends), `reboot`. Nothing else is done about
 //! the slots: no other slot is made active, and no slot is marked.
 //!
+//! A format-2 release (the slot the phone runs from, Omarchy Mobile's
+//! ACTIVE-SLOT-PLAN) is the same sequence on another slot and with one
+//! command fewer: the boot images of the slot `current-slot` names at
+//! `connect` (one the release accepts), read again before the first write
+//! and again after the last, `userdata`, a read-only `getvar:all` whose
+//! slot flags are logged, and `reboot`. No `set_active` of any kind: the
+//! gate of such a session passes none, and its list holds that slot's
+//! names only, so the other slot's are refused there too.
+//!
 //! What it can send: `getvar:`, `download:`, `flash:<p>` where `<p>` is a
 //! [`Partition`] of the verified release (slot B's boot images, `userdata`),
 //! `set_active:b` and `reboot`; and one question outside the session,
@@ -50,7 +59,7 @@ use crate::bundle::{RootImageCheck, VerifiedImage, VerifiedRelease, VerifiedRoot
 use crate::firstboot::RootAnswers;
 use crate::flow::WriteToken;
 use crate::hash::sha256_hex;
-use crate::manifest::{Manifest, Partition};
+use crate::manifest::{Manifest, Partition, Slot};
 use crate::sparse;
 use crate::{Error, Result};
 
@@ -76,10 +85,21 @@ pub const GET_UNLOCK_ABILITY: &str = "flashing get_unlock_ability";
 /// session's: slot B's boot images and `userdata`, by name. It does not rest
 /// on [`Partition`]: a name that got past the manifest's rules is refused
 /// here all the same.
+#[cfg(test)]
 fn on_the_fixed_list(partition: &str) -> bool {
+    on_the_fixed_list_for(partition, Slot::B)
+}
+
+/// The same for the slot a session writes: that slot's boot images and
+/// `userdata`. The other slot's names are never on it.
+fn on_the_fixed_list_for(partition: &str, slot: Slot) -> bool {
+    let suffix = match slot {
+        Slot::A => "_a",
+        Slot::B => "_b",
+    };
     partition == "userdata"
         || partition
-            .strip_suffix("_b")
+            .strip_suffix(suffix)
             .is_some_and(|image| crate::manifest::SLOT_B_IMAGES.contains(&image))
 }
 
@@ -109,9 +129,14 @@ pub(crate) enum Grant {
     /// bootloader slot ([`crate::slot_probe`]), whose client only the flow
     /// can make, for a first install the owner said yes to.
     SlotProbe,
-    /// The session that writes: these partitions (each also on the gate's
-    /// fixed list), `download:`, `set_active:b` and `reboot`.
+    /// The session that writes a format-1 release: these partitions (each
+    /// also on the gate's fixed list), `download:`, `set_active:b` and
+    /// `reboot`.
     Write(Vec<String>),
+    /// The session that writes a format-2 release, on the slot the phone
+    /// runs from: these partitions (each also on the gate's fixed list for
+    /// that slot), `download:` and `reboot`. No `set_active` of any kind.
+    WriteRunning(Slot, Vec<String>),
 }
 
 /// Every command this crate may put on the wire, and nothing more. The
@@ -133,9 +158,23 @@ pub(crate) enum Grant {
 /// `flashable` is always empty: it adds [`SLOT_PROBE_COMMANDS`] and nothing
 /// else. A client with a list of partitions never gets them; one that only
 /// asks gets none of them either.
+#[cfg(test)]
 fn allowed(command: &str, flashable: &[String], slot_probe: bool) -> bool {
+    allowed_on(command, flashable, slot_probe, Slot::B, true)
+}
+
+/// [`allowed`], for a client whose fixed list is `slot`'s, and which may
+/// send `set_active:b` (format 1's writer) or no `set_active` at all
+/// (format 2's, whose `slot` is the one the phone runs from).
+fn allowed_on(
+    command: &str,
+    flashable: &[String],
+    slot_probe: bool,
+    slot: Slot,
+    set_active: bool,
+) -> bool {
     if let Some(partition) = command.strip_prefix("flash:") {
-        return flashable.iter().any(|p| p == partition) && on_the_fixed_list(partition);
+        return flashable.iter().any(|p| p == partition) && on_the_fixed_list_for(partition, slot);
     }
     if command == GET_UNLOCK_ABILITY || command.starts_with("getvar:") {
         return true;
@@ -146,7 +185,9 @@ fn allowed(command: &str, flashable: &[String], slot_probe: bool) -> bool {
     }
     // What stages a write or changes the phone: only where a flash can leave
     !flashable.is_empty()
-        && (command == "set_active:b" || command == "reboot" || is_download(command))
+        && ((set_active && command == "set_active:b")
+            || command == "reboot"
+            || is_download(command))
 }
 
 /// How far a session's writes got, from what the phone confirmed. A
@@ -394,6 +435,11 @@ pub(crate) struct Client<T> {
     flashable: Vec<String>,
     /// The other-slot measurement's client ([`Grant::SlotProbe`]).
     slot_probe: bool,
+    /// The slot whose names the gate's fixed list holds: B, but for a
+    /// format-2 writer ([`Grant::WriteRunning`]).
+    slot: Slot,
+    /// Whether `set_active:b` may leave: format 1's writer only.
+    set_active: bool,
 }
 
 impl<T> Client<T> {
@@ -404,29 +450,44 @@ impl<T> Client<T> {
 
     /// A client with what it may send beyond questions fixed for its life.
     pub(crate) fn granted(transport: T, grant: Grant) -> Self {
-        let (flashable, slot_probe) = match grant {
-            Grant::Ask => (Vec::new(), false),
-            Grant::SlotProbe => (Vec::new(), true),
-            Grant::Write(list) => (list, false),
+        let (flashable, slot_probe, slot, set_active) = match grant {
+            Grant::Ask => (Vec::new(), false, Slot::B, false),
+            Grant::SlotProbe => (Vec::new(), true, Slot::B, false),
+            Grant::Write(list) => (list, false, Slot::B, true),
+            Grant::WriteRunning(slot, list) => (list, false, slot, false),
         };
         Client {
             transport,
             log: Vec::new(),
             flashable,
             slot_probe,
+            slot,
+            set_active,
         }
     }
 
     /// A session's client. One that holds every write back (a dry run)
     /// gets no list, like a client that only asks: the session never forms
     /// a write, and the gate would not pass one.
+    #[cfg(test)]
     fn for_session(transport: T, flashable: Vec<String>, dry_run: bool) -> Self {
+        Self::for_session_on(transport, flashable, dry_run, None)
+    }
+
+    /// As [`Self::for_session`]; `running`: a format-2 session, writing
+    /// the slot the phone runs from.
+    fn for_session_on(
+        transport: T,
+        flashable: Vec<String>,
+        dry_run: bool,
+        running: Option<Slot>,
+    ) -> Self {
         Self::granted(
             transport,
-            if dry_run {
-                Grant::Ask
-            } else {
-                Grant::Write(flashable)
+            match (dry_run, running) {
+                (true, _) => Grant::Ask,
+                (false, None) => Grant::Write(flashable),
+                (false, Some(slot)) => Grant::WriteRunning(slot, flashable),
             },
         )
     }
@@ -471,7 +532,13 @@ impl<T: Transport> Client<T> {
     pub(crate) async fn command(&mut self, command: &str, info: &mut Vec<String>) -> Result<Reply> {
         debug_assert!(command.len() <= 64, "the original protocol's command limit");
         // The one place a command leaves: nothing off the list is sent
-        if !allowed(command, &self.flashable, self.slot_probe) {
+        if !allowed_on(
+            command,
+            &self.flashable,
+            self.slot_probe,
+            self.slot,
+            self.set_active,
+        ) {
             return Err(Error::Refused(format!(
                 "'{command}' is not a command this installer sends"
             )));
@@ -618,13 +685,7 @@ impl Default for PhoneOptions {
 /// key goes: `vendor_kernel_boot`, or `vendor_boot` on a phone without one.
 /// Its place in the release's writes.
 pub fn ramdisk_write(m: &Manifest) -> Option<usize> {
-    ["vendor_kernel_boot_b", "vendor_boot_b"]
-        .iter()
-        .find_map(|name| {
-            m.boot_writes
-                .iter()
-                .position(|w| w.partition.name() == *name)
-        })
+    m.ramdisk_write()
 }
 
 /// What the read-only checks found, for the confirmation screen.
@@ -632,6 +693,9 @@ pub fn ramdisk_write(m: &Manifest) -> Option<usize> {
 pub struct PhoneFacts {
     pub product: String,
     pub current_slot: String,
+    /// The slot whose boot images this session writes: `b` for a format-1
+    /// release, the current slot for a format-2 one.
+    pub target_slot: Slot,
     pub bootloader: String,
     pub baseband: Option<String>,
     pub max_download_size: u64,
@@ -687,6 +751,10 @@ pub struct Session<T: Transport> {
     answers_sent: Vec<bool>,
     /// The owner's key, and the boot write it is appended to.
     owner_key: Option<(String, usize)>,
+    /// A format-2 release: the slot the phone ran from at `connect`, which
+    /// this session writes and reads again before the first write and
+    /// after the last. `None`: format 1 (slot B, then `set_active:b`).
+    running: Option<Slot>,
 }
 
 impl<T: Transport> core::fmt::Debug for Session<T> {
@@ -755,18 +823,18 @@ impl<T: Transport> Session<T> {
             return Err(Error::OverrideOutsideDryRun);
         }
         let m: &Manifest = release.manifest();
-        // The closed list of what this session may flash: the verified
-        // release's writes, which are the descriptor's BOOT_IMAGES with _b,
-        // and userdata. Nothing a person typed or a phone said is on it.
-        let mut flashable: Vec<String> = m
-            .boot_writes
-            .iter()
-            .map(|w| w.partition.name().to_string())
-            .collect();
-        flashable.push(m.root_image.partition.name().to_string());
+        let on_running = m.on_running_slot();
+        // A format-2 install switches no slot: what a session would do with
+        // a measurement of the other slot has no place in it
+        if on_running && options.other_slot_measured.is_some() {
+            return Err(Error::Refused(
+                "a release that installs on the slot the phone runs from measures no other slot"
+                    .into(),
+            ));
+        }
         // The owner's key goes into one image, and only one that carries
         // no AVB footer: a signed image changed by a byte no longer passes
-        let owner_key = match options.owner_ssh_key {
+        let owner_key = match options.owner_ssh_key.clone() {
             None => None,
             Some(key) => {
                 let at = ramdisk_write(m).ok_or_else(|| {
@@ -782,7 +850,9 @@ impl<T: Transport> Session<T> {
                 Some((key, at))
             }
         };
-        let mut client = Client::for_session(transport, flashable, dry_run);
+        // The list of what this session may flash is made once the slot is
+        // known: a session starts as one that only asks
+        let mut client = Client::reading(transport);
         let serial = client.getvar("serialno").await?;
         if PhoneId::of_serial(&serial).as_ref() != Some(expected) {
             return Err(Error::Refused(
@@ -824,42 +894,55 @@ impl<T: Transport> Session<T> {
                 "the phone reports no version-bootloader".into(),
             ));
         }
-        // Setting slot B active runs slot B's bootloader: both must match.
-        let all = client.getvar_all().await?;
-        let per_slot = |slot: char| slot_bootloader(&all, slot);
+        let current = Slot::parse(&current_slot).unwrap_or(Slot::A);
         let mut slot_check_skipped = false;
-        match (per_slot('a'), per_slot('b'), &options.bootloader_slots_confirmed) {
-            (Some(a), Some(b), _) if a == b => {}
-            (Some(a), Some(b), _) => return Err(Error::Phone(format!("the bootloader slots differ (a: {a}, b: {b})"))),
-            (_, _, Some(confirmed)) if *confirmed != bootloader => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
-            // A reinstall on a phone that runs from slot B: the version it
-            // tells is slot B's own, the bootloader an install that stays on
-            // slot B starts with. Slot A's is not needed (the maintainer's
-            // decision of 2026-11-13)
-            _ if current_slot == "b" && options.reinstall => {
-                client.log.push("bootloader: slot b's, which the phone runs (a reinstall); no slot is switched".into());
-            }
-            (_, _, Some(_)) => {}
-            // Measured in this run on this phone, from the slot it runs from
-            _ if options.other_slot_measured.as_ref().is_some_and(|m| {
-                m.phone() == expected && current_slot == m.first().to_string()
-            }) => {
-                let measured = options.other_slot_measured.as_ref().map(|m| m.version().to_string()).unwrap_or_default();
-                if measured != bootloader {
-                    return Err(Error::Phone(format!("the other slot was measured as {measured}, but slot {current_slot} has {bootloader}")));
-                }
-                client.log.push(format!("bootloader: {bootloader} on both slots (the other measured in this run)"));
-            }
-            // Only the unknown case, and only in a dry run (checked above too)
-            _ if options.maintainer_skip_bootloader_slot_check && dry_run => {
-                slot_check_skipped = true;
-                client.log.push("skipped: the bootloader-slot check (maintainer override, dry run only)".into());
-            }
-            _ => return Err(Error::Phone(format!("the phone only reports slot {current_slot}'s bootloader ({bootloader}); the other slot must be checked and confirmed"))),
-        }
-        if current_slot == "b" && !options.reinstall {
-            return Err(Error::Phone("the phone runs from slot b. If stock Android is there, installing would overwrite it; if it is Omarchy Mobile, say so (reinstall)".into()));
-        }
+        let target =
+            if on_running {
+                // Format 2: the slot the phone runs from, if the release
+                // accepts it. The bootloader that answers is the one that will
+                // start what is written, so there is no other copy to compare
+                let Some(target) = m.target_slot(current) else {
+                    return Err(Error::Phone(format!(
+                    "the phone runs from slot {current}, and this release installs only on slot {}",
+                    m.accepted_slots().iter().map(|s| s.name()).collect::<Vec<_>>().join(" or ")
+                )));
+                };
+                client.log.push(format!(
+                    "slot: {target}, the slot the phone runs from; no slot is switched"
+                ));
+                target
+            } else {
+                Self::slot_b_checks(
+                    &mut client,
+                    &options,
+                    expected,
+                    &current_slot,
+                    &bootloader,
+                    dry_run,
+                    &mut slot_check_skipped,
+                )
+                .await?;
+                Slot::B
+            };
+        // The closed list of what this session may flash: the verified
+        // release's writes, which are the descriptor's BOOT_IMAGES with the
+        // target slot's suffix, and userdata. Nothing a person typed or a
+        // phone said is on it but the slot, and only as one of a and b.
+        let mut flashable: Vec<String> = m
+            .boot_writes
+            .iter()
+            .map(|w| w.partition(target).name().to_string())
+            .collect();
+        flashable.push(m.root_image.partition.name().to_string());
+        let mut client = Client {
+            log: core::mem::take(&mut client.log),
+            ..Client::for_session_on(
+                client.transport,
+                flashable,
+                dry_run,
+                on_running.then_some(target),
+            )
+        };
         let max_download_size = parse_size(&client.getvar("max-download-size").await?)
             .ok_or_else(|| Error::Phone("the phone reports no max-download-size".into()))?;
         if max_download_size < sparse::MIN_SEGMENT {
@@ -867,10 +950,11 @@ impl<T: Transport> Session<T> {
                 "max-download-size {max_download_size} is too small"
             )));
         }
-        // Each image must fit its slot B partition, a footer image exactly.
+        // Each image must fit its partition, a footer image exactly.
         let mut boot_partition_sizes = Vec::with_capacity(m.boot_writes.len());
         for w in &m.boot_writes {
-            let name = w.partition.name();
+            let partition = w.partition(target);
+            let name = partition.name();
             let psize = parse_size(&client.getvar(&format!("partition-size:{name}")).await?)
                 .ok_or_else(|| {
                     Error::Phone(format!("the phone reports no partition-size for {name}"))
@@ -903,6 +987,7 @@ impl<T: Transport> Session<T> {
         let facts = PhoneFacts {
             product,
             current_slot,
+            target_slot: target,
             bootloader,
             baseband,
             max_download_size,
@@ -925,7 +1010,61 @@ impl<T: Transport> Session<T> {
             answers: None,
             answers_sent: Vec::new(),
             owner_key,
+            running: on_running.then_some(target),
         })
+    }
+
+    /// Format 1's checks of the slots: setting slot B active runs slot B's
+    /// bootloader, so both copies must match (or the owner's statement, a
+    /// reinstall from slot B, or this run's measurement says they do), and
+    /// a phone that runs from slot B is written only as a reinstall.
+    async fn slot_b_checks(
+        client: &mut Client<T>,
+        options: &PhoneOptions,
+        expected: &PhoneId,
+        current_slot: &str,
+        bootloader: &str,
+        dry_run: bool,
+        slot_check_skipped: &mut bool,
+    ) -> Result<()> {
+        let current_slot = current_slot.to_string();
+        let bootloader = bootloader.to_string();
+        // Setting slot B active runs slot B's bootloader: both must match.
+        let all = client.getvar_all().await?;
+        let per_slot = |slot: char| slot_bootloader(&all, slot);
+        match (per_slot('a'), per_slot('b'), &options.bootloader_slots_confirmed) {
+            (Some(a), Some(b), _) if a == b => {}
+            (Some(a), Some(b), _) => return Err(Error::Phone(format!("the bootloader slots differ (a: {a}, b: {b})"))),
+            (_, _, Some(confirmed)) if *confirmed != bootloader => return Err(Error::Phone(format!("the other slot was confirmed as {confirmed}, but slot {current_slot} has {bootloader}"))),
+            // A reinstall on a phone that runs from slot B: the version it
+            // tells is slot B's own, the bootloader an install that stays on
+            // slot B starts with. Slot A's is not needed (the maintainer's
+            // decision of 2026-11-13)
+            _ if current_slot == "b" && options.reinstall => {
+                client.log.push("bootloader: slot b's, which the phone runs (a reinstall); no slot is switched".into());
+            }
+            (_, _, Some(_)) => {}
+            // Measured in this run on this phone, from the slot it runs from
+            _ if options.other_slot_measured.as_ref().is_some_and(|m| {
+                m.phone() == expected && current_slot == m.first().to_string()
+            }) => {
+                let measured = options.other_slot_measured.as_ref().map(|m| m.version().to_string()).unwrap_or_default();
+                if measured != bootloader {
+                    return Err(Error::Phone(format!("the other slot was measured as {measured}, but slot {current_slot} has {bootloader}")));
+                }
+                client.log.push(format!("bootloader: {bootloader} on both slots (the other measured in this run)"));
+            }
+            // Only the unknown case, and only in a dry run (checked above too)
+            _ if options.maintainer_skip_bootloader_slot_check && dry_run => {
+                *slot_check_skipped = true;
+                client.log.push("skipped: the bootloader-slot check (maintainer override, dry run only)".into());
+            }
+            _ => return Err(Error::Phone(format!("the phone only reports slot {current_slot}'s bootloader ({bootloader}); the other slot must be checked and confirmed"))),
+        }
+        if current_slot == "b" && !options.reinstall {
+            return Err(Error::Phone("the phone runs from slot b. If stock Android is there, installing would overwrite it; if it is Omarchy Mobile, say so (reinstall)".into()));
+        }
+        Ok(())
     }
 
     /// The owner's answers for this release's root image, before `userdata`
@@ -942,6 +1081,13 @@ impl<T: Transport> Session<T> {
         if answers.release != self.release.id() {
             return Err(Error::Refused(
                 "the answers were made for another release".into(),
+            ));
+        }
+        // A release on the running slot: the answers name the slot this
+        // session writes, for the phone's kernel updates (`SLOT=`)
+        if answers.slot() != self.running {
+            return Err(Error::Refused(
+                "the answers name another slot than the one this session writes".into(),
             ));
         }
         self.answers_sent = vec![false; answers.regions.len()];
@@ -1092,13 +1238,14 @@ impl<T: Transport> Session<T> {
     /// The plan in words, for the confirmation screen.
     pub fn plan(&self) -> Vec<String> {
         let m = self.release.manifest();
+        let target = self.facts.target_slot;
         let mut out: Vec<String> = m
             .boot_writes
             .iter()
             .map(|w| {
                 format!(
                     "flash {} {} ({} bytes)",
-                    w.partition.name(),
+                    w.partition(target).name(),
                     w.source,
                     w.size
                 )
@@ -1109,9 +1256,35 @@ impl<T: Transport> Session<T> {
             m.root_image.partition.name(),
             m.root_image.name
         ));
-        out.push("set_active b".into());
+        if self.running.is_none() {
+            out.push("set_active b".into());
+        }
         out.push("reboot".into());
         out
+    }
+
+    /// The slot this session writes, for a format-2 release: the one the
+    /// phone ran from at `connect`. `None` for format 1 (slot B).
+    pub fn running_slot(&self) -> Option<Slot> {
+        self.running
+    }
+
+    /// Format 2's gate before the first write: the phone still runs from
+    /// the slot this session was opened on. A phone whose `current-slot`
+    /// changed since (a restart into the other slot, a `set_active` by
+    /// hand) gets nothing written.
+    async fn still_on_the_slot(&mut self) -> Result<()> {
+        let Some(slot) = self.running else {
+            return Ok(());
+        };
+        let now = self.client.getvar("current-slot").await?;
+        let now = now.trim_start_matches('_');
+        if now != slot.name() {
+            return Err(Error::Refused(format!(
+                "the phone's current slot changed from {slot} to '{now}' since the installer looked: nothing is written"
+            )));
+        }
+        Ok(())
     }
     pub fn into_transport(self) -> T {
         self.client.transport
@@ -1238,7 +1411,14 @@ impl<T: Transport> Session<T> {
                 "boot images are written in the manifest's order".into(),
             ));
         }
-        let partition = self.release.manifest().boot_writes[next].partition.clone();
+        // Format 2: the last gate before the first write reads the slot
+        // again, the dry run's as the write's
+        if next == 0 {
+            if let Err(e) = self.still_on_the_slot().await {
+                return self.fail(e);
+            }
+        }
+        let partition = self.release.manifest().boot_writes[next].partition(self.facts.target_slot);
         // The image that carries the initramfs, with the owner's key: made
         // here from the verified bytes, checked against its partition and
         // the download limit before anything of it is sent
@@ -1421,6 +1601,9 @@ impl<T: Transport> Session<T> {
     }
 
     /// Make slot B active and restart, only after every write succeeded.
+    /// For a format-2 release: read the phone back (its current slot must
+    /// still be the one written; the slot flags are logged), and restart,
+    /// with no slot made active.
     pub async fn activate_and_reboot(&mut self) -> Result<()> {
         if self.state != State::UserdataDone {
             return Err(Error::Refused(
@@ -1429,6 +1612,9 @@ impl<T: Transport> Session<T> {
         }
         if let Err(e) = self.still_pinned().await {
             return self.fail(e);
+        }
+        if self.running.is_some() {
+            return self.read_back_and_reboot().await;
         }
         if self.is_dry_run() {
             self.client.log.push("would: set_active:b".into());
@@ -1448,6 +1634,52 @@ impl<T: Transport> Session<T> {
             return self.fail(e);
         }
         self.reach = WriteReach::SlotSet;
+        match self.client.simple("reboot").await {
+            Ok(_) => {
+                self.state = State::Rebooted;
+                self.reach = WriteReach::Rebooted;
+                Ok(())
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// Format 2's end: the read-back, then `reboot`. The read-back only
+    /// asks: the current slot must still be the one written (otherwise the
+    /// phone would start the other slot, and it is not restarted), and the
+    /// slot flags after the writes go to the log, so that the record of a
+    /// run says whether a flash cleared the slot's successful mark.
+    async fn read_back_and_reboot(&mut self) -> Result<()> {
+        if let Err(e) = self.still_on_the_slot().await {
+            return self.fail(e);
+        }
+        let all = match self.client.getvar_all().await {
+            Ok(all) => all,
+            Err(e) => return self.fail(e),
+        };
+        let flags: Vec<String> = all
+            .iter()
+            .filter(|l| l.starts_with("slot-") && !l.starts_with("slot-count"))
+            .cloned()
+            .collect();
+        self.client.log.push(format!(
+            "after the writes: {}",
+            if flags.is_empty() {
+                "the phone reports no slot flags".to_string()
+            } else {
+                flags.join(", ")
+            }
+        ));
+        if self.is_dry_run() {
+            self.client.log.push("would: reboot".into());
+            self.state = State::Rebooted;
+            return Ok(());
+        }
+        if let Err(e) = self.may_write() {
+            return self.fail(e);
+        }
+        // Every image is written and confirmed: Written stays until the
+        // phone confirms the restart (it starts the slot it runs from)
         match self.client.simple("reboot").await {
             Ok(_) => {
                 self.state = State::Rebooted;
@@ -1787,6 +2019,81 @@ mod tests {
         // set_active:b is the writer's last command, as before, and nothing else
         assert!(allowed("set_active:b", &list, false));
         assert!(!allowed("set_active:b", &[], false));
+    }
+
+    /// A format-2 writer's list for the Pixel 7 Pro's descriptor, on `slot`.
+    fn ours_on(slot: Slot) -> Vec<String> {
+        OURS.iter()
+            .map(|p| match p.strip_suffix("_b") {
+                Some(image) => format!("{image}_{slot}"),
+                None => p.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_running_slots_writer_flashes_that_slot_only_and_sends_no_set_active() {
+        for slot in [Slot::A, Slot::B] {
+            let list = ours_on(slot);
+            let other = ours_on(slot.other());
+            let client =
+                || Client::granted(Recorder::default(), Grant::WriteRunning(slot, list.clone()));
+            // Its slot's names, userdata, a download and the restart
+            for command in list
+                .iter()
+                .map(|p| format!("flash:{p}"))
+                .chain(["download:00000010".to_string(), "reboot".to_string()])
+            {
+                let mut c = client();
+                assert!(block_on(c.simple(&command)).is_ok(), "{slot}: {command}");
+                assert_eq!(c.transport.sent, [command]);
+            }
+            // Never the other slot's names, not even on its own list, and
+            // never a set_active or a restart into the bootloader
+            for command in other
+                .iter()
+                .filter(|p| *p != "userdata")
+                .map(|p| format!("flash:{p}"))
+                .chain(
+                    [
+                        "set_active:a",
+                        "set_active:b",
+                        "set_active:",
+                        "reboot-bootloader",
+                    ]
+                    .map(String::from),
+                )
+            {
+                let mut c = client();
+                assert!(block_on(c.simple(&command)).is_err(), "{slot}: {command}");
+                assert!(c.transport.sent.is_empty(), "{slot}: {command} was sent");
+            }
+            let mut both = list.clone();
+            both.extend(other.iter().cloned());
+            let mut c = Client::granted(Recorder::default(), Grant::WriteRunning(slot, both));
+            for p in other.iter().filter(|p| *p != "userdata") {
+                assert!(
+                    block_on(c.simple(&format!("flash:{p}"))).is_err(),
+                    "{slot}: {p}"
+                );
+            }
+            assert!(c.transport.sent.is_empty());
+            // The fixed list for a slot is that slot's images and userdata
+            for p in &list {
+                assert!(on_the_fixed_list_for(p, slot), "{p}");
+            }
+            for p in other.iter().filter(|p| *p != "userdata") {
+                assert!(!on_the_fixed_list_for(p, slot), "{p}");
+            }
+            // A dry run on the running slot has no list, as every dry run
+            let dry = Client::for_session_on(Recorder::default(), list.clone(), true, Some(slot));
+            assert!(dry.flashable.is_empty() && !dry.set_active);
+        }
+        // Format 1's writer still sends set_active:b, and only that one
+        let mut c = Client::granted(Recorder::default(), Grant::Write(ours_on(Slot::B)));
+        assert!(block_on(c.simple("set_active:b")).is_ok());
+        assert!(block_on(c.simple("set_active:a")).is_err());
+        assert!(block_on(c.simple("flash:boot_a")).is_err());
     }
 
     #[test]

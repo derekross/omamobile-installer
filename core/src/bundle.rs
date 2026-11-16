@@ -281,12 +281,15 @@ impl VerifiedRelease {
             .iter()
             .position(|w| w == write)
             .ok_or_else(|| {
-                Error::Refused(format!(
-                    "{} is not a write of this release",
-                    write.partition.name()
-                ))
+                Error::Refused(format!("{} is not a write of this release", write.source))
             })?;
         self.check_file(&write.source, bytes)?;
+        // A format-2 release writes the slot the phone runs from, so its
+        // initramfs must open that slot to the storage guard: refused here,
+        // where every front end checks each image before the first write
+        if self.manifest.on_running_slot() && self.manifest.ramdisk_write() == Some(index) {
+            crate::ramdisk_key::check_guard_marker(bytes)?;
+        }
         Ok(VerifiedImage {
             release: self.id.clone(),
             index,

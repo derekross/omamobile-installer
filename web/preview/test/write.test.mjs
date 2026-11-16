@@ -427,7 +427,9 @@ test("no command outside the gate can be sent: the module has no way to name one
     "zip_update",
   ]);
   const makers = Object.getOwnPropertyNames(core.InstallFlow).filter((n) => !["length", "name", "prototype", "__wrap"].includes(n));
-  assert.deepEqual(makers.sort(), ["begin", "begin_write_preview", "selftest", "selftest_write_preview"]);
+  // (selftest_write_preview_running: the self-test build only, on the
+  // test release that installs on the running slot)
+  assert.deepEqual(makers.sort(), ["begin", "begin_write_preview", "selftest", "selftest_write_preview", "selftest_write_preview_running"]);
   // Nothing states the other bootloader slot, and nothing sets the override
   // in a flow that writes. The other-slot measurement's steps (slot_probe_*)
   // take one of the screen's answers, a phone, or what the page saw of a

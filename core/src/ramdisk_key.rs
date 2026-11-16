@@ -213,6 +213,161 @@ pub fn size_with_owner_key(img: &[u8], key: &str) -> Result<u64> {
     Ok(with_owner_key(img, key)?.len() as u64)
 }
 
+/// How much a vendor ramdisk may unpack to before it is refused: far more
+/// than an initramfs of Omarchy Mobile's (tens of megabytes), and a bound
+/// on what a crafted image can make this computer hold.
+const MAX_UNPACKED: usize = 256 << 20;
+/// A legacy LZ4 block's largest unpacked size, as the format defines it.
+const LZ4_LEGACY_BLOCK: usize = 8 << 20;
+
+fn not_lz4() -> Error {
+    bad("its ramdisk is not a well-formed LZ4 stream in the legacy format")
+}
+
+/// One LZ4 length: `base`, and while it is 15, more bytes added to it.
+fn lz4_length(block: &[u8], i: &mut usize, base: usize) -> Result<usize> {
+    let mut n = base;
+    if base == 15 {
+        loop {
+            let b = *block.get(*i).ok_or_else(not_lz4)?;
+            *i += 1;
+            n = n.checked_add(b as usize).ok_or_else(not_lz4)?;
+            if b != 255 {
+                break;
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// Every legacy LZ4 stream of `data`, decoded one after another as the
+/// kernel's `unlz4` reads them: a chunk size, or the magic number of the
+/// next stream. Each block is decoded on its own (the legacy format's
+/// blocks are independent). Every length is checked: malformed input is an
+/// error, never a panic.
+fn unlz4_legacy(mut data: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    while data.len() >= 4 {
+        let word = u32_at(data, 0);
+        data = &data[4..];
+        if word == LZ4_LEGACY_MAGIC {
+            continue;
+        }
+        if word == 0 {
+            break;
+        }
+        let size = word as usize;
+        if size > data.len() {
+            return Err(not_lz4());
+        }
+        let (block, rest) = data.split_at(size);
+        data = rest;
+        let mut dec: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < block.len() {
+            let token = block[i];
+            i += 1;
+            let lits = lz4_length(block, &mut i, (token >> 4) as usize)?;
+            let end = i.checked_add(lits).ok_or_else(not_lz4)?;
+            dec.extend_from_slice(block.get(i..end).ok_or_else(not_lz4)?);
+            i = end;
+            if dec.len() > LZ4_LEGACY_BLOCK {
+                return Err(not_lz4());
+            }
+            if i >= block.len() {
+                break;
+            }
+            let offset = u16::from_le_bytes([
+                *block.get(i).ok_or_else(not_lz4)?,
+                *block.get(i + 1).ok_or_else(not_lz4)?,
+            ]) as usize;
+            i += 2;
+            let len = lz4_length(block, &mut i, (token & 15) as usize)? + 4;
+            if offset == 0 || offset > dec.len() || dec.len() + len > LZ4_LEGACY_BLOCK {
+                return Err(not_lz4());
+            }
+            for _ in 0..len {
+                dec.push(dec[dec.len() - offset]);
+            }
+        }
+        if out.len() + dec.len() > MAX_UNPACKED {
+            return Err(not_lz4());
+        }
+        out.extend_from_slice(&dec);
+    }
+    Ok(out)
+}
+
+/// The data of the last regular file called `name` (with or without a
+/// leading `./`) in one or more newc archives, one after another, as the
+/// kernel's initramfs unpacker takes them: a later file over an earlier one.
+fn cpio_file(mut data: &[u8], name: &str) -> Result<Option<Vec<u8>>> {
+    let not_cpio = || bad("its ramdisk is not a well-formed newc cpio archive");
+    let field = |h: &[u8], n: usize| -> Result<usize> {
+        let text = core::str::from_utf8(&h[6 + 8 * n..14 + 8 * n]).map_err(|_| not_cpio())?;
+        usize::from_str_radix(text, 16).map_err(|_| not_cpio())
+    };
+    let mut found = None;
+    loop {
+        // Padding between archives
+        while data.first() == Some(&0) {
+            data = &data[1..];
+        }
+        if data.is_empty() {
+            return Ok(found);
+        }
+        if data.len() < 110 || !(data.starts_with(b"070701") || data.starts_with(b"070702")) {
+            return Err(not_cpio());
+        }
+        let (mode, size, namesize) = (field(data, 1)?, field(data, 6)?, field(data, 11)?);
+        if namesize == 0 {
+            return Err(not_cpio());
+        }
+        let raw_name = data.get(110..110 + namesize - 1).ok_or_else(not_cpio)?;
+        let at = (110 + namesize).div_ceil(4) * 4;
+        let body = data.get(at..at + size).ok_or_else(not_cpio)?;
+        let next = ((at + size).div_ceil(4) * 4).min(data.len());
+        if raw_name != b"TRAILER!!!" {
+            let entry = core::str::from_utf8(raw_name).unwrap_or("");
+            let entry = entry.strip_prefix("./").unwrap_or(entry);
+            if entry == name && mode & 0o170000 == 0o100000 {
+                found = Some(body.to_vec());
+            }
+        }
+        data = &data[next..];
+    }
+}
+
+/// The storage guard's marker in this vendor boot image's initramfs
+/// ([`crate::manifest::GUARD_MARKER`]), if it is there: what the file holds.
+/// The image must be laid out as [`with_owner_key`] takes it.
+pub fn guard_marker(img: &[u8]) -> Result<Option<Vec<u8>>> {
+    let l = layout(img)?;
+    let ramdisk = unlz4_legacy(&img[l.ramdisk_at..l.ramdisk_at + l.ramdisk_size])?;
+    let name = crate::manifest::GUARD_MARKER.trim_start_matches('/');
+    cpio_file(&ramdisk, name)
+}
+
+/// A format-2 release's initramfs must map the storage guard to the slot
+/// the phone runs from: the marker is there and says `running`. Otherwise
+/// the release is refused before anything is written, as Omarchy Mobile's
+/// `make-bundle` and `install-phone` refuse it: an initramfs from before
+/// the guard learnt the running slot would leave slot A's partitions
+/// read-only and slot B's writable on a phone that runs from slot A.
+pub fn check_guard_marker(img: &[u8]) -> Result<()> {
+    let marker = crate::manifest::GUARD_MARKER;
+    let want = crate::manifest::GUARD_MARKER_VALUE;
+    match guard_marker(img)? {
+        Some(text) if text.strip_suffix(b"\n").unwrap_or(&text) == want.as_bytes() => Ok(()),
+        Some(_) => Err(Error::Refused(format!(
+            "the release's initramfs has {marker}, but it does not say {want}: its storage guard may not open the slot the phone runs from, so nothing is written"
+        ))),
+        None => Err(Error::Refused(format!(
+            "the release's initramfs has no {marker}: its storage guard does not open the slot the phone runs from, so this release can't be installed on that slot, and nothing is written"
+        ))),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -418,5 +573,45 @@ pub(crate) mod tests {
         ] {
             assert!(with_owner_key(&bad, KEY).is_err(), "{why}");
         }
+    }
+    #[test]
+    fn the_guard_marker_is_read_from_the_initramfs_and_a_later_archive_wins() {
+        let marker = |text: &[u8]| {
+            let mut a = Vec::new();
+            newc(&mut a, 1, 0o100755, 1, "./init", b"#!/bin/sh\n");
+            newc(&mut a, 2, 0o100644, 1, "./etc/omamobile-ufs-rw-slot", text);
+            newc(&mut a, 0, 0, 1, "TRAILER!!!", &[]);
+            a
+        };
+        let with = vendor_boot_v4(&marker(b"running\n"), 4096, 3 * 4096);
+        assert_eq!(
+            guard_marker(&with).unwrap().as_deref(),
+            Some(&b"running\n"[..])
+        );
+        check_guard_marker(&with).unwrap();
+        // The owner's key appended after it leaves it as it was
+        check_guard_marker(&with_owner_key(&with, KEY).unwrap()).unwrap();
+        let without = vendor_boot_v4(&shipped(), 4096, 3 * 4096);
+        assert_eq!(guard_marker(&without).unwrap(), None);
+        assert!(check_guard_marker(&without).is_err());
+        let other = vendor_boot_v4(&marker(b"b\n"), 4096, 3 * 4096);
+        assert!(check_guard_marker(&other).is_err());
+    }
+
+    #[test]
+    fn lz4_with_matches_is_decoded_and_a_bad_offset_is_refused() {
+        // "abcabcabcabc" as literals "abc" and a match of 9 at offset 3
+        let block = [0x35, b'a', b'b', b'c', 3, 0];
+        let mut data = LZ4_LEGACY_MAGIC.to_le_bytes().to_vec();
+        data.extend_from_slice(&(block.len() as u32).to_le_bytes());
+        data.extend_from_slice(&block);
+        assert_eq!(unlz4_legacy(&data).unwrap(), b"abcabcabcabc");
+        let mut bad = data.clone();
+        let at = bad.len() - 2;
+        bad[at] = 9;
+        assert!(unlz4_legacy(&bad).is_err());
+        let mut short = data.clone();
+        short.truncate(short.len() - 1);
+        assert!(unlz4_legacy(&short).is_err());
     }
 }

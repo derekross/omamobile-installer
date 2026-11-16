@@ -2,7 +2,7 @@
 //! manifest.json and device.conf rules, on the published cheetah manifest
 //! and on changed copies of it.
 use omamobile_installer_core::device_conf::DeviceConf;
-use omamobile_installer_core::manifest::Manifest;
+use omamobile_installer_core::manifest::{Manifest, Slot};
 use omamobile_installer_core::Error;
 use serde_json::{json, Value};
 
@@ -29,7 +29,11 @@ fn the_published_manifest_is_accepted() {
     let m = Manifest::parse(PUBLISHED).unwrap();
     assert_eq!(m.codename, "cheetah");
     assert_eq!(m.version, "2026.11.08");
-    let parts: Vec<&str> = m.boot_writes.iter().map(|w| w.partition.name()).collect();
+    let parts: Vec<String> = m
+        .boot_writes
+        .iter()
+        .map(|w| w.partition(Slot::B).name().to_string())
+        .collect();
     assert_eq!(
         parts,
         [

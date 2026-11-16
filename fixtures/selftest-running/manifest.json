@@ -1,0 +1,162 @@
+{
+  "device": {
+    "codename": "cheetah",
+    "name": "Pixel 7 Pro"
+  },
+  "files": [
+    {
+      "path": "MANIFEST",
+      "sha256": "844ed153759a76cee014f1013660b7febdacf9e17806d49a1b410c0ab773a09d",
+      "size": 194
+    },
+    {
+      "path": "device.conf",
+      "sha256": "297037f8b6013590bd326289ce24e74b1e1703d62011f45db2267fa6ef6d1629",
+      "size": 434
+    },
+    {
+      "path": "images/boot.img",
+      "sha256": "de7f913bd32e101b8c79cedcb009427d58dd3801c31a4cc324bbf15c20bd0191",
+      "size": 16384
+    },
+    {
+      "path": "images/init_boot.img",
+      "sha256": "25daeef7cbe87de76f45f7d160723ca73407c1375473bbffb78fc8b438cc4881",
+      "size": 8192
+    },
+    {
+      "path": "images/vendor_boot.img",
+      "sha256": "2fa14f4e4819e5eeefa2f614ba5cfb5a2d84414177a3dfa175fa732d79ad60e2",
+      "size": 4096
+    },
+    {
+      "path": "images/vendor_kernel_boot.img",
+      "sha256": "d16e436cad653221b33cc7d3d3a993943f36dc603d5b6ba920847b63ce1f1220",
+      "size": 12288
+    },
+    {
+      "path": "images/dtbo.img",
+      "sha256": "06f3da0c0747db3d737fe6f2ed329ccc0c4da090e4619948cb022e1cca00bf15",
+      "size": 4096
+    },
+    {
+      "path": "omamobile.gpg",
+      "sha256": "b11347527077b6c9fcd93263e6372415165366b7d765bc6ed28293d461c9ff84",
+      "size": 215
+    },
+    {
+      "path": "factory-builds.json",
+      "sha256": "8345cb4c3a4d0abf16f489ee53078ab483a7acbd3b6b9270dd3177f782682875",
+      "size": 2545
+    }
+  ],
+  "format": 2,
+  "install": {
+    "accept_current_slots": [
+      "a"
+    ],
+    "after": [
+      "reboot"
+    ],
+    "never": [
+      "the slot the phone does not run from (any *_<other> partition)",
+      "an unsuffixed partition name but userdata",
+      "bootloader",
+      "radio",
+      "persist",
+      "efs",
+      "modem",
+      "devinfo",
+      "vbmeta",
+      "fastboot -w",
+      "fastboot --slot",
+      "fastboot --set-active",
+      "fastboot flashing",
+      "fastboot erase",
+      "fastboot format",
+      "fastboot oem"
+    ],
+    "product": "cheetah",
+    "require_unlocked_bootloader": true,
+    "slot": "active",
+    "storage_guard": {
+      "also": [
+        "userdata"
+      ],
+      "images": [
+        "boot",
+        "init_boot",
+        "vendor_boot",
+        "vendor_kernel_boot",
+        "dtbo"
+      ],
+      "marker": "/etc/omamobile-ufs-rw-slot",
+      "slot": "running"
+    },
+    "tool": "fastboot",
+    "writes": [
+      {
+        "image": "boot",
+        "partition_size": 16384,
+        "size": 16384,
+        "source": "images/boot.img"
+      },
+      {
+        "image": "init_boot",
+        "partition_size": 8192,
+        "size": 8192,
+        "source": "images/init_boot.img"
+      },
+      {
+        "image": "vendor_boot",
+        "partition_size": null,
+        "size": 4096,
+        "source": "images/vendor_boot.img"
+      },
+      {
+        "image": "vendor_kernel_boot",
+        "partition_size": null,
+        "size": 12288,
+        "source": "images/vendor_kernel_boot.img"
+      },
+      {
+        "image": "dtbo",
+        "partition_size": null,
+        "size": 4096,
+        "source": "images/dtbo.img"
+      },
+      {
+        "erases_userdata": true,
+        "partition": "userdata",
+        "source": "root_image"
+      }
+    ]
+  },
+  "kernel": {
+    "commit": "000000000000",
+    "release": "7.3.0-test"
+  },
+  "label": "test",
+  "name": "Omarchy Mobile",
+  "root_image": {
+    "compression": "zstd",
+    "name": "omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst",
+    "placeholders": [
+      {
+        "length": 4096,
+        "offset": 1228800,
+        "path": "/etc/omamobile/boot-update.conf",
+        "sha256": "737979ebb165080516b1392e2f72a246838e3811d5efc1fa70ed43c598e9b978"
+      },
+      {
+        "length": 4096,
+        "offset": 1236992,
+        "path": "/etc/omamobile/firstboot.conf",
+        "sha256": "ff50b348fd624be4aa4217370b18b9bf94b608046a424cf55d4030020484d2ff"
+      }
+    ],
+    "sha256": "00d676de0e13e6b785ca6f4ba8f1a53fd3cc469da334390ed14a1ea6a5f1c14a",
+    "size": 1597234
+  },
+  "version": "2026.01.02"
+}

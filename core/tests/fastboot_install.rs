@@ -798,6 +798,37 @@ fn write_the_probe_fixture() {
     write_fixture(&root, "selftest-probe", &bundle);
 }
 
+/// Writes fixtures/selftest-running/: the test release that installs on the
+/// slot the phone runs from (manifest format 2, `INSTALL_SLOT=active`,
+/// `INSTALL_ACTIVE_SLOTS="a"`, the storage guard's marker in its
+/// initramfs), for the front ends' tests of a first install from stock
+/// Android on slot A. Its own key, so that the other fixtures stay as they
+/// are. Run by hand:
+/// `cargo test -p omamobile-installer-core --test fastboot_install write_the_running_slot_fixture -- --ignored`
+#[test]
+#[ignore = "regenerates fixtures/selftest-running and fixtures/after-running"]
+fn write_the_running_slot_fixture() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+    write_fixture(&root, "selftest-running", &TestBundle::running(&["a"]));
+    // And fixtures/after-running: the same, with the stand-ins for the
+    // release's tools, for the steps after the write
+    let stand_ins = root.join("after-stand-ins/tools");
+    let mut tools: Vec<(String, Vec<u8>)> = std::fs::read_dir(&stand_ins)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .map(|p| {
+            let name = p.file_name().unwrap().to_str().unwrap().to_string();
+            (format!("tools/{name}"), std::fs::read(&p).unwrap())
+        })
+        .collect();
+    tools.sort();
+    write_fixture(
+        &root,
+        "after-running",
+        &TestBundle::running_with_files(&["a"], tools),
+    );
+}
+
 fn write_fixture(root: &std::path::Path, name: &str, bundle: &TestBundle) {
     bundle.verify().unwrap();
     let dir = root.join(name);

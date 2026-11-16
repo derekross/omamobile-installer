@@ -1,0 +1,16 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Stand-in for tools/phone-provision: checks the arguments a first install
+# gets, and says what it would have put on the phone.
+set -u
+P=${OMAINSTALL_PRETEND_PHONE:?the stand-ins run only in a test}
+echo "phone-provision $*" >> "$P/log"
+[[ ${1:-} == -d ]] && shift 2
+[[ ${1:-} == --first-install && ${2:-} == --nv-backup ]] || { echo "error: not a first install" >&2; exit 2; }
+[[ -f ${3:?}/SHA256SUMS ]] || { echo "error: no backup in $3" >&2; exit 2; }
+[[ -f ${4:?} ]] || { echo "error: no $4" >&2; exit 2; }
+if [[ -f $P/fail_provision ]]; then cat "$P/fail_provision" >&2; exit 1; fi
+sleep 1
+echo "==> Extracting the firmware from $(basename "$4")"
+echo "==> Pushing it to the phone"
+echo "==> Done"

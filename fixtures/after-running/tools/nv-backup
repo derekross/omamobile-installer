@@ -1,0 +1,14 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Stand-in for tools/nv-backup: a folder of made-up copies, and the record.
+set -u
+P=${OMAINSTALL_PRETEND_PHONE:?the stand-ins run only in a test}
+echo "nv-backup $*" >> "$P/log"
+[[ ${1:-} == -d ]] && shift 2
+dir=${1:?}
+if [[ -f $P/fail_backup ]]; then cat "$P/fail_backup" >&2; exit 1; fi
+[[ ! -e $dir ]] || [[ -z $(ls -A "$dir") ]] || { echo "error: $dir is not empty" >&2; exit 1; }
+mkdir -p "$dir" && chmod 700 "$dir"
+echo "pretend efs" > "$dir/efs.img"
+(cd "$dir" && sha256sum efs.img > SHA256SUMS && echo "codename: cheetah" > NV-BACKUP)
+echo "==> backup written to $dir"

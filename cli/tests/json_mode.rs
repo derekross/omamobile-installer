@@ -147,6 +147,9 @@ struct Tool {
     owed: usize,
     /// The tool was started with `--write`.
     writes: bool,
+    /// The release is the one on the running slot (format 2), whose phone
+    /// here runs from slot a: slot a's names, and no set_active at all.
+    running: bool,
     stderr: Arc<Mutex<String>>,
 }
 
@@ -206,6 +209,7 @@ impl Tool {
             stray: Vec::new(),
             owed: 0,
             writes: args.contains(&"--write"),
+            running: args.iter().any(|a| a.ends_with("selftest-running")),
             stderr,
         }
     }
@@ -385,8 +389,26 @@ impl Tool {
             }
         }
         let writes = self.writes;
+        if self.running {
+            for command in ended.commands() {
+                let allowed = command.starts_with("getvar:")
+                    || command == "flashing get_unlock_ability"
+                    || command.starts_with("download:")
+                    || command == "reboot"
+                    || [
+                        "flash:boot_a",
+                        "flash:init_boot_a",
+                        "flash:vendor_boot_a",
+                        "flash:vendor_kernel_boot_a",
+                        "flash:dtbo_a",
+                        "flash:userdata",
+                    ]
+                    .contains(&command);
+                assert!(allowed, "the pretend phone received {command}");
+            }
+        }
         // Whatever the run was: only what the write path may send
-        for command in ended.commands() {
+        for command in ended.commands().into_iter().filter(|_| !self.running) {
             let allowed = command.starts_with("getvar:")
                 || command == "flashing get_unlock_ability"
                 || command.starts_with("download:")
@@ -2188,4 +2210,103 @@ fn a_run_that_does_not_write_is_never_offered_the_measurement() {
             || refused.error().contains("has ended")
     );
     tool.quit();
+}
+
+// ---- A release on the running slot (manifest format 2) ---------------------------
+
+fn running_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/selftest-running")
+}
+
+/// A run on the format-2 test release, through the handshake to `start`.
+fn running_run(state: &str, write: bool) -> (Tool, Reply) {
+    let dir = running_fixture();
+    let mut args = vec!["--release", dir.to_str().unwrap(), "--fake-phone", state];
+    if write {
+        args.push("--write");
+    }
+    let mut tool = Tool::with_args(&args);
+    assert_eq!(tool.hear()["protocol"], 6);
+    tool.say(json!({"type": "hello", "protocol": 6, "app": "the tests", "version": "0"}));
+    let first = tool.act(json!({"type": "start", "reinstall": false}));
+    (tool, first)
+}
+
+#[test]
+fn a_release_on_the_running_slot_installs_slot_a_with_no_slot_question_and_no_set_active() {
+    let (mut tool, first) = running_run("running-a", true);
+    assert_eq!(first.state(), "warning");
+    let warning = first.screen["steps"].to_string();
+    assert!(
+        warning.contains("Android on this phone is replaced"),
+        "{warning}"
+    );
+    assert!(warning.contains("Google's factory image"), "{warning}");
+    tool.go_to_take_file();
+    assert_eq!(
+        tool.act(json!({"type": "take-file", "path": zip_file()}))
+            .state(),
+        "answers"
+    );
+    assert_eq!(tool.act(answers("alex")).state(), "dry-run");
+    let confirm = tool.act(json!({"type": "dry-run"}));
+    assert_eq!(confirm.state(), "confirm", "{:?}", confirm.screen);
+    let plan: Vec<&str> = confirm.screen["plan"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert!(plan[0].starts_with("boot_a: "), "{plan:?}");
+    assert!(!plan.iter().any(|l| l.contains("set_active")), "{plan:?}");
+    let footer = confirm.screen["footer"].to_string();
+    assert!(footer.contains("No slot is made active"), "{footer}");
+    assert_eq!(
+        tool.act(json!({"type": "confirm", "typed": "cheetah"}))
+            .state(),
+        "write"
+    );
+    let installed = tool.act(json!({"type": "write"}));
+    assert_eq!(installed.state(), "installed", "{:?}", installed.screen);
+    let ended = tool.quit();
+    let received = writes_of(&ended.commands());
+    let pieces = received.iter().filter(|c| *c == "flash:userdata").count();
+    let mut expected: Vec<String> = [
+        "flash:boot_a",
+        "flash:init_boot_a",
+        "flash:vendor_boot_a",
+        "flash:vendor_kernel_boot_a",
+        "flash:dtbo_a",
+    ]
+    .map(String::from)
+    .to_vec();
+    expected.extend(vec!["flash:userdata".to_string(); pieces]);
+    expected.push("reboot".to_string());
+    assert!(pieces >= 1);
+    assert_eq!(received, expected);
+    // Neither the question of what slot B holds nor the measurement
+    for never in ["slot-b", "slot-probe", "slot-probe-put-back"] {
+        assert!(!ended.states().contains(&never), "{:?}", ended.states());
+    }
+}
+
+#[test]
+fn a_release_on_the_running_slot_stops_a_phone_on_slot_b_without_asking_what_it_holds() {
+    // The app's json mode asks what slot B holds of a format-1 release; a
+    // format-2 release that accepts slot a only stops instead
+    for write in [false, true] {
+        let (mut tool, _) = running_run("running-b", write);
+        assert_eq!(tool.act(json!({"type": "acknowledge"})).state(), "phone");
+        let stopped = tool.act(json!({"type": "read-phone"}));
+        assert_eq!(stopped.state(), "stopped");
+        assert_eq!(stopped.screen["stop"], "current-slot-not-accepted");
+        assert_eq!(stopped.screen["retry"], "stops-again");
+        assert!(stopped.screen["choices"].as_array().unwrap().is_empty());
+        let ended = tool.quit();
+        assert!(
+            ended.stderr.contains("0 others; partitions written: 0"),
+            "{}",
+            ended.stderr
+        );
+    }
 }

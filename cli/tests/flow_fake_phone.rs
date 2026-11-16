@@ -729,9 +729,11 @@ fn help_says_what_write_erases_and_install_has_no_default() {
     let help = flat(&out);
     for said in [
         "install DIR --serial S --write",
-        "slot B's boot partitions (the release's boot images, each to its partition with the _b suffix) and userdata",
+        "writes that slot's boot partitions (the release's boot images, each to its partition with that slot's suffix) and userdata, then restarts the phone; it makes no slot active and never writes the other slot",
+        "Android on the phone is replaced: the way back is Google's factory image",
+        "writes slot B's boot partitions (the _b suffix) and userdata, then makes slot B the active slot",
         "userdata is ERASED: everything Android stored on the phone is lost",
-        "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written.",
+        "The bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written.",
         "waits for you to type the phone's codename; nothing is written before that",
         "so the phone sets up your account at its first start",
         "install needs --dry-run or --write, one of them: there is no default.",
@@ -909,4 +911,110 @@ fn a_reinstall_from_slot_b_is_written_with_the_version_slot_b_reports() {
     ] {
         assert!(help.contains(said), "help does not say: {said}\n{out}");
     }
+}
+
+fn running_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/selftest-running")
+}
+
+#[test]
+fn a_release_on_the_running_slot_writes_slot_a_of_a_phone_from_stock_and_sends_no_set_active() {
+    // A first install of a Pixel 7 Pro from stock Android: on slot a, one
+    // bootloader copy told. No statement, no --reinstall, no measurement
+    let dir = running_fixture();
+    let zip = std::fs::read_dir(dir.join("factory"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let args = [
+        "flow",
+        dir.to_str().unwrap(),
+        "--fake-phone",
+        "running-a",
+        "--write",
+        "--factory-zip",
+        zip.to_str().unwrap(),
+    ];
+    let (code, out, err) = run(&args, &typed_install("cheetah\n"));
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        titles(&out),
+        [
+            "Read this once",
+            "Connect the Pixel 7 Pro",
+            "Google's factory image",
+            "About you and the phone",
+            "The dry run",
+            "This is what the installer will write",
+            "Writing to the phone",
+            "Omarchy Mobile is written, and the phone is restarting"
+        ]
+    );
+    let asked = out.find("Codename: ").unwrap();
+    let before = flat(&out[..asked]);
+    for line in [
+        "Android on this phone is replaced",
+        "The way back to Android is Google's factory image",
+        "boot_a: images/boot.img, 16384 bytes (the partition holds 16384 bytes)",
+        "dtbo_a: images/dtbo.img, 4096 bytes",
+        "then: restart the phone (reboot)",
+        "No slot is made active: the phone keeps starting from slot a.",
+    ] {
+        assert!(
+            before.contains(line),
+            "not said before the confirmation: {line}\n{out}"
+        );
+    }
+    assert!(!before.contains("set_active"), "{out}");
+    let sent = others(&out);
+    assert_eq!(
+        sent[..10],
+        [
+            "download:00004000",
+            "flash:boot_a",
+            "download:00002000",
+            "flash:init_boot_a",
+            "download:00001000",
+            "flash:vendor_boot_a",
+            "download:00003000",
+            "flash:vendor_kernel_boot_a",
+            "download:00001000",
+            "flash:dtbo_a"
+        ]
+    );
+    assert_eq!(sent.last(), Some(&"reboot"));
+    assert!(
+        !sent
+            .iter()
+            .any(|c| c.starts_with("set_active") || c.ends_with("_b")),
+        "{sent:?}"
+    );
+    assert!(out.contains("(partitions written: boot_a, dtbo_a, init_boot_a, userdata, vendor_boot_a, vendor_kernel_boot_a)"), "{out}");
+    let after = flat(&out[out.find("==> Omarchy Mobile is written").unwrap()..]);
+    assert!(
+        after.contains("It now starts Omarchy Mobile from slot a"),
+        "{after}"
+    );
+    assert!(after.contains("Android is no longer on this phone"));
+
+    // The same release, a phone that runs from slot b: stopped, only asked
+    let args = [
+        "flow",
+        dir.to_str().unwrap(),
+        "--fake-phone",
+        "running-b",
+        "--write",
+        "--factory-zip",
+        zip.to_str().unwrap(),
+    ];
+    let (code, out, _) = run(&args, &typed_install("cheetah\n"));
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(
+        *titles(&out).last().unwrap(),
+        "This release can't be installed on the slot this phone runs from yet"
+    );
+    assert!(out.contains(ONLY_GETVAR), "{out}");
+    assert!(!flat(&out).contains("--set-active"));
 }

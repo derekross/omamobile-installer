@@ -239,6 +239,44 @@ impl InstallFlow {
         })
     }
 
+    /// The same on the signed test release that installs on the slot the
+    /// phone runs from (manifest format 2, fixtures/selftest-running): no
+    /// question about slot B, no measurement, no `set_active`.
+    #[cfg(feature = "selftest")]
+    pub fn selftest_write_preview_running() -> Result<InstallFlow, JsError> {
+        macro_rules! fxr {
+            ($name:literal) => {
+                include_bytes!(concat!("../../fixtures/selftest-running/", $name)).as_slice()
+            };
+        }
+        let files = omamobile_installer_core::bundle::ReleaseFiles {
+            sha256sums: fxr!("SHA256SUMS"),
+            sha256sums_sig: fxr!("SHA256SUMS.sig"),
+            keyring: fxr!("test-key.gpg"),
+            manifest_json: fxr!("manifest.json"),
+            manifest_txt: fxr!("MANIFEST"),
+            device_conf: fxr!("device.conf"),
+        };
+        let trusted =
+            omamobile_installer_core::signature::TrustedKeys::new(&[core::str::from_utf8(fxr!(
+                "test-key.fingerprint"
+            ))
+            .map_err(js)?])
+            .map_err(js)?;
+        Ok(InstallFlow {
+            flow: Flow::begin(
+                &files,
+                Some(fxr!("factory-builds.json")),
+                &trusted,
+                write_options(false, None),
+            ),
+            check: None,
+            download: None,
+            built_in: false,
+            preview: Preview::default(),
+        })
+    }
+
     // ---- The other bootloader slot (DESIGN §6) ----------------------------
 
     /// The owner's answer on the question whether to measure the other
