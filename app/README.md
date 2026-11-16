@@ -14,6 +14,8 @@ The tool's side of that protocol is `omamobile-install json` (`../cli/src/json.r
 
 ## Install it (Arch Linux, Omarchy)
 
+From a release, once one is published: [docs/INSTALL-APP.md](../docs/INSTALL-APP.md) (the package here, an AppImage for other distributions). From this checkout:
+
 The package holds the window and the tool it drives, `omamobile-install`, both built from this checkout, with the launcher entry and the icon:
 
 ```sh

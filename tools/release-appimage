@@ -1,0 +1,121 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# The desktop app and the tool it drives as one AppImage, for Linux
+# distributions other than Arch and Omarchy (which take the package,
+# app/pkgbuild/PKGBUILD):  omainstall-TAG-x86_64.AppImage
+#
+#   QMAKE=/path/to/qt/bin/qmake tools/release-appimage TAG OUTDIR
+#
+# The window needs Qt 6.5 or newer (Material.roundedScale), which many
+# distributions don't package yet (Ubuntu 24.04 has 6.4.2), so the AppImage
+# carries its own Qt: the one QMAKE names, which the release workflow takes
+# from Qt's own binaries (aqtinstall) on Ubuntu 22.04, so that the AppImage
+# runs on glibc 2.35 and newer. linuxdeploy, its Qt plugin and the AppImage
+# runtime are fetched at the versions below and refused unless their SHA-256
+# matches.
+#
+# What it does not carry: what the steps after the write run (bash,
+# Python, OpenSSH, unzip, android-tools, erofs-utils, e2fsprogs, binutils,
+# lz4, zstd, cpio) and the file chooser (xdg-desktop-portal). Those come
+# from the distribution; docs/INSTALL-APP.md lists them.
+set -euo pipefail
+tag=${1:-} out=${2:-}
+[[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n $out ]] || { echo "usage: QMAKE=… tools/release-appimage vX.Y.Z OUTDIR" >&2; exit 2; }
+: "${QMAKE:?QMAKE must name the qmake of a Qt 6.5 or newer}"
+[[ $(uname -m) == x86_64 ]] || { echo "x86_64 only (the pinned linuxdeploy is)" >&2; exit 1; }
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+out=$(mkdir -p "$out" && cd "$out" && pwd)
+
+qtver=$("$QMAKE" -query QT_VERSION)
+[[ $(printf '%s\n' 6.5.0 "$qtver" | sort -V | head -1) == 6.5.0 ]] || { echo "Qt $qtver: the window needs 6.5 or newer" >&2; exit 1; }
+echo "Qt $qtver from $("$QMAKE" -query QT_INSTALL_PREFIX)"
+
+work=$root/.scratch/appimage
+rm -rf "$work"
+mkdir -p "$work/tools" "$work/build"
+
+# linuxdeploy and its Qt plugin, pinned
+fetch() {   # fetch URL SHA256 NAME
+  curl --fail --location --silent --show-error --proto '=https' -o "$work/tools/$3" "$1"
+  echo "$2  $work/tools/$3" | sha256sum -c --quiet
+  chmod +x "$work/tools/$3"
+}
+fetch https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
+  c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d linuxdeploy-x86_64.AppImage
+fetch https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage \
+  15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724 linuxdeploy-plugin-qt-x86_64.AppImage
+# The AppImage's runtime (the small program at its front), pinned too:
+# otherwise appimagetool downloads the "continuous" one at every build
+fetch https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64 \
+  2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d runtime-x86_64
+export LDAI_RUNTIME_FILE=$work/tools/runtime-x86_64
+# The runners and containers have no FUSE
+export APPIMAGE_EXTRACT_AND_RUN=1
+
+# The tool as it ships (no features: no pretend phone), and the window
+cargo build --release --locked -p omamobile-installer-cli
+(cd "$work/build" && "$QMAKE" "$root/app/omainstall.pro" && make -j"$(nproc)")
+
+appdir=$work/AppDir
+install -Dm755 "$work/build/omainstall" "$appdir/usr/bin/omainstall"
+# Beside the window's binary, where it looks first (docs/APP.md §2)
+install -Dm755 target/release/omamobile-install "$appdir/usr/bin/omamobile-install"
+install -Dm644 app/LICENSE "$appdir/usr/share/licenses/omainstall/LICENSE"
+
+# The window's QML (QtQuick, Controls with Material, Layouts) is found by
+# reading app/src; Wayland's platform plugins are added by name, X11's
+# (xcb) is the plugin's default.
+export QML_SOURCES_PATHS=$root/app/src
+plugins=$("$QMAKE" -query QT_INSTALL_PLUGINS)
+wl=()
+for p in libqwayland-egl.so libqwayland-generic.so; do
+  [[ -e $plugins/platforms/$p ]] && wl+=("$p")
+done
+# offscreen: for the window's start below, with no display
+EXTRA_PLATFORM_PLUGINS=$(IFS=';'; echo "libqoffscreen.so${wl[*]:+;}${wl[*]}")
+export EXTRA_PLATFORM_PLUGINS
+if (( ${#wl[@]} )); then
+  # The Wayland client's own plugins (wayland-shell-integration for
+  # xdg-shell, decorations, graphics integration): the Qt plugin deploys
+  # them under this module's name, which is the compositor's
+  export EXTRA_QT_MODULES=waylandcompositor
+  echo "Wayland: ${wl[*]}"
+else
+  echo "warning: this Qt has no Wayland platform plugin; the AppImage runs through XWayland" >&2
+fi
+
+export QMAKE LINUXDEPLOY_OUTPUT_VERSION=$tag
+export PATH=$work/tools:$PATH
+
+(cd "$work" && linuxdeploy-x86_64.AppImage --appdir "$appdir" \
+  --executable "$appdir/usr/bin/omainstall" \
+  --executable "$appdir/usr/bin/omamobile-install" \
+  --desktop-file "$root/app/pkgbuild/omainstall.desktop" \
+  --icon-file "$root/app/pkgbuild/omainstall.svg" \
+  --plugin qt --output appimage)
+
+made=$(find "$work" -maxdepth 1 -name '*.AppImage' -newer "$work/build/omainstall" -print -quit)
+[[ -n $made ]] || { echo "linuxdeploy made no AppImage" >&2; exit 1; }
+dest=$out/omainstall-$tag-x86_64.AppImage
+mv "$made" "$dest"
+
+# It starts, finds the tool inside it and speaks its protocol; no display,
+# no phone (`check` opens no USB device)
+QT_QPA_PLATFORM=offscreen "$dest" check
+
+# The window loads its QML from the AppImage's Qt: started offscreen for
+# five seconds against the app's tests' stand-in for the tool (a script
+# that replays recorded screens, with no phone, no USB and no network
+# behind it), it must still be running, with no QML error said
+log=$work/window.log
+status=0
+OMAINSTALL_TOOL=$root/app/tests/stand-in-tool QT_QPA_PLATFORM=offscreen timeout 5 "$dest" open >"$log" 2>&1 || status=$?
+if [[ $status != 124 ]] || grep -qiE 'qml.*(error|not installed|is not a type)|failed to load|Could not find the Qt platform plugin' "$log"; then
+  echo "the window did not start from the AppImage (status $status):" >&2
+  cat "$log" >&2
+  exit 1
+fi
+echo "the window started from the AppImage and ran for 5 s against the stand-in"
+echo "$dest"
+sha256sum "$dest"

@@ -1,0 +1,215 @@
+# The installer's downloads, built from one commit: the Arch package of the
+# desktop app and its tool (Arch Linux and Omarchy), an AppImage of the same
+# for other Linux distributions, and the web page as it ships (the file
+# omamobile.org pins by SHA-256), with SHA256SUMS over all three.
+#
+# Two ways to start it, and never on a push to a branch:
+# - by hand (Actions, "Run workflow"): builds and checks everything and keeps
+#   the files as this run's artifacts. Nothing is published.
+# - a tag vX.Y.Z: the same, then a DRAFT GitHub release with the files. A
+#   draft is visible to the repository's maintainers only; publishing it is
+#   the maintainer's click (docs/GO-LIVE.md).
+#
+# No step lists or opens a USB device, and no step reaches a phone: the
+# builds run the tool's own unit tests and `omainstall check`, which asks no
+# phone anything. The same checks of what ships as in checks.yml run on
+# what is packed here.
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The version the files are named for, vX.Y.Z (must match app/pkgbuild/PKGBUILD's pkgver). Nothing is published from a run by hand."
+        required: true
+        default: v0.1.0
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: The version, the same in the tag, the package and the app
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ $GITHUB_EVENT_NAME == push ]]; then tag=$GITHUB_REF_NAME; else tag=$INPUT_TAG; fi
+          [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a version tag: $tag"; exit 1; }
+          pkgver=$(sed -n 's/^pkgver=//p' app/pkgbuild/PKGBUILD)
+          appver=$(sed -n 's/^VERSION = //p' app/omainstall.pro)
+          [[ v$pkgver == "$tag" ]] || { echo "::error::$tag, but PKGBUILD says pkgver=$pkgver"; exit 1; }
+          [[ v$appver == "$tag" ]] || { echo "::error::$tag, but app/omainstall.pro says VERSION = $appver"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  web:
+    name: The web page as it ships
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Which wasm-bindgen Cargo.lock names
+        id: wbg
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "no wasm-bindgen version in Cargo.lock"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Built here, not taken from checks.yml's cache: a release builds from
+      # nothing another run left behind
+      - name: wasm-bindgen-cli, built
+        run: cargo install --locked wasm-bindgen-cli --version "${{ steps.wbg.outputs.version }}"
+      - name: The sources of what ships hold one way to write and no pretend phone
+        run: tools/check-shipping
+      - name: Built, read as built, packed (tools/release-web)
+        run: tools/release-web "${{ needs.version.outputs.tag }}" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: out/
+          if-no-files-found: error
+
+  arch:
+    name: The Arch package (Arch Linux, Omarchy)
+    needs: version
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 40
+    steps:
+      # The package's depends and makedepends, installed here because
+      # makepkg runs as a user without sudo (--nodeps below)
+      - name: Packages
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rustup \
+            qt6-base qt6-declarative qt6-wayland xdg-desktop-portal \
+            python openssh unzip android-tools erofs-utils e2fsprogs binutils lz4 zstd cpio
+      - uses: actions/checkout@v4
+      - name: A user for makepkg, which refuses root
+        run: |
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+      - name: Toolchain (rust-toolchain.toml), for that user
+        run: su builder -c 'cd "$GITHUB_WORKSPACE" && rustup toolchain install'
+      # build() builds the tool without features and the window; check()
+      # runs the shipping tool's own unit tests; package() lays out /usr/bin,
+      # the launcher entry, the icon and the licence
+      - name: makepkg
+        run: |
+          su builder -c 'mkdir -p "$GITHUB_WORKSPACE/out" && cd "$GITHUB_WORKSPACE/app/pkgbuild" && PKGDEST="$GITHUB_WORKSPACE/out" makepkg -f --nodeps --noconfirm'
+      # The refusal is checks.yml's own test of the shipping tool: it comes
+      # from the arguments alone, before any USB device is listed or opened
+      - name: The package holds the window, the tool, the launcher entry and the icon; its tool has no pretend phone
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.tag }}
+        run: |
+          cd out
+          pkg=omainstall-${VERSION#v}-1-x86_64.pkg.tar.zst
+          [[ -f $pkg ]] || { echo "::error::no $pkg"; ls; exit 1; }
+          bsdtar -tf "$pkg" | sort > "$RUNNER_TEMP/list.txt"
+          for f in usr/bin/omainstall usr/bin/omamobile-install usr/share/applications/omainstall.desktop \
+                   usr/share/icons/hicolor/scalable/apps/omainstall.svg usr/share/licenses/omainstall/LICENSE; do
+            grep -qx "$f" "$RUNNER_TEMP/list.txt" || { echo "::error::the package lacks $f"; exit 1; }
+          done
+          x=$RUNNER_TEMP/pkg && mkdir -p "$x" && bsdtar -xf "$pkg" -C "$x" usr/bin
+          status=0
+          "$x/usr/bin/omamobile-install" flow "$GITHUB_WORKSPACE/fixtures/selftest" --fake-phone ready </dev/null 2>"$RUNNER_TEMP/err.txt" || status=$?
+          [[ $status == 1 ]] && grep -qF "this build has no pretend phone" "$RUNNER_TEMP/err.txt" \
+            || { echo "::error::the packaged tool did not refuse the pretend phone (status $status)"; cat "$RUNNER_TEMP/err.txt"; exit 1; }
+          QT_QPA_PLATFORM=offscreen OMAINSTALL_TOOL="$x/usr/bin/omamobile-install" "$x/usr/bin/omainstall" check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          # the package, not makepkg's omainstall-debug beside it
+          path: out/omainstall-[0-9]*.pkg.tar.zst
+          if-no-files-found: error
+
+  appimage:
+    name: The AppImage (other Linux distributions)
+    needs: version
+    # The oldest supported runner: the AppImage runs on its glibc (2.35) and newer
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      # What linuxdeploy's Qt plugin needs present to bundle the X11 and
+      # Wayland platform plugins' own libraries, and file(1) for linuxdeploy
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential file python3-venv \
+            libglib2.0-0 libgl1-mesa-dev libegl1 libfontconfig1 libfreetype6 libdbus-1-3 libxkbcommon0 libxkbcommon-x11-0 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1 libxcb1 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 \
+            libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libx11-xcb1
+      - name: Qt, from Qt's own binaries (aqtinstall, pinned)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/aqt"
+          "$RUNNER_TEMP/aqt/bin/pip" install aqtinstall==3.3.0
+          "$RUNNER_TEMP/aqt/bin/aqt" install-qt linux desktop 6.8.3 linux_gcc_64 --outputdir "$RUNNER_TEMP/qt"
+          echo "QMAKE=$RUNNER_TEMP/qt/6.8.3/gcc_64/bin/qmake" >> "$GITHUB_ENV"
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: The tool's own unit tests, as it ships
+        run: cargo test --release --locked -p omamobile-installer-cli --bin omamobile-install
+      - name: Built and packed (tools/release-appimage), then started once with `check`
+        run: tools/release-appimage "${{ needs.version.outputs.tag }}" out
+      - name: The AppImage's tool has no pretend phone
+        run: |
+          status=0
+          .scratch/appimage/AppDir/usr/bin/omamobile-install flow fixtures/selftest --fake-phone ready </dev/null 2>err.txt || status=$?
+          [[ $status == 1 ]] && grep -qF "this build has no pretend phone" err.txt \
+            || { echo "::error::the AppImage's tool did not refuse the pretend phone (status $status)"; cat err.txt; exit 1; }
+          rm -f err.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: out/*.AppImage
+          if-no-files-found: error
+
+  sums:
+    name: SHA256SUMS, and a draft release for a tag
+    needs: [version, web, arch, appimage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the draft release, for a tag only
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          cd dist
+          ls -l
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ needs.version.outputs.tag }}
+          path: dist/
+          if-no-files-found: error
+      # A draft, never published from here. Its tag must be the one this
+      # run was started by; a run by hand creates nothing.
+      - name: Draft release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "Omarchy Mobile installer $TAG" \
+            --notes "Draft: built by the Release workflow from $GITHUB_SHA. Publish only after docs/GO-LIVE.md. How to install: docs/INSTALL-APP.md." \
+            dist/*
