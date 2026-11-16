@@ -24,6 +24,7 @@ pub fn answers() -> ValidAnswers {
         ssh_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA owner@computer".into()],
         full_name: Some("An Owner".into()),
         email: Some("owner@example.org".into()),
+        slot: None,
     }
     .validate()
     .expect("the test's answers are valid")

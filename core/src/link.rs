@@ -181,6 +181,11 @@ pub struct LinkStart {
     pub backup_place: bool,
     /// The installer's version, for `hello`.
     pub version: String,
+    /// For a release on the running slot (manifest format 2): the slot the
+    /// write put the boot images on, `a` or `b`. Sent with the answers, so
+    /// that the phone writes `SLOT=` for its kernel updates only while it
+    /// runs from that slot. `None` for a release on slot B.
+    pub slot: Option<String>,
 }
 
 impl core::fmt::Debug for LinkStart {
@@ -217,6 +222,10 @@ pub struct LinkRecord {
     pub stage: String,
     /// The link was finished: nothing is left to go on with.
     pub finished: bool,
+    /// [`LinkStart::slot`]: not secret, and kept so that answers asked
+    /// again in a later run carry it too. Absent in a record from before.
+    #[serde(default)]
+    pub slot: Option<String>,
 }
 
 impl core::fmt::Debug for LinkRecord {
@@ -267,6 +276,7 @@ impl LinkRecord {
             },
             backup_place,
             version: version.to_string(),
+            slot: self.slot.clone().filter(|s| s == "a" || s == "b"),
         })
     }
 }
@@ -280,6 +290,19 @@ pub fn link_answers(
     answers: &OwnerAnswers,
     extras: &crate::firstboot::Extras<'_>,
     salt: &str,
+) -> Result<ValidAnswers> {
+    link_answers_on(answers, extras, salt, None)
+}
+
+/// [`link_answers`], with the slot the boot images were written to, for a
+/// release on the running slot (manifest format 2): the phone writes
+/// `SLOT=` in `boot-update.conf` from it, and only while it runs from that
+/// slot and its descriptor accepts it.
+pub fn link_answers_on(
+    answers: &OwnerAnswers,
+    extras: &crate::firstboot::Extras<'_>,
+    salt: &str,
+    slot: Option<crate::manifest::Slot>,
 ) -> Result<ValidAnswers> {
     let pin = answers.password.bytes().all(|b| b.is_ascii_digit());
     let a = Answers {
@@ -296,6 +319,7 @@ pub fn link_answers(
             .unwrap_or_default(),
         full_name: extras.full_name.map(str::to_string),
         email: extras.email.map(str::to_string),
+        slot: slot.map(|s| s.name().to_string()),
     };
     a.validate().map_err(|problems| {
         let named: Vec<String> = problems
@@ -518,6 +542,7 @@ impl LinkFlow {
             token: self.host.token().map(|t| to_hex(&t.0)),
             stage: self.stage.map_or("unknown", Stage::as_str).to_string(),
             finished: self.finished,
+            slot: self.start.slot.clone(),
         }
     }
 
@@ -874,7 +899,16 @@ impl LinkFlow {
         let stage = self.stage?;
         Some(match stage {
             Stage::Waiting => match &self.start.answers {
-                Some(a) => Command::Answers(a.clone()),
+                // With the slot that was written, however the answers came
+                // (handed over by the flow, or asked again)
+                Some(a) => {
+                    let mut with = a.get().clone();
+                    with.slot = self.start.slot.clone();
+                    match with.validate() {
+                        Ok(v) => Command::Answers(v),
+                        Err(_) => Command::Answers(a.clone()),
+                    }
+                }
                 None => {
                     self.wait = Wait::Answers(Vec::new());
                     return None;

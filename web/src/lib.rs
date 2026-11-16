@@ -549,7 +549,14 @@ fn describe(release: &VerifiedRelease) -> String {
     json!({
         "version": m.version, "label": m.label, "codename": m.codename, "device": m.device_name,
         "kernel": m.kernel_release, "signed_by": release.signer().primary, "signing_key": release.signer().signing_key,
-        "boot_images": m.boot_writes.iter().map(|w| json!({"partition": w.partition.name(), "source": w.source, "size": w.size})).collect::<Vec<_>>(),
+        // A release on the running slot (format 2) names its images, and
+        // the slot is the phone's: no partition is known before the phone is
+        "format": m.format,
+        "accepted_slots": m.accepted_slots().iter().map(|s| s.name()).collect::<Vec<_>>(),
+        "boot_images": m.boot_writes.iter().map(|w| json!({
+            "image": w.image,
+            "partition": (!m.on_running_slot()).then(|| w.partition(omamobile_installer_core::manifest::Slot::B).name().to_string()),
+            "source": w.source, "size": w.size})).collect::<Vec<_>>(),
         "root_image": {"partition": m.root_image.partition.name(), "name": m.root_image.name, "size": m.root_image.size,
             "answers_placeholders": m.root_image.placeholders.iter().map(|p| p.path.as_str()).collect::<Vec<_>>()},
         "build_index": release.has_build_index(),

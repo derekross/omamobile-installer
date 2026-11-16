@@ -174,7 +174,9 @@ fn footer_is_honest(stop: &Stop) {
         }
         // The stops after a write began are tested in write_path.rs, and
         // those after a measurement of the other slot in slot_probe.rs
-        PhoneFact::WriteStopped { .. } => panic!("no stop of this file follows a write"),
+        PhoneFact::WriteStopped { .. } | PhoneFact::WriteStoppedRunning { .. } => {
+            panic!("no stop of this file follows a write")
+        }
         PhoneFact::SlotsMeasured { .. } | PhoneFact::SlotProbeStopped { .. } => {
             panic!("no stop of this file follows a measurement")
         }

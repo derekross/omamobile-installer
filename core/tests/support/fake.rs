@@ -86,6 +86,11 @@ pub struct FakeState {
     pub away: Option<usize>,
     /// How many restarts into the bootloader it made.
     pub restarts: usize,
+    /// The phone moves to its other slot, as after a restart into it (a
+    /// fallback, or a `set_active` by hand and a restart), when the Nth
+    /// (from 1) `getvar:current-slot` arrives: from that question on,
+    /// `current-slot` reads this slot.
+    pub slot_moves_at: Option<(usize, String)>,
     unplugged: bool,
     // Protocol state
     staged: Option<Vec<u8>>,
@@ -160,6 +165,7 @@ impl FakePhone {
             restart: FakeRestart::Normal,
             away: None,
             restarts: 0,
+            slot_moves_at: None,
             unplugged: false,
             staged: None,
             expecting: 0,
@@ -267,6 +273,25 @@ impl FakePhone {
                 phone.first_install("fake-1.0");
                 set(&[("slot-successful:b", "yes"), ("slot-unbootable:b", "no")]);
             }
+            // For a release that installs on the running slot: a Pixel 7
+            // Pro as stock leaves it, on slot a; the same on slot b (stock
+            // after a system update); and one that moves to slot b between
+            // the first look and the dry run
+            "running-a" => {
+                phone.first_install("fake-1.0");
+            }
+            "running-b" => {
+                phone.first_install("fake-1.0");
+                phone.edit(|s| {
+                    s.active_slot = "b".into();
+                    s.running = "b".into();
+                    s.vars.insert("current-slot".into(), "b".into());
+                });
+            }
+            "running-a-moves" => {
+                phone.first_install("fake-1.0");
+                phone.edit(|s| s.slot_moves_at = Some((2, "b".into())));
+            }
             _ => return None,
         }
         Some(phone)
@@ -346,7 +371,7 @@ impl FakePhone {
     }
 
     /// The names [`Self::scenario`] knows.
-    pub const SCENARIOS: [&'static str; 19] = [
+    pub const SCENARIOS: [&'static str; 22] = [
         "ready",
         "locked",
         "locked-oem-off",
@@ -366,6 +391,9 @@ impl FakePhone {
         "first-install-os",
         "first-install-falls-back",
         "first-install-b-started",
+        "running-a",
+        "running-b",
+        "running-a-moves",
     ];
 
     /// The owner plugs the cable back in, with the phone still in Fastboot
@@ -522,6 +550,16 @@ impl FakeState {
         self.log.push(cmd.to_string());
         if self.fail_on.iter().any(|p| cmd.starts_with(p.as_str())) {
             return self.reply("FAIL", "injected failure");
+        }
+        if cmd == "getvar:current-slot" {
+            if let Some((nth, slot)) = self.slot_moves_at.clone() {
+                let asked = self.log.iter().filter(|c| *c == cmd).count();
+                if asked == nth {
+                    self.vars.insert("current-slot".into(), slot.clone());
+                    self.running = slot.clone();
+                    self.active_slot = slot;
+                }
+            }
         }
         if cmd == "getvar:all" {
             let lines: Vec<String> = self.vars.iter().map(|(k, v)| format!("{k}:{v}")).collect();

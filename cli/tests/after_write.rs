@@ -277,9 +277,14 @@ impl Tool {
         assert_eq!(self.act(answers).state(), "dry-run");
         let confirm = self.act(json!({"type": "dry-run"}));
         assert_eq!(confirm.state(), "confirm", "{}", confirm.text());
-        assert!(confirm
-            .text()
-            .contains("vendor_kernel_boot_b is written with this computer's SSH public key"));
+        let slot = if release.ends_with("after-running") {
+            "a"
+        } else {
+            "b"
+        };
+        assert!(confirm.text().contains(&format!(
+            "vendor_kernel_boot_{slot} is written with this computer's SSH public key"
+        )));
         assert!(confirm
             .text()
             .contains("This computer's SSH public key goes with your answers"));
@@ -449,17 +454,22 @@ fn after_the_write_the_phone_is_set_up_with_the_releases_tools_step_by_step() {
     for step in ["nv-backup", "phone-provision", "phone-smoke"] {
         let at = log.iter().position(|l| l.starts_with(step)).unwrap();
         assert!(
-            log[since..at]
-                .iter()
-                .any(|l| l.starts_with("ssh ") && l.contains("omamobile-install-awake") && l.contains("--what=sleep")),
+            log[since..at].iter().any(|l| l.starts_with("ssh ")
+                && l.contains("omamobile-install-awake")
+                && l.contains("--what=sleep")),
             "the phone was held awake before {step}: {:?}",
             &log[since..at]
         );
         since = at + 1;
     }
-    let smoke = log.iter().position(|l| l.starts_with("phone-smoke")).unwrap();
+    let smoke = log
+        .iter()
+        .position(|l| l.starts_with("phone-smoke"))
+        .unwrap();
     assert!(
-        log[smoke..].iter().any(|l| l.trim() == "ssh systemctl stop omamobile-install-awake"),
+        log[smoke..]
+            .iter()
+            .any(|l| l.trim() == "ssh systemctl stop omamobile-install-awake"),
         "the hold is let go after the check: {:?}",
         &log[smoke..]
     );
@@ -837,5 +847,51 @@ fn a_failed_backup_stays_open_with_the_tools_last_words() {
         .contains("don't work around it"));
     assert!(failed.text().contains("the storage guard does not hold"));
     assert!(world.record().unwrap().get("backup").is_none());
+    tool.finish();
+}
+
+/// What the pretend run wrote to one of the root image's placeholders.
+fn placeholder(world: &World, path: &str) -> String {
+    let fs = std::fs::read_to_string(world.phone().join("fs")).unwrap();
+    let line = fs
+        .lines()
+        .find(|l| l.starts_with(&format!("{path} ")))
+        .unwrap_or_else(|| panic!("{path} not in {fs}"));
+    let mut words = line.split(' ').skip(1).map(|w| w.parse::<usize>().unwrap());
+    let (offset, length) = (words.next().unwrap(), words.next().unwrap());
+    let userdata = std::fs::read(world.phone().join("userdata.img")).unwrap();
+    String::from_utf8(userdata[offset..offset + length].to_vec()).unwrap()
+}
+
+/// A release on the running slot (manifest format 2): the same steps after
+/// the write, a radio backup into a new folder and the firmware as a first
+/// install, and boot-update.conf naming the slot that was written.
+#[test]
+fn after_a_write_on_the_running_slot_the_same_steps_follow_and_the_slot_is_recorded() {
+    let release = repo().join("fixtures/after-running");
+    let world = World::new("running");
+    let mut tool = Tool::start(&world, &release, true);
+    let installed = tool.install(&release);
+    assert_eq!(installed.state(), "installed", "{}", installed.text());
+    assert!(
+        installed
+            .text()
+            .contains("starts Omarchy Mobile from slot a"),
+        "{}",
+        installed.text()
+    );
+    let conf = placeholder(&world, "/etc/omamobile/boot-update.conf");
+    assert!(conf.contains("\nSLOT=a\nAUTO_WRITE=yes\n"), "{conf}");
+    tool.after("begin");
+    assert_eq!(tool.after("add").state(), "backup");
+    assert_eq!(tool.after("backup").state(), "firmware");
+    assert_eq!(tool.after("firmware").state(), "restart");
+    assert_eq!(tool.after("restart").state(), "ready");
+    let backup = world.ran("nv-backup");
+    assert_eq!(backup.len(), 1);
+    assert!(backup[0].contains("cheetah-radio-backup-"), "{backup:?}");
+    let provision = world.ran("phone-provision");
+    assert_eq!(provision.len(), 1);
+    assert!(provision[0].contains("--first-install"), "{provision:?}");
     tool.finish();
 }

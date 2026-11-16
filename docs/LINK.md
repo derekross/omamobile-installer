@@ -108,7 +108,7 @@ Every message of the plan's §5, and the type that is it. `id` (host, from 1) an
 | `resume` | `Resume { token }` | `token`: 64 lower-case hex digits (`Token`) | Unpaired, the phone holds a token. Never locked |
 | `bye` | `Bye` | | In a session |
 | `status` | `Status` | | In a session, paired or not |
-| `answers` | `Answers(Answers)` | `username`, `password_hash`, `ssh_keys` (a list, may be empty); optional `credential`, `hostname`, `timezone`, `wifi_ssid`, `wifi_psk`, `full_name`, `email`. Values are judged by `Answers::validate` | Paired, stage `waiting` |
+| `answers` | `Answers(Answers)` | `username`, `password_hash`, `ssh_keys` (a list, may be empty); optional `credential`, `hostname`, `timezone`, `wifi_ssid`, `wifi_psk`, `full_name`, `email`, and `slot` (`a` or `b`: the slot the computer wrote a release on the running slot to, never part of `firstboot.conf`; the phone writes `SLOT=` in `boot-update.conf` from it only when it runs from that slot and its descriptor's `INSTALL_ACTIVE_SLOTS` holds it, and otherwise turns kernel updates off; any other value refuses the message). Values are judged by `Answers::validate` | Paired, stage `waiting` |
 | `firstboot-retry` | `FirstbootRetry` | | Paired, stage `firstboot-failed` |
 | `backup-list` | `BackupList` | | Paired, stage before `provisioned` |
 | `backup-read` | `BackupRead { name, offset }` | `name`: 1 to 36 of `A-Z a-z 0-9 _ -`; `offset`: a multiple of the session's `max_data`, at most the size | After `backup-parts`, a listed name |

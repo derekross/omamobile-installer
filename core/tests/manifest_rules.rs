@@ -2,7 +2,7 @@
 //! manifest.json and device.conf rules, on the published cheetah manifest
 //! and on changed copies of it.
 use omamobile_installer_core::device_conf::DeviceConf;
-use omamobile_installer_core::manifest::Manifest;
+use omamobile_installer_core::manifest::{Manifest, Slot};
 use omamobile_installer_core::Error;
 use serde_json::{json, Value};
 
@@ -29,7 +29,11 @@ fn the_published_manifest_is_accepted() {
     let m = Manifest::parse(PUBLISHED).unwrap();
     assert_eq!(m.codename, "cheetah");
     assert_eq!(m.version, "2026.11.08");
-    let parts: Vec<&str> = m.boot_writes.iter().map(|w| w.partition.name()).collect();
+    let parts: Vec<String> = m
+        .boot_writes
+        .iter()
+        .map(|w| w.partition(Slot::B).name().to_string())
+        .collect();
     assert_eq!(
         parts,
         [
@@ -220,4 +224,162 @@ fn the_descriptor_is_data_and_must_agree() {
         "CODENAME=cheetah\nBOOT_METHOD=android-v0"
     )
     .is_err());
+}
+
+/// The published manifest as format 2 (the running slot), for the rules
+/// below: its writes name images, and its guard is the running slot's.
+fn as_format_2(m: &mut Value) {
+    m["format"] = json!(2);
+    let i = m["install"].as_object_mut().unwrap();
+    i.remove("require_matching_bootloader_slots");
+    i.remove("storage_guard_allowlist");
+    i.insert("slot".into(), json!("active"));
+    i.insert("accept_current_slots".into(), json!(["a"]));
+    i.insert("after".into(), json!(["reboot"]));
+    i.insert(
+        "storage_guard".into(),
+        json!({"slot": "running", "images": ["boot", "init_boot", "vendor_boot", "vendor_kernel_boot", "dtbo"],
+               "also": ["userdata"], "marker": "/etc/omamobile-ufs-rw-slot"}),
+    );
+    for w in i["writes"].as_array_mut().unwrap() {
+        let w = w.as_object_mut().unwrap();
+        let p = w["partition"].as_str().unwrap().to_string();
+        if let Some(image) = p.strip_suffix("_b") {
+            w.remove("partition");
+            w.insert("image".into(), json!(image));
+        }
+    }
+}
+
+#[test]
+fn a_format_2_manifest_writes_the_five_boot_images_and_userdata_and_nothing_else() {
+    // The published manifest as format 2 is accepted, and writes exactly
+    // the five images on the running slot
+    let m = changed(as_format_2).unwrap();
+    let images: Vec<&str> = m.boot_writes.iter().map(|w| w.image.as_str()).collect();
+    assert_eq!(
+        images,
+        [
+            "boot",
+            "init_boot",
+            "vendor_boot",
+            "vendor_kernel_boot",
+            "dtbo"
+        ]
+    );
+    let on_a: Vec<String> = m
+        .boot_writes
+        .iter()
+        .map(|w| w.partition(Slot::A).name().to_string())
+        .collect();
+    assert_eq!(
+        on_a,
+        [
+            "boot_a",
+            "init_boot_a",
+            "vendor_boot_a",
+            "vendor_kernel_boot_a",
+            "dtbo_a"
+        ]
+    );
+    // Any other image name would hit stock's live slot: refused, whether as
+    // a write, as a write's partition, or in the guard's list, with or
+    // without a slot in the name
+    for name in [
+        "vbmeta",
+        "vbmeta_system",
+        "vbmeta_vendor",
+        "abl",
+        "bl1",
+        "bl2",
+        "bl31",
+        "pbl",
+        "tzsw",
+        "gsa",
+        "ldfw",
+        "modem",
+        "radio",
+        "bootloader",
+        "persist",
+        "efs",
+        "efs_backup",
+        "modem_userdata",
+        "devinfo",
+        "misc",
+        "super",
+        "userdata",
+        "metadata",
+        "boot_a",
+        "boot_b",
+        "vbmeta_a",
+        "abl_a",
+        "modem_a",
+        "BOOT",
+        "boot ",
+        "",
+        "made_up",
+    ] {
+        refused(
+            |m| {
+                as_format_2(m);
+                m["install"]["writes"][0]["image"] = json!(name);
+            },
+            "",
+        );
+        refused(
+            |m| {
+                as_format_2(m);
+                let w = m["install"]["writes"].as_array_mut().unwrap();
+                w.insert(0, json!({"image": name, "source": format!("images/{name}.img"), "size": 4096, "partition_size": null}));
+            },
+            "",
+        );
+        refused(
+            |m| {
+                as_format_2(m);
+                m["install"]["storage_guard"]["images"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(name));
+            },
+            "",
+        );
+        for p in [name.to_string(), format!("{name}_a"), format!("{name}_b")] {
+            refused(
+                |m| {
+                    as_format_2(m);
+                    m["install"]["writes"][0]["partition"] = json!(p);
+                },
+                "",
+            );
+        }
+    }
+    // The guard may leave userdata writable and nothing else besides
+    for also in [
+        json!(["userdata", "persist"]),
+        json!(["metadata"]),
+        json!([]),
+    ] {
+        refused(
+            |m| {
+                as_format_2(m);
+                m["install"]["storage_guard"]["also"] = also.clone();
+            },
+            "storage_guard.also",
+        );
+    }
+    // The descriptor can't widen it either: a BOOT_IMAGES or UFS_RW that
+    // names another image is not what the manifest writes
+    let conf = String::from_utf8(PUBLISHED_CONF.to_vec()).unwrap()
+        + "INSTALL_SLOT=active\nINSTALL_ACTIVE_SLOTS=\"a\"\n";
+    m.check_descriptor(&DeviceConf::parse(conf.as_bytes()).unwrap())
+        .unwrap();
+    for (key, extra) in [("BOOT_IMAGES=\"", "vbmeta "), ("UFS_RW=\"", "vbmeta_b ")] {
+        let widened = conf.replace(key, &format!("{key}{extra}"));
+        assert!(
+            m.check_descriptor(&DeviceConf::parse(widened.as_bytes()).unwrap())
+                .is_err(),
+            "{key}{extra}"
+        );
+    }
 }

@@ -56,6 +56,7 @@ const QString Zip = Release + "/factory/" + ZipName;
 const QString ReleaseLink = QDir(Tests + "/../../fixtures/selftest-link").absolutePath();
 // The test release whose descriptor allows the other-slot measurement.
 const QString ReleaseProbe = QDir(Tests + "/../../fixtures/selftest-probe").absolutePath();
+const QString ReleaseRunning = QDir(Tests + "/../../fixtures/selftest-running").absolutePath();
 const QString ZipLink = ReleaseLink + "/factory/" + ZipName;
 
 // `omamobile-install json`, the real one, as the app starts it: through a
@@ -2692,6 +2693,59 @@ private slots:
         QCOMPARE(written.mid(0, 4), (QStringList{"set_active:b", "reboot-bootloader", "set_active:a", "reboot-bootloader"}));
         QCOMPARE(written.last(), QString("reboot"));
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void theRealToolAFirstInstallOnTheRunningSlot() {
+        // A release that installs on the slot the phone runs from (manifest
+        // format 2), and the Pixel 7 Pro from stock Android on slot A: no
+        // question about slot B, no measurement, and no set_active; the
+        // confirmation says that Android is replaced and the way back
+        RealTool tool("running-a");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(ReleaseRunning);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(goTo(backend, "confirm", ReleaseRunning + "/factory/" + ZipName));
+        w.settle();
+        const QStringList plan = backend.screen().value("plan").toStringList();
+        QVERIFY2(plan.value(0).startsWith("boot_a: "), qPrintable(plan.join("\n")));
+        QVERIFY(!plan.join("\n").contains("set_active"));
+        const QString footer = backend.screen().value("footer").toStringList().join("\n");
+        QVERIFY2(footer.contains("Android on this phone is replaced"), qPrintable(footer));
+        QVERIFY2(footer.contains("The way back to Android is Google's factory image"), qPrintable(footer));
+        QVERIFY(backend.confirmInstall("cheetah"));
+        QVERIFY(at(backend, "installed"));
+        backend.shutdown();
+        int partitions = 0;
+        const QStringList written = tool.notReads(&partitions);
+        QCOMPARE(partitions, 6);
+        for (const QString &c : written) {
+            QVERIFY2(!c.startsWith("set_active") && !c.startsWith("reboot-bootloader"), qPrintable(c));
+            QVERIFY2(!c.endsWith("_b"), qPrintable(c));
+        }
+        QVERIFY(written.contains("flash:boot_a"));
+        QCOMPARE(written.value(1), QString("flash:boot_a"));
+        QCOMPARE(written.last(), QString("reboot"));
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join("\n")));
+    }
+
+    void theRealToolStopsAPhoneOnSlotBForARunningSlotReleaseWithoutTheQuestion() {
+        RealTool tool("running-b");
+        REAL_TOOL(tool);
+        Backend backend;
+        backend.setReleaseDirectory(ReleaseRunning);
+        backend.setWrite(true);
+        Window w(&backend);
+        QVERIFY(w.window);
+        backend.start();
+        QVERIFY(goTo(backend, "stopped", ReleaseRunning + "/factory/" + ZipName));
+        QCOMPARE(backend.screen().value("stop").toString(), QString("current-slot-not-accepted"));
+        QVERIFY(w.texts("choiceButton").isEmpty());
+        backend.shutdown();
+        QVERIFY(tool.notReads().isEmpty());
     }
 
     // ---- The screens of a pretend install, as pictures ------------------------

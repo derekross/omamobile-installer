@@ -806,6 +806,14 @@ impl Installer {
     }
 }
 
+/// [`answers`], from a computer that says it wrote `slot` (a release on
+/// the running slot).
+pub fn answers_on(slot: Option<&str>) -> omamobile_link::answers::ValidAnswers {
+    let mut a = answers().get().clone();
+    a.slot = slot.map(str::to_string);
+    a.validate().expect("the test's answers are valid")
+}
+
 /// The owner's answers, as the crate's tests have them.
 pub fn answers() -> omamobile_link::answers::ValidAnswers {
     omamobile_link::answers::Answers {
@@ -820,6 +828,7 @@ pub fn answers() -> omamobile_link::answers::ValidAnswers {
         ssh_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA owner@computer".into()],
         full_name: Some("An Owner".into()),
         email: Some("owner@example.org".into()),
+        slot: None,
     }
     .validate()
     .expect("the test's answers are valid")

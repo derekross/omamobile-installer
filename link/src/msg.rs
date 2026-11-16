@@ -637,6 +637,7 @@ impl HostFrame {
                 };
                 opt("full_name", &a.full_name);
                 opt("email", &a.email);
+                opt("slot", &a.slot);
             }
             HostMsg::BackupRead { name, offset } => {
                 w.str("name", name).num("offset", *offset);
@@ -730,6 +731,7 @@ impl HostFrame {
                 a.ssh_keys = rd.strings("ssh_keys", MAX_MESSAGE, MAX_MESSAGE, any)?;
                 a.full_name = rd.opt_str("full_name", MAX_MESSAGE, any)?;
                 a.email = rd.opt_str("email", MAX_MESSAGE, any)?;
+                a.slot = rd.opt_str("slot", 1, |s| s == "a" || s == "b")?;
                 HostMsg::Answers(a)
             }
             "firstboot-retry" => HostMsg::FirstbootRetry,

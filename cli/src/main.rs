@@ -220,18 +220,41 @@ fn cmd_verify(dir: &Path) -> Res<()> {
             dir.display()
         ),
     }
+    let running = m.on_running_slot();
+    let slots = m
+        .accepted_slots()
+        .iter()
+        .map(|s| s.name())
+        .collect::<Vec<_>>()
+        .join(" or ");
+    if running {
+        println!("  installs on the slot the phone runs from (manifest format 2), when that is slot {slots}; no slot is made active");
+    }
     for w in &m.boot_writes {
+        let partition = if running {
+            format!("{}_<the slot the phone runs from>", w.image)
+        } else {
+            w.partition(omamobile_installer_core::manifest::Slot::B)
+                .name()
+                .to_string()
+        };
         println!(
-            "  would flash {} from {} ({} bytes)",
-            w.partition.name(),
-            w.source,
-            w.size
+            "  would flash {partition} from {} ({} bytes)",
+            w.source, w.size
         );
     }
     println!(
         "  would flash {} from {} (erases userdata)",
         m.root_image.partition.name(),
         m.root_image.name
+    );
+    println!(
+        "  then {}",
+        if running {
+            "reboot"
+        } else {
+            "set_active b and reboot"
+        }
     );
     if m.root_image.placeholders.is_empty() {
         println!("  the root image keeps no place for the owner's answers: this installer does not install it");

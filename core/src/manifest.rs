@@ -1,18 +1,35 @@
 // SPDX-License-Identifier: MIT
-//! `manifest.json`, format 1 (docs/RELEASES.md §6): the release and its
+//! `manifest.json`, format 1 or 2 (docs/RELEASES.md §6): the release and its
 //! install plan as data. The rules here are the ones `tools/install-phone`
 //! applies: a manifest can confirm what is written, never widen it.
 //!
+//! - **Format 1** writes slot B: `<image>_b` for each boot image, then
+//!   `userdata`, then `set-active b` and `reboot`, with both bootloader
+//!   slots required to match.
+//! - **Format 2** ("install on the running slot", Omarchy Mobile's
+//!   ACTIVE-SLOT-PLAN): the writes name images, not partitions; the slot is
+//!   the phone's `current-slot`, read at run time and only when it is one of
+//!   `install.accept_current_slots`; then `userdata` and `reboot`, with no
+//!   `set-active`. `require_matching_bootloader_slots` is an error there.
+//!
+//! Any other format is refused, so an installer from before format 2 refuses
+//! a format-2 release, and this one refuses a format 3.
+//!
 //! The partitions an install may write are fixed in this file
-//! ([`SLOT_B_IMAGES`] with `_b`, and `userdata`). A manifest naming anything
-//! else is refused when it is parsed, and [`Partition`] can't be built any
-//! other way, so the fastboot layer has no name to send for another one.
+//! ([`SLOT_B_IMAGES`] with a slot's suffix, and `userdata`). A manifest
+//! naming anything else is refused when it is parsed, and [`Partition`]
+//! can't be built any other way, so the fastboot layer has no name to send
+//! for another one. A boot image's partition is made only for a [`Slot`]
+//! ([`BootWrite::partition`]): `_b` for format 1, the phone's current slot
+//! for format 2.
 use crate::device_conf::DeviceConf;
 use crate::hash::is_sha256_hex;
 use crate::{Error, Result};
 use serde::Deserialize;
 
-/// The boot images a descriptor may name (docs/RELEASES.md §3.3).
+/// The boot images a descriptor may name (docs/RELEASES.md §3.3). (The
+/// name is from format 1; format 2 writes the same images to the running
+/// slot.)
 pub const SLOT_B_IMAGES: [&str; 5] = [
     "boot",
     "init_boot",
@@ -22,7 +39,17 @@ pub const SLOT_B_IMAGES: [&str; 5] = [
 ];
 /// The images every device has.
 const REQUIRED_IMAGES: [&str; 3] = ["boot", "vendor_boot", "dtbo"];
+/// Format 1: slot B, then `set-active b`.
 pub const FORMAT: u64 = 1;
+/// Format 2: the slot the phone runs from, and no `set-active`.
+pub const FORMAT_RUNNING_SLOT: u64 = 2;
+/// The storage guard's marker in a format-2 release's initramfs: the init
+/// maps the guard's list to the running slot (Omarchy Mobile's
+/// `bin/omamobile initramfs`). A format-2 release whose initramfs lacks it
+/// is refused before anything is written ([`crate::ramdisk_key::guard_marker`]).
+pub const GUARD_MARKER: &str = "/etc/omamobile-ufs-rw-slot";
+/// What [`GUARD_MARKER`] holds.
+pub const GUARD_MARKER_VALUE: &str = "running";
 /// The files a release's root image keeps a place for, for the owner's
 /// answers (Omarchy Mobile's `rootfs/placeholders`, RELEASES §6.1): the
 /// first-boot answers and the boot hook's switch. Each is one block.
@@ -34,15 +61,69 @@ pub const PLACEHOLDER_PATHS: [&str; 2] = [
 /// boundary, so it is one whole block of the sparse images too.
 pub const PLACEHOLDER_LEN: u64 = 4096;
 
+/// One of a phone's two slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Slot {
+    A,
+    B,
+}
+
+impl Slot {
+    /// `a` or `b`, as fastboot's `current-slot` says it (a leading `_`
+    /// taken off by the caller). Nothing else is a slot.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "a" => Some(Slot::A),
+            "b" => Some(Slot::B),
+            _ => None,
+        }
+    }
+    pub fn letter(self) -> char {
+        match self {
+            Slot::A => 'a',
+            Slot::B => 'b',
+        }
+    }
+    /// `a` or `b`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Slot::A => "a",
+            Slot::B => "b",
+        }
+    }
+    pub fn other(self) -> Self {
+        match self {
+            Slot::A => Slot::B,
+            Slot::B => Slot::A,
+        }
+    }
+}
+
+impl core::fmt::Display for Slot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Which slot an install writes, and how it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotPlan {
+    /// Format 1: slot B's boot images, then `set_active:b` and `reboot`.
+    SlotB,
+    /// Format 2: the boot images of the slot the phone runs from, when it
+    /// is one of these, then `reboot`; no slot is made active.
+    Running { accept: Vec<Slot> },
+}
+
 /// A partition this installer may write. Only this module makes one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Partition(String);
 
 impl Partition {
-    fn slot_b(image: &str) -> Option<Self> {
+    fn boot(image: &str, slot: Slot) -> Option<Self> {
         SLOT_B_IMAGES
             .contains(&image)
-            .then(|| Partition(format!("{image}_b")))
+            .then(|| Partition(format!("{image}_{slot}")))
     }
     fn userdata() -> Self {
         Partition("userdata".into())
@@ -115,8 +196,21 @@ struct RawPlaceholder {
 struct RawInstall {
     product: String,
     require_unlocked_bootloader: bool,
-    require_matching_bootloader_slots: bool,
-    storage_guard_allowlist: Vec<String>,
+    /// Format 1: must be true. Format 2: must be absent.
+    #[serde(default)]
+    require_matching_bootloader_slots: Option<bool>,
+    /// Format 1 only.
+    #[serde(default)]
+    storage_guard_allowlist: Option<Vec<String>>,
+    /// Format 2 only: `"active"`.
+    #[serde(default)]
+    slot: Option<String>,
+    /// Format 2 only: the current slots an install accepts.
+    #[serde(default)]
+    accept_current_slots: Option<Vec<String>>,
+    /// Format 2 only.
+    #[serde(default)]
+    storage_guard: Option<RawStorageGuard>,
     after: Vec<String>,
     writes: Vec<RawWrite>,
     #[serde(default)]
@@ -129,10 +223,24 @@ struct RawInstall {
     #[allow(dead_code)] // documentation for people; the rules are in code
     never: Vec<String>,
 }
+/// Format 2's storage guard: what the release's initramfs leaves writable.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStorageGuard {
+    slot: String,
+    images: Vec<String>,
+    also: Vec<String>,
+    marker: String,
+}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWrite {
-    partition: String,
+    /// Format 1's boot images, and `userdata` in both formats.
+    #[serde(default)]
+    partition: Option<String>,
+    /// Format 2's boot images: the image, written to the running slot.
+    #[serde(default)]
+    image: Option<String>,
     source: String,
     #[serde(default)]
     size: Option<u64>,
@@ -155,11 +263,13 @@ pub struct FileEntry {
     pub sha256: String,
 }
 
-/// One slot B boot image write.
+/// One boot image write. Its partition is `<image>_<slot>`, made for the
+/// slot the install writes ([`Self::partition`]): `b` for format 1, the
+/// phone's current slot for format 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootWrite {
+    /// One of [`SLOT_B_IMAGES`].
     pub image: String,
-    pub partition: Partition,
     /// Path inside the bundle, `images/<image>.img`.
     pub source: String,
     pub size: u64,
@@ -199,9 +309,20 @@ impl RootImage {
     }
 }
 
+impl BootWrite {
+    /// The partition this image is written to on `slot`.
+    pub fn partition(&self, slot: Slot) -> Partition {
+        Partition::boot(&self.image, slot).expect("a BootWrite's image is one of SLOT_B_IMAGES")
+    }
+}
+
 /// A manifest that passed every rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
+    /// [`FORMAT`] or [`FORMAT_RUNNING_SLOT`].
+    pub format: u64,
+    /// Which slot an install writes, and how it ends.
+    pub slot_plan: SlotPlan,
     pub version: String,
     pub label: String,
     pub codename: String,
@@ -209,6 +330,10 @@ pub struct Manifest {
     pub kernel_release: String,
     pub base_url: Option<String>,
     pub files: Vec<FileEntry>,
+    /// What the storage guard leaves writable, in its slot form (`<image>_b`
+    /// and `userdata`, as the descriptor's `UFS_RW` writes it in both
+    /// formats): format 1's `storage_guard_allowlist`, or format 2's
+    /// `storage_guard` images with `_b` and its `also`.
     pub allowlist: Vec<String>,
     pub boot_writes: Vec<BootWrite>,
     pub root_image: RootImage,
@@ -267,12 +392,13 @@ impl Manifest {
     pub fn parse(json: &[u8]) -> Result<Self> {
         let raw: Raw = serde_json::from_slice(json)
             .map_err(|e| Error::Manifest(format!("not a release manifest ({e})")))?;
-        if raw.format != FORMAT {
+        if raw.format != FORMAT && raw.format != FORMAT_RUNNING_SLOT {
             return err(format!(
-                "format {}; this installer reads format {FORMAT}",
+                "format {}; this installer reads formats {FORMAT} and {FORMAT_RUNNING_SLOT}",
                 raw.format
             ));
         }
+        let running = raw.format == FORMAT_RUNNING_SLOT;
         if !is_name(&raw.version) {
             return err("version is not valid");
         }
@@ -298,18 +424,67 @@ impl Manifest {
         if !i.require_unlocked_bootloader {
             return err("must require an unlocked bootloader");
         }
-        if !i.require_matching_bootloader_slots {
-            return err("must require both bootloader slots to match");
-        }
         if i.tool.as_deref().is_some_and(|t| t != "fastboot") {
             return err("install.tool must be fastboot");
         }
-        if i.after != ["set-active b", "reboot"] {
-            return err(format!(
-                "must end with set-active b and reboot, nothing else (has: {})",
-                i.after.join(",")
-            ));
-        }
+        let slot_plan = if running {
+            // Format 2: the slot the phone runs from. No slot is switched,
+            // so no bootloader-slot rule belongs here, and one that is
+            // stated could be a rule this format would ignore
+            if i.require_matching_bootloader_slots.is_some() {
+                return err(
+                    "format 2 has no require_matching_bootloader_slots: it switches no slot",
+                );
+            }
+            if i.storage_guard_allowlist.is_some() {
+                return err("format 2 states its storage guard as storage_guard, not storage_guard_allowlist");
+            }
+            if i.bootloader_slot_probe.is_some() {
+                return err("format 2 has no bootloader_slot_probe: it switches no slot");
+            }
+            if i.slot.as_deref() != Some("active") {
+                return err("format 2 must say install.slot \"active\"");
+            }
+            let Some(accept) = &i.accept_current_slots else {
+                return err("format 2 must list install.accept_current_slots");
+            };
+            let mut slots: Vec<Slot> = Vec::with_capacity(accept.len());
+            for s in accept {
+                let Some(slot) = Slot::parse(s) else {
+                    return err(format!(
+                        "accept_current_slots holds {s}, which is not a slot (a or b)"
+                    ));
+                };
+                if slots.contains(&slot) {
+                    return err(format!("accept_current_slots names {s} twice"));
+                }
+                slots.push(slot);
+            }
+            if slots.is_empty() {
+                return err("accept_current_slots is empty: no phone could be installed");
+            }
+            if i.after != ["reboot"] {
+                return err(format!(
+                    "format 2 must end with reboot, nothing else (has: {})",
+                    i.after.join(",")
+                ));
+            }
+            SlotPlan::Running { accept: slots }
+        } else {
+            if i.require_matching_bootloader_slots != Some(true) {
+                return err("must require both bootloader slots to match");
+            }
+            if i.slot.is_some() || i.accept_current_slots.is_some() || i.storage_guard.is_some() {
+                return err("install.slot, accept_current_slots and storage_guard are format 2's");
+            }
+            if i.after != ["set-active b", "reboot"] {
+                return err(format!(
+                    "must end with set-active b and reboot, nothing else (has: {})",
+                    i.after.join(",")
+                ));
+            }
+            SlotPlan::SlotB
+        };
 
         // Files: plain relative paths, each once.
         let mut files = Vec::with_capacity(raw.files.len());
@@ -331,7 +506,43 @@ impl Manifest {
         }
 
         // The allowlist: only slot B's boot images and userdata, each once.
-        let allow = i.storage_guard_allowlist;
+        // Format 2 states it as images, which the guard maps to the running
+        // slot; here it is put in the slot form the descriptor's UFS_RW
+        // keeps (`<image>_b`), so that both formats are compared alike
+        let allow: Vec<String> = match (running, i.storage_guard_allowlist, i.storage_guard) {
+            (false, Some(list), None) => list,
+            (true, None, Some(g)) => {
+                if g.slot != "running" {
+                    return err(format!("storage_guard.slot is {}, not running", g.slot));
+                }
+                if g.marker != GUARD_MARKER {
+                    return err(format!(
+                        "storage_guard.marker is {}, not {GUARD_MARKER}",
+                        g.marker
+                    ));
+                }
+                if g.also != ["userdata"] {
+                    return err(format!(
+                        "storage_guard.also may hold userdata only, not {}",
+                        g.also.join(",")
+                    ));
+                }
+                for img in &g.images {
+                    if !SLOT_B_IMAGES.contains(&img.as_str()) {
+                        return err(format!(
+                            "storage_guard.images names {img}, which is not a boot image"
+                        ));
+                    }
+                }
+                g.images
+                    .iter()
+                    .map(|img| format!("{img}_b"))
+                    .chain(g.also.iter().cloned())
+                    .collect()
+            }
+            (false, _, _) => return err("no storage_guard_allowlist"),
+            (true, _, _) => return err("no storage_guard"),
+        };
         for (n, p) in allow.iter().enumerate() {
             let known = p == "userdata"
                 || p.strip_suffix("_b")
@@ -355,36 +566,54 @@ impl Manifest {
         };
         let mut boot_writes: Vec<BootWrite> = Vec::with_capacity(boots.len());
         for w in boots {
-            let image = w.partition.strip_suffix("_b").unwrap_or("");
-            let Some(partition) = Partition::slot_b(image) else {
-                return err(format!(
-                    "refusing a write to {}: not a slot B boot image",
-                    w.partition
-                ));
+            // Format 1 names slot B's partition; format 2 the image, whose
+            // slot is the phone's, read at run time. Never both
+            let image = match (running, &w.partition, &w.image) {
+                (false, Some(p), None) => {
+                    let image = p.strip_suffix("_b").unwrap_or("");
+                    if !SLOT_B_IMAGES.contains(&image) {
+                        return err(format!("refusing a write to {p}: not a slot B boot image"));
+                    }
+                    image.to_string()
+                }
+                (true, None, Some(img)) => {
+                    if !SLOT_B_IMAGES.contains(&img.as_str()) {
+                        return err(format!("refusing a write of image {img}: not a boot image"));
+                    }
+                    img.clone()
+                }
+                (false, _, _) => {
+                    return err("a format-1 boot image write names its partition (<image>_b), and no image")
+                }
+                (true, _, _) => {
+                    return err("a format-2 boot image write names its image, and no partition: the slot is the phone's")
+                }
             };
+            let image = image.as_str();
+            let shown = format!("{image}_b");
+            let named = if running { image } else { shown.as_str() };
             if w.source != format!("images/{image}.img") {
                 return err(format!(
-                    "{} must be written from images/{image}.img, not {}",
-                    w.partition, w.source
+                    "{named} must be written from images/{image}.img, not {}",
+                    w.source
                 ));
             }
             if w.erases_userdata {
-                return err(format!("{} can't erase userdata", w.partition));
+                return err(format!("{named} can't erase userdata"));
             }
-            if !allow.contains(&w.partition) {
-                return err(format!("{} is not on the allowlist", w.partition));
+            if !allow.contains(&shown) {
+                return err(format!("{named} is not on the allowlist"));
             }
             if boot_writes.iter().any(|b| b.image == image) {
-                return err(format!("{} is written twice", w.partition));
+                return err(format!("{named} is written twice"));
             }
             let Some(size) = w.size.filter(|s| *s > 0) else {
-                return err(format!("{}: no size", w.partition));
+                return err(format!("{named}: no size"));
             };
             if w.partition_size.is_some_and(|p| p != size) {
                 // An AVB footer image is padded to the partition (RELEASES §3)
                 return err(format!(
-                    "{}: a footer image must be exactly its partition's size",
-                    w.partition
+                    "{named}: a footer image must be exactly its partition's size"
                 ));
             }
             let Some(file) = files.iter().find(|f| f.path == w.source) else {
@@ -395,7 +624,6 @@ impl Manifest {
             }
             boot_writes.push(BootWrite {
                 image: image.to_string(),
-                partition,
                 source: w.source.clone(),
                 size,
                 sha256: file.sha256.clone(),
@@ -409,11 +637,15 @@ impl Manifest {
         }
         // Every *_b name on the allowlist is written, so the two lists agree
         for p in allow.iter().filter(|p| *p != "userdata") {
-            if !boot_writes.iter().any(|b| b.partition.name() == p) {
+            if !boot_writes.iter().any(|b| format!("{}_b", b.image) == *p) {
                 return err(format!("{p} is on the allowlist but not written"));
             }
         }
-        if last.partition != "userdata" || last.source != "root_image" || !last.erases_userdata {
+        if last.partition.as_deref() != Some("userdata")
+            || last.image.is_some()
+            || last.source != "root_image"
+            || !last.erases_userdata
+        {
             return err(
                 "the last write must be userdata from the root image, marked as erasing userdata",
             );
@@ -491,6 +723,8 @@ impl Manifest {
         };
 
         Ok(Manifest {
+            format: raw.format,
+            slot_plan,
             version: raw.version,
             label: raw.label,
             codename,
@@ -542,6 +776,31 @@ impl Manifest {
             }
             _ => {}
         }
+        // Which slot an install writes: the descriptor decides, and the
+        // signed plan must say the same (Omarchy Mobile's INSTALL_SLOT and
+        // INSTALL_ACTIVE_SLOTS)
+        match (conf.install_slot()?, &self.slot_plan) {
+            (None, SlotPlan::SlotB) => {}
+            (Some(accept), SlotPlan::Running { accept: plan }) => {
+                let mut a = accept.clone();
+                let mut b = plan.clone();
+                a.sort_by_key(|s| s.letter());
+                b.sort_by_key(|s| s.letter());
+                if a != b {
+                    return bad(format!(
+                        "INSTALL_ACTIVE_SLOTS ({}) is not manifest.json's accept_current_slots ({})",
+                        accept.iter().map(|s| s.name()).collect::<Vec<_>>().join(" "),
+                        plan.iter().map(|s| s.name()).collect::<Vec<_>>().join(" ")
+                    ));
+                }
+            }
+            (None, SlotPlan::Running { .. }) => {
+                return bad("manifest.json is format 2 (the running slot), but the descriptor's INSTALL_SLOT is b or unset".into())
+            }
+            (Some(_), SlotPlan::SlotB) => {
+                return bad("the descriptor says INSTALL_SLOT=active, but manifest.json is format 1 (slot B)".into())
+            }
+        }
         // The slot probe changes what an install sends to the phone, so the
         // signed plan and the descriptor may not disagree about it.
         let probe = conf.bootloader_slot_probe()?;
@@ -587,10 +846,46 @@ impl Manifest {
             if footer != w.partition_size {
                 return bad(format!(
                     "AVB_FOOTERS and manifest.json disagree on {}'s partition size",
-                    w.partition.name()
+                    w.image
                 ));
             }
         }
         Ok(())
+    }
+
+    /// Whether an install of this release writes the slot the phone runs
+    /// from (format 2), rather than slot B (format 1).
+    pub fn on_running_slot(&self) -> bool {
+        matches!(self.slot_plan, SlotPlan::Running { .. })
+    }
+
+    /// The slot an install writes on a phone whose `current-slot` is
+    /// `current`: slot B for format 1, whatever the phone runs from (the
+    /// flow's own rules decide whether that phone may be written); for
+    /// format 2, the current slot when it is accepted, and `None` when it
+    /// is not.
+    pub fn target_slot(&self, current: Slot) -> Option<Slot> {
+        match &self.slot_plan {
+            SlotPlan::SlotB => Some(Slot::B),
+            SlotPlan::Running { accept } => accept.contains(&current).then_some(current),
+        }
+    }
+
+    /// Where among the boot writes is the image that carries the vendor
+    /// ramdisk, the initramfs (`vendor_kernel_boot`, or `vendor_boot` on a
+    /// phone without one): where the owner's SSH key goes, and where a
+    /// format-2 release's storage guard marker must be.
+    pub fn ramdisk_write(&self) -> Option<usize> {
+        ["vendor_kernel_boot", "vendor_boot"]
+            .iter()
+            .find_map(|name| self.boot_writes.iter().position(|w| w.image == *name))
+    }
+
+    /// Format 2's accepted current slots; empty for format 1.
+    pub fn accepted_slots(&self) -> &[Slot] {
+        match &self.slot_plan {
+            SlotPlan::SlotB => &[],
+            SlotPlan::Running { accept } => accept,
+        }
     }
 }

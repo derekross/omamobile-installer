@@ -21,6 +21,11 @@
 //! - `/etc/omamobile/boot-update.conf` (mode 0644): `AUTO_WRITE=` with the
 //!   descriptor's `BOOT_UPDATE_AUTO_WRITE` (default yes), as install-phone
 //!   writes it: the phone's kernel updates then reach slot B by themselves.
+//!   For a release that installs on the running slot (manifest format 2),
+//!   also `SLOT=` with the slot that was written, so that
+//!   `omamobile-boot-update` writes `<image>_<SLOT>` and only while the phone
+//!   runs from it; a format-1 release writes no `SLOT=` line (absent means
+//!   `b`, and a hook from before format 2 refuses the line).
 //! - `/root/.ssh/authorized_keys` (mode 0600, in a directory of mode 0700),
 //!   when the owner gave an SSH public key: [`files`] makes it, as
 //!   install-phone writes it, but the image keeps no place for it. The key
@@ -395,6 +400,9 @@ pub struct RootAnswers {
     summary: AnswersSummary,
     auto_write: Option<bool>,
     ssh_key: bool,
+    /// The `SLOT=` written to `boot-update.conf`: a format-2 release's
+    /// target slot. `None` for format 1.
+    slot: Option<crate::manifest::Slot>,
 }
 
 impl core::fmt::Debug for RootAnswers {
@@ -422,6 +430,11 @@ impl RootAnswers {
     /// image keeps no place for that file.
     pub fn auto_write(&self) -> Option<bool> {
         self.auto_write
+    }
+    /// The slot `boot-update.conf` names (`SLOT=`), for a release on the
+    /// running slot; `None` for format 1, which writes no such line.
+    pub fn slot(&self) -> Option<crate::manifest::Slot> {
+        self.slot
     }
     /// `firstboot.conf` carries this computer's SSH public key.
     pub fn has_ssh_key(&self) -> bool {
@@ -452,6 +465,34 @@ pub fn root_answers(
     ssh_key: Option<&str>,
     salt: &str,
 ) -> Result<RootAnswers> {
+    root_answers_on(release, answers, ssh_key, salt, None)
+}
+
+/// [`root_answers`], with the slot the install writes: for a release that
+/// installs on the running slot (format 2) it must be given, and
+/// `boot-update.conf` gets `SLOT=` with it; for a format-1 release it must
+/// not be, and no `SLOT=` line is written.
+pub fn root_answers_on(
+    release: &VerifiedRelease,
+    answers: &OwnerAnswers,
+    ssh_key: Option<&str>,
+    salt: &str,
+    slot: Option<crate::manifest::Slot>,
+) -> Result<RootAnswers> {
+    match (release.manifest().on_running_slot(), slot) {
+        (true, None) => {
+            return Err(Error::Refused(
+                "the answers for a release on the running slot name the slot it is written to"
+                    .into(),
+            ))
+        }
+        (false, Some(_)) => {
+            return Err(Error::Refused(
+                "a release that installs on slot B names no slot in its answers".into(),
+            ))
+        }
+        _ => {}
+    }
     if let Some(key) = ssh_key {
         check_ssh_key(key)?;
     }
@@ -480,8 +521,11 @@ pub fn root_answers(
     let mut auto_write = None;
     if let Some(bu) = root.placeholder(BOOT_UPDATE_CONF) {
         let yes = release.rules().boot_update_auto_write;
+        // SLOT= on its own line before AUTO_WRITE=, which stays the last
+        // line of the text (the install link's check reads it there)
         let text = format!(
-            "# Written by the Omarchy Mobile installer: a release install takes kernel updates through\n# omamobile-boot-update's pacman hook (docs/RELEASES.md §5.3). AUTO_WRITE=no stops it.\nAUTO_WRITE={}\n",
+            "# Written by the Omarchy Mobile installer: a release install takes kernel updates through\n# omamobile-boot-update's pacman hook (docs/RELEASES.md §5.3). AUTO_WRITE=no stops it.\n{}AUTO_WRITE={}\n",
+            slot.map(|s| format!("SLOT={s}\n")).unwrap_or_default(),
             if yes { "yes" } else { "no" }
         );
         regions.push(Region {
@@ -509,6 +553,7 @@ pub fn root_answers(
         summary: answers.summary(),
         auto_write,
         ssh_key: ssh_key.is_some(),
+        slot,
     })
 }
 

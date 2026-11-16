@@ -36,6 +36,30 @@ pub fn serial(root: &Root) -> Option<Vec<u8>> {
     })
 }
 
+/// The slot this boot runs from, `a` or `b`: `androidboot.slot_suffix`
+/// from `/proc/bootconfig`, else from `/proc/cmdline`, as the storage guard
+/// reads it. `None` when neither says `_a` or `_b`.
+pub fn running_slot(root: &Root) -> Option<&'static str> {
+    let pick = |v: &str| match v.trim().trim_matches('"') {
+        "_a" => Some("a"),
+        "_b" => Some("b"),
+        _ => None,
+    };
+    if let Ok(text) = fs::read_to_string(root.at("/proc/bootconfig")) {
+        for l in text.lines() {
+            if let Some((k, v)) = l.split_once('=') {
+                if k.trim() == "androidboot.slot_suffix" {
+                    return pick(v);
+                }
+            }
+        }
+    }
+    let text = fs::read_to_string(root.at("/proc/cmdline")).ok()?;
+    text.split_whitespace()
+        .find_map(|w| w.strip_prefix("androidboot.slot_suffix="))
+        .and_then(pick)
+}
+
 /// The accounts a person can have: a uid of 1000 or more (65534 is nobody).
 fn accounts(root: &Root) -> Vec<(String, u32)> {
     let text = fs::read_to_string(root.passwd()).unwrap_or_default();

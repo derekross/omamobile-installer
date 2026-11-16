@@ -54,18 +54,30 @@ pub struct TestBundle {
 /// `init`), a device tree section of noise that makes it `size` bytes, and
 /// the ramdisk table.
 pub fn vendor_kernel_boot(size: usize) -> Vec<u8> {
+    vendor_kernel_boot_with(size, &[])
+}
+
+/// The storage guard's marker as Omarchy Mobile's `bin/omamobile
+/// initramfs` packs it for a release on the running slot, a path in the
+/// archive and its bytes.
+pub const GUARD_MARKER: (&str, &[u8]) = ("./etc/omamobile-ufs-rw-slot", b"running\n");
+
+/// [`vendor_kernel_boot`], with these files in its initramfs after `init`.
+pub fn vendor_kernel_boot_with(size: usize, files: &[(&str, &[u8])]) -> Vec<u8> {
     const PAGE: usize = 4096;
     let put = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
     let mut archive = Vec::new();
-    for (ino, mode, name, data) in [
-        (
-            1u32,
-            0o100755u32,
-            "init",
-            &b"#!/bin/sh\nexec /sbin/init\n"[..],
-        ),
-        (0, 0, "TRAILER!!!", &b""[..]),
-    ] {
+    let mut entries: Vec<(u32, u32, &str, &[u8])> = vec![(
+        1u32,
+        0o100755u32,
+        "init",
+        &b"#!/bin/sh\nexec /sbin/init\n"[..],
+    )];
+    for (n, (name, data)) in files.iter().enumerate() {
+        entries.push((2 + n as u32, 0o100644, name, data));
+    }
+    entries.push((0, 0, "TRAILER!!!", &b""[..]));
+    for (ino, mode, name, data) in entries {
         let fields = [
             ino,
             mode,
@@ -91,9 +103,14 @@ pub fn vendor_kernel_boot(size: usize) -> Vec<u8> {
         archive.extend_from_slice(data);
         archive.resize(archive.len().div_ceil(4) * 4, 0);
     }
-    // Literals only, in one block (the format's own rule for a short run)
-    let mut block = vec![0xF0, (archive.len() - 15) as u8];
-    assert!(archive.len() - 15 < 255);
+    // Literals only, in one block (the format's own rule for a run of them)
+    let mut block = vec![0xF0];
+    let mut rest = archive.len() - 15;
+    while rest >= 255 {
+        block.push(255);
+        rest -= 255;
+    }
+    block.push(rest as u8);
     block.extend_from_slice(&archive);
     let mut ramdisk = 0x184C_2102u32.to_le_bytes().to_vec();
     ramdisk.extend_from_slice(&(block.len() as u32).to_le_bytes());
@@ -333,6 +350,122 @@ impl TestBundle {
         Self::build_with("cheetah", None, |_| {}, |c| c, |_| {}, extra)
     }
 
+    /// A release that installs on the running slot (manifest format 2),
+    /// on a phone whose current slot is one of `accept`: the descriptor
+    /// says `INSTALL_SLOT=active` and `INSTALL_ACTIVE_SLOTS`, and the
+    /// initramfs carries the storage guard's marker.
+    pub fn running(accept: &[&str]) -> Self {
+        Self::running_with(accept, |_| {}, |c| c)
+    }
+
+    /// [`Self::running`], with the manifest and the descriptor changed
+    /// before they are signed.
+    pub fn running_with(
+        accept: &[&str],
+        edit: impl FnOnce(&mut Value),
+        conf: impl FnOnce(String) -> String,
+    ) -> Self {
+        let list = accept.join(" ");
+        Self::build_running(
+            Some(accept.iter().map(|s| s.to_string()).collect()),
+            true,
+            edit,
+            move |c| {
+                conf(format!(
+                    "{c}INSTALL_SLOT=active\nINSTALL_ACTIVE_SLOTS=\"{list}\"\n"
+                ))
+            },
+        )
+    }
+
+    /// A format-2 release whose initramfs lacks the storage guard's
+    /// marker, as one built by a `bin/omamobile` from before it.
+    pub fn running_without_marker(accept: &[&str]) -> Self {
+        let list = accept.join(" ");
+        Self::build_running(
+            Some(accept.iter().map(|s| s.to_string()).collect()),
+            false,
+            |_| {},
+            move |c| format!("{c}INSTALL_SLOT=active\nINSTALL_ACTIVE_SLOTS=\"{list}\"\n"),
+        )
+    }
+
+    /// [`Self::running`], also shipping these files (as [`Self::with_files`]).
+    pub fn running_with_files(accept: &[&str], extra: Vec<(String, Vec<u8>)>) -> Self {
+        let list = accept.join(" ");
+        Self::build_running_with(
+            Some(accept.iter().map(|s| s.to_string()).collect()),
+            true,
+            |_| {},
+            move |c| format!("{c}INSTALL_SLOT=active\nINSTALL_ACTIVE_SLOTS=\"{list}\"\n"),
+            extra,
+        )
+    }
+
+    fn build_running(
+        accept: Option<Vec<String>>,
+        marker: bool,
+        edit: impl FnOnce(&mut Value),
+        conf: impl FnOnce(String) -> String,
+    ) -> Self {
+        Self::build_running_with(accept, marker, edit, conf, Vec::new())
+    }
+
+    fn build_running_with(
+        accept: Option<Vec<String>>,
+        marker: bool,
+        edit: impl FnOnce(&mut Value),
+        conf: impl FnOnce(String) -> String,
+        extra: Vec<(String, Vec<u8>)>,
+    ) -> Self {
+        let accept = accept.unwrap_or_default();
+        Self::build_with_slot(
+            "cheetah",
+            None,
+            move |m| {
+                let install = &mut m["install"];
+                let writes: Vec<Value> = IMAGES.iter().map(|(name, size, psize)| json!({"image": name, "partition_size": psize, "size": size, "source": format!("images/{name}.img")})).collect();
+                let mut writes = writes;
+                writes.push(json!({"erases_userdata": true, "partition": "userdata", "source": "root_image"}));
+                let obj = install.as_object_mut().unwrap();
+                obj.remove("require_matching_bootloader_slots");
+                obj.remove("storage_guard_allowlist");
+                obj.insert("slot".into(), json!("active"));
+                obj.insert("accept_current_slots".into(), json!(accept));
+                obj.insert("writes".into(), json!(writes));
+                obj.insert("after".into(), json!(["reboot"]));
+                obj.insert(
+                    "never".into(),
+                    json!([
+                        "the slot the phone does not run from (any *_<other> partition)",
+                        "an unsuffixed partition name but userdata",
+                        "bootloader",
+                        "radio",
+                        "persist",
+                        "efs",
+                        "modem",
+                        "devinfo",
+                        "vbmeta",
+                        "fastboot -w",
+                        "fastboot --slot",
+                        "fastboot --set-active",
+                        "fastboot flashing",
+                        "fastboot erase",
+                        "fastboot format",
+                        "fastboot oem"
+                    ]),
+                );
+                obj.insert("storage_guard".into(), json!({"slot": "running", "images": IMAGES.iter().map(|i| i.0).collect::<Vec<_>>(), "also": ["userdata"], "marker": "/etc/omamobile-ufs-rw-slot"}));
+                m["format"] = json!(2);
+                edit(m);
+            },
+            conf,
+            |_| {},
+            extra,
+            marker,
+        )
+    }
+
     fn build_for(
         codename: &str,
         edit: impl FnOnce(&mut Value),
@@ -350,11 +483,25 @@ impl TestBundle {
         index: impl FnOnce(&mut Value),
         extra: Vec<(String, Vec<u8>)>,
     ) -> Self {
+        Self::build_with_slot(codename, root, edit, conf, index, extra, false)
+    }
+
+    fn build_with_slot(
+        codename: &str,
+        root: Option<(Vec<u8>, Value)>,
+        edit: impl FnOnce(&mut Value),
+        conf: impl FnOnce(String) -> String,
+        index: impl FnOnce(&mut Value),
+        extra: Vec<(String, Vec<u8>)>,
+        marker: bool,
+    ) -> Self {
         let images: Vec<(String, Vec<u8>)> = IMAGES
             .iter()
             .enumerate()
             .map(|(i, (name, size, _))| {
-                let image = if *name == "vendor_kernel_boot" {
+                let image = if *name == "vendor_kernel_boot" && marker {
+                    vendor_kernel_boot_with(*size, &[GUARD_MARKER])
+                } else if *name == "vendor_kernel_boot" {
                     vendor_kernel_boot(*size)
                 } else {
                     noise(100 + i as u32, *size)
@@ -505,12 +652,22 @@ impl TestBundle {
     /// The same, from a run that hands the flow this computer's SSH key:
     /// `firstboot.conf` carries it too.
     pub fn root_as_installed_with(&self, ssh_key: Option<&str>) -> Vec<u8> {
+        self.root_as_installed_on(ssh_key, None)
+    }
+
+    /// The same for a release on the running slot, written to `slot`.
+    pub fn root_as_installed_on(
+        &self,
+        ssh_key: Option<&str>,
+        slot: Option<omamobile_installer_core::manifest::Slot>,
+    ) -> Vec<u8> {
         let release = self.verify().unwrap();
-        let answers = omamobile_installer_core::firstboot::root_answers(
+        let answers = omamobile_installer_core::firstboot::root_answers_on(
             &release,
             &super::drive::answers(),
             ssh_key,
             super::drive::SALT,
+            slot,
         )
         .unwrap();
         let mut raw = self.root_raw.clone();

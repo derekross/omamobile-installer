@@ -82,6 +82,58 @@ impl DeviceConf {
         }
     }
 
+    /// `INSTALL_SLOT` and `INSTALL_ACTIVE_SLOTS` (Omarchy Mobile's
+    /// ACTIVE-SLOT-PLAN §7, step 6): which slot a release install writes.
+    /// `None`: slot B (`INSTALL_SLOT` absent or `b`), manifest format 1.
+    /// `Some(slots)`: `INSTALL_SLOT=active`, manifest format 2, on a phone
+    /// whose current slot is one of `slots` (`INSTALL_ACTIVE_SLOTS`,
+    /// space-separated, each of `a` and `b` at most once, required).
+    /// Anything else is refused, and so is `INSTALL_ACTIVE_SLOTS` without
+    /// `INSTALL_SLOT=active`: a list that nothing reads could be a rule the
+    /// release meant and this installer would ignore.
+    pub fn install_slot(&self) -> Result<Option<Vec<crate::manifest::Slot>>> {
+        use crate::manifest::Slot;
+        let active = match self.get("INSTALL_SLOT") {
+            None | Some("b") => false,
+            Some("active") => true,
+            Some(other) => {
+                return Err(Error::DeviceConf(format!(
+                    "INSTALL_SLOT is active or b, not {other}"
+                )))
+            }
+        };
+        let listed = self.get("INSTALL_ACTIVE_SLOTS");
+        if !active {
+            return match listed {
+                None => Ok(None),
+                Some(_) => Err(Error::DeviceConf(
+                    "INSTALL_ACTIVE_SLOTS is set, but INSTALL_SLOT is not active".into(),
+                )),
+            };
+        }
+        if listed.is_none() {
+            return Err(Error::DeviceConf(
+                "INSTALL_SLOT=active needs INSTALL_ACTIVE_SLOTS".into(),
+            ));
+        }
+        let mut slots = Vec::new();
+        for s in self.list("INSTALL_ACTIVE_SLOTS") {
+            let slot = Slot::parse(s).ok_or_else(|| {
+                Error::DeviceConf(format!("INSTALL_ACTIVE_SLOTS holds {s}, not a or b"))
+            })?;
+            if slots.contains(&slot) {
+                return Err(Error::DeviceConf(format!(
+                    "INSTALL_ACTIVE_SLOTS names {s} twice"
+                )));
+            }
+            slots.push(slot);
+        }
+        if slots.is_empty() {
+            return Err(Error::DeviceConf("INSTALL_ACTIVE_SLOTS is empty".into()));
+        }
+        Ok(Some(slots))
+    }
+
     /// `BOOT_UPDATE_AUTO_WRITE`: what a release install records as
     /// `AUTO_WRITE` in `/etc/omamobile/boot-update.conf`, so the phone's
     /// kernel updates reach slot B by themselves. `yes` unless the
