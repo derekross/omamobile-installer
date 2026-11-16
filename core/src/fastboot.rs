@@ -423,6 +423,20 @@ pub async fn probe<T: Transport>(transport: &mut T) -> Result<PhoneReport> {
     })
 }
 
+/// The slot flags among `getvar:all`'s lines, for a session's log.
+fn slot_flags_line(all: &[String]) -> String {
+    let flags: Vec<&str> = all
+        .iter()
+        .filter(|l| l.starts_with("slot-") && !l.starts_with("slot-count"))
+        .map(String::as_str)
+        .collect();
+    if flags.is_empty() {
+        "the phone reports no slot flags".to_string()
+    } else {
+        flags.join(", ")
+    }
+}
+
 pub(crate) enum Reply {
     Okay(String),
     Data(u64),
@@ -894,7 +908,12 @@ impl<T: Transport> Session<T> {
                 "the phone reports no version-bootloader".into(),
             ));
         }
-        let current = Slot::parse(&current_slot).unwrap_or(Slot::A);
+        // No default slot on a write path: checked above, and again here
+        let Some(current) = Slot::parse(&current_slot) else {
+            return Err(Error::Phone(format!(
+                "the phone reports current slot '{current_slot}'"
+            )));
+        };
         let mut slot_check_skipped = false;
         let target =
             if on_running {
@@ -910,6 +929,12 @@ impl<T: Transport> Session<T> {
                 client.log.push(format!(
                     "slot: {target}, the slot the phone runs from; no slot is switched"
                 ));
+                // Both slots' flags at the first look, read only, for the
+                // record of what the writes then change (the plan's §1 step 1)
+                let all = client.getvar_all().await?;
+                client
+                    .log
+                    .push(format!("before the writes: {}", slot_flags_line(&all)));
                 target
             } else {
                 Self::slot_b_checks(
@@ -1657,19 +1682,9 @@ impl<T: Transport> Session<T> {
             Ok(all) => all,
             Err(e) => return self.fail(e),
         };
-        let flags: Vec<String> = all
-            .iter()
-            .filter(|l| l.starts_with("slot-") && !l.starts_with("slot-count"))
-            .cloned()
-            .collect();
-        self.client.log.push(format!(
-            "after the writes: {}",
-            if flags.is_empty() {
-                "the phone reports no slot flags".to_string()
-            } else {
-                flags.join(", ")
-            }
-        ));
+        self.client
+            .log
+            .push(format!("after the writes: {}", slot_flags_line(&all)));
         if self.is_dry_run() {
             self.client.log.push("would: reboot".into());
             self.state = State::Rebooted;

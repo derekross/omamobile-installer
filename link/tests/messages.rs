@@ -836,3 +836,30 @@ fn fuzz_messages_never_panic() {
         "{read_host} {read_phone}"
     );
 }
+
+#[test]
+fn the_answers_slot_is_a_or_b_and_left_out_when_none() {
+    use omamobile_link::answers::Answers;
+    let mut a = Answers {
+        username: "owner".into(),
+        password_hash: format!("$6$saltsalt${}", "a".repeat(86)),
+        ..Answers::default()
+    };
+    let frame = |a: &Answers| HostFrame {
+        id: 7,
+        msg: HostMsg::Answers(a.clone()),
+    };
+    let none = frame(&a).to_json().unwrap();
+    assert!(!none.contains("\"slot\""), "{none}");
+    for slot in ["a", "b"] {
+        a.slot = Some(slot.into());
+        let json = frame(&a).to_json().unwrap();
+        assert!(json.contains(&format!("\"slot\":\"{slot}\"")), "{json}");
+        let back = host(&json).unwrap();
+        assert!(matches!(back.msg, HostMsg::Answers(ref b) if b.slot.as_deref() == Some(slot)));
+    }
+    for bad in ["c", "_a", "ab", "", "A"] {
+        let json = none.replacen('}', &format!(",\"slot\":\"{bad}\"}}"), 1);
+        assert!(host(&json).is_err(), "{bad}: {json}");
+    }
+}

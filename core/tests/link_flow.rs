@@ -593,3 +593,44 @@ fn write_the_link_fixture() {
         "../../",
     );
 }
+
+/// A release on the running slot (manifest format 2) with the link: the
+/// answers the link carries name the slot the write put the boot images
+/// on, so that the phone writes `SLOT=` for its kernel updates; a release
+/// on slot B sends none.
+#[test]
+fn the_link_tells_the_phone_which_slot_was_written() {
+    for (bundle, scenario, want) in [
+        (
+            TestBundle::running_with(
+                &["a"],
+                |m| m["install_link"] = serde_json::json!({"protocol": 1}),
+                |c| c,
+            ),
+            "running-a",
+            Some("a"),
+        ),
+        (link_bundle(), "ready", None),
+    ] {
+        let phone = FakePhone::scenario(scenario).unwrap();
+        let options = FlowOptions {
+            write: true,
+            ..Default::default()
+        };
+        let mut flow = Flow::begin(&bundle.files(), bundle.index(), &bundle.trusted(), options);
+        drive(&mut flow, &bundle, &phone, "cheetah", "installed");
+        assert_eq!(flow.screen().state, "installed", "{:?}", flow.step());
+        let link = flow
+            .link(&answers(), &Extras::default(), SALT, "0.0.1", false)
+            .unwrap();
+        assert_eq!(link.record().slot.as_deref(), want);
+        let clock = Clock::default();
+        let mut r = Rig {
+            link,
+            phone: PretendPhone::first_start(SERIAL, "cheetah", clock.clone(), 1),
+            shell: MemoryShell::new(clock, bundle.factory_zip.clone()),
+        };
+        assert_eq!(r.go(), "ready");
+        assert_eq!(r.phone.sim.written_slot.as_deref(), want);
+    }
+}

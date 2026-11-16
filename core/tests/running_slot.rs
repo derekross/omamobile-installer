@@ -884,3 +884,58 @@ fn a_locked_phone_on_the_running_slot_is_shown_the_unlock_steps_once_it_passes()
     assert_eq!(phone.unlock_questions(), 0);
     let _ = id();
 }
+
+#[test]
+fn a_writing_session_on_another_slot_than_the_one_confirmed_writes_nothing() {
+    // Both slots accepted, so the session's own check would pass slot b:
+    // the flow's check that the session is on the slot the owner confirmed
+    // is what stops it. The phone moves at the writing session's connect,
+    // the seventh current-slot question of a run (the look, the dry run's
+    // look, its session's connect, its gate and read-back, the write's
+    // look, the write's session)
+    // A release whose answers go into the image: the answers name slot a,
+    // and the session on slot b refuses them first. A release with the
+    // install link has no answers in its image: the flow's own check
+    // stops it
+    let link = TestBundle::running_with(
+        &["a", "b"],
+        |m| m["install_link"] = json!({"protocol": 1}),
+        |c| c,
+    );
+    for (bundle, why) in [
+        (
+            TestBundle::running(&["a", "b"]),
+            "the answers name another slot",
+        ),
+        (link, "not on the slot the owner confirmed"),
+    ] {
+        let phone = FakePhone::scenario("running-a").unwrap();
+        phone.edit(|s| s.slot_moves_at = Some((7, "b".into())));
+        let flow = run(&bundle, &phone, writing());
+        let s = stop(&flow);
+        assert_eq!(s.id(), "write-refused", "{s:?}");
+        assert!(s.message.join(" ").contains(why), "{s:?}");
+        nothing_written(&phone);
+        no_slot_command_and_only(&phone, "a");
+    }
+}
+
+#[test]
+fn both_slots_flags_are_logged_before_and_after_the_writes() {
+    let bundle = TestBundle::running(&["a"]);
+    let phone = FakePhone::scenario("running-a").unwrap();
+    let (_flow, session) = support::drive::writing_session(&bundle, &phone, writing());
+    let before = session
+        .log()
+        .iter()
+        .find(|l| l.starts_with("before the writes: "))
+        .expect("the flags at the first look")
+        .clone();
+    for flag in [
+        "slot-successful:a",
+        "slot-successful:b",
+        "slot-unbootable:b",
+    ] {
+        assert!(before.contains(flag), "{before}");
+    }
+}

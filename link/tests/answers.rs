@@ -389,6 +389,7 @@ fn rules_that_take_two_fields() {
         ssh_keys: vec!["nope".into()],
         full_name: Some("a,b".into()),
         email: Some("nope".into()),
+        slot: None,
     };
     let fields: Vec<Field> = a
         .validate()

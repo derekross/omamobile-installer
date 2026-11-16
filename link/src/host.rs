@@ -279,6 +279,8 @@ pub enum Event {
 
 /// One thing that happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A command carries the owner's answers: passed once, by value, as it was
+#[allow(clippy::large_enum_variant)]
 pub enum HostInput<'a> {
     /// The link's interface was found and claimed.
     LinkUp,

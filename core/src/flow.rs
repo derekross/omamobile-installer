@@ -1419,6 +1419,9 @@ pub struct Flow {
     /// A release on the running slot: the slot the writes began on, for
     /// the stop's closing lines.
     write_running: Option<Slot>,
+    /// A release on the running slot: the slot a write that ran through
+    /// wrote, for the install link.
+    write_slot: Option<Slot>,
 }
 
 fn step(text: impl Into<String>) -> ScreenStep {
@@ -1482,6 +1485,7 @@ impl Flow {
             link_serial: None,
             first_slot: None,
             write_running: None,
+            write_slot: None,
         };
         // What an earlier run's measurement left, if the front end kept it
         flow.probe_record = flow
@@ -3322,6 +3326,7 @@ impl Flow {
         self.write_open = false;
         self.write_reach = None;
         self.link_serial = Some(session.serial().to_string());
+        self.write_slot = session.running_slot();
         self.step = Step::Installed(plan.clone());
         Ok(session.into_transport())
     }
@@ -3384,7 +3389,11 @@ impl Flow {
             .ok_or_else(|| Error::Refused("the factory image is not in the index".into()))?;
         let sha256 = omamobile_link::digest::from_hex32(&build.sha256)
             .ok_or_else(|| Error::Refused("the index's SHA-256 is not one".into()))?;
-        let valid = crate::link::link_answers(answers, extras, salt)?;
+        // A release on the running slot: the phone is told which slot was
+        // written, for its kernel updates (`SLOT=`)
+        let slot = self.write_slot.filter(|_| self.on_running_slot());
+        let valid = crate::link::link_answers_on(answers, extras, salt, slot)?;
+        let slot = slot.map(|s| s.name().to_string());
         let (name, codename) = self.names();
         Ok(crate::link::LinkFlow::new(crate::link::LinkStart {
             serial,
@@ -3401,6 +3410,7 @@ impl Flow {
             token: None,
             backup_place,
             version: version.to_string(),
+            slot,
         }))
     }
 

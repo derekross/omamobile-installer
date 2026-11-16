@@ -853,6 +853,9 @@ pub enum Effect {
     CheckAnswers {
         ticket: Ticket,
         conf: String,
+        /// The slot the computer wrote ([`crate::answers::Answers::slot`]),
+        /// for `boot-update.conf` when the unit is started.
+        slot: Option<String>,
     },
     /// `retry` false, in §6.5's order: write `boot-update.conf` from the
     /// descriptor (the plan's Q3), copy the checked candidate to
@@ -1953,6 +1956,7 @@ impl Phone {
                             Effect::CheckAnswers {
                                 ticket,
                                 conf: ValidAnswers::firstboot_conf(&valid),
+                                slot: valid.get().slot.clone(),
                             },
                         );
                     }

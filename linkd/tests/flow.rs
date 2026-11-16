@@ -178,23 +178,30 @@ fn a_whole_install_from_the_code_to_finished() {
 }
 
 /// A release on the running slot (INSTALL_SLOT=active, manifest format 2):
-/// boot-update.conf names the slot this boot runs from, on its own line
-/// before AUTO_WRITE=; a slot that can't be read turns the hook off; and a
-/// format-1 release writes no SLOT= line.
+/// boot-update.conf names the slot the computer wrote, on its own line
+/// before AUTO_WRITE=, only when the phone runs from that slot and the
+/// descriptor accepts it; otherwise the hook is turned off (a fallback to a
+/// development system on slot B must not get slot B's kernel updates).
+/// A format-1 release writes no SLOT= line.
 #[test]
-fn boot_update_conf_names_the_running_slot_for_a_release_on_it() {
+fn boot_update_conf_names_the_written_slot_only_where_the_phone_runs_from_it() {
     let desc = "CODENAME=cheetah\nCOMPATIBLE=\"google,gs201-cheetah\"\nNV_PARTS=\"efs persist modem_a\"\nNV_BACKUP_EXTRA=\"devinfo\"\n";
-    for (active, suffix, want_slot, want_auto) in [
-        (true, Some("_a"), Some("a"), "yes"),
-        (true, Some("_b"), Some("b"), "yes"),
-        (true, None, None, "no"),
-        (false, Some("_a"), None, "yes"),
+    // (INSTALL_ACTIVE_SLOTS, or format 1; booted suffix; the host's slot;
+    // SLOT= wanted; AUTO_WRITE wanted)
+    for (accept, suffix, host, want_slot, want_auto) in [
+        (Some("a"), Some("_a"), Some("a"), Some("a"), "yes"),
+        (Some("a b"), Some("_b"), Some("b"), Some("b"), "yes"),
+        (Some("a"), Some("_b"), Some("b"), None, "no"),
+        (Some("a"), Some("_b"), Some("a"), None, "no"),
+        (Some("a b"), Some("_b"), Some("a"), None, "no"),
+        (Some("a"), Some("_a"), None, None, "no"),
+        (Some("a"), None, Some("a"), None, "no"),
+        (None, Some("_a"), None, None, "yes"),
     ] {
         let p = Phone::new();
-        let conf = if active {
-            format!("{desc}INSTALL_SLOT=active\nINSTALL_ACTIVE_SLOTS=\"a b\"\n")
-        } else {
-            desc.to_string()
+        let conf = match accept {
+            Some(list) => format!("{desc}INSTALL_SLOT=active\nINSTALL_ACTIVE_SLOTS=\"{list}\"\n"),
+            None => desc.to_string(),
         };
         p.write("/usr/share/omamobile/device.conf", conf.as_bytes());
         let boot = match suffix {
@@ -208,23 +215,27 @@ fn boot_update_conf_names_the_running_slot_for_a_release_on_it() {
         assert!(d.settled());
         let mut i = Installer::new();
         i.pair_at_screen(&mut d);
-        i.step(&mut d, Command::Answers(answers()));
+        i.step(&mut d, Command::Answers(answers_on(host)));
         assert!(
             i.saw(|e| *e == Event::AnswersAccepted),
             "{:?}",
             i.host.events
         );
+        let what = format!("{accept:?} {suffix:?} {host:?}");
         let text = p.read("/etc/omamobile/boot-update.conf").unwrap();
         assert!(
             text.ends_with(&format!("AUTO_WRITE={want_auto}\n")),
-            "{text}"
+            "{what}: {text}"
         );
         match want_slot {
             Some(slot) => assert!(
                 text.contains(&format!("\nSLOT={slot}\nAUTO_WRITE=yes\n")),
-                "{text}"
+                "{what}: {text}"
             ),
-            None => assert!(!text.contains("SLOT="), "{text}"),
+            None => assert!(!text.contains("\nSLOT="), "{what}: {text}"),
+        }
+        if want_auto == "no" {
+            assert!(text.contains("so kernel updates are off"), "{what}: {text}");
         }
     }
 }

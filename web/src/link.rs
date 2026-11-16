@@ -288,6 +288,7 @@ impl LinkPreview {
             token: None,
             backup_place: true,
             version: "0.0.1".into(),
+            slot: None,
         });
         Ok(LinkPreview {
             flow,

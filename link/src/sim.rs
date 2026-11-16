@@ -88,6 +88,8 @@ pub struct SimPhone {
     /// when it is done), and the file first boot was last started with.
     pub candidate: Option<String>,
     pub conf: Option<String>,
+    /// The slot the computer said it wrote, with the answers.
+    pub written_slot: Option<String>,
     pub started_with: Option<String>,
     /// What first boot left: its `done`, the account, its unit in this boot.
     pub fb_done: bool,
@@ -209,6 +211,7 @@ impl SimPhone {
             porcelain: Vec::new(),
             smoke: Value::Obj(vec![("ok".into(), Value::Bool(true))]),
             candidate: None,
+            written_slot: None,
             conf: None,
             started_with: None,
             fb_done: false,
@@ -408,8 +411,9 @@ impl SimPhone {
                     None
                 }
                 Effect::ReadFacts { ticket } => Some((ticket, Outcome::Facts(self.facts.clone()))),
-                Effect::CheckAnswers { ticket, conf } => {
+                Effect::CheckAnswers { ticket, conf, slot } => {
                     self.candidate = Some(conf);
+                    self.written_slot = slot;
                     Some((ticket, Outcome::Problems(self.porcelain.clone())))
                 }
                 Effect::StartFirstboot { ticket, retry } => {

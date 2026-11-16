@@ -158,6 +158,13 @@ pub struct Answers {
     pub ssh_keys: Vec<String>,
     pub full_name: Option<String>,
     pub email: Option<String>,
+    /// The slot the computer wrote the release's boot images to, `a` or
+    /// `b`, for a release on the running slot (manifest format 2); `None`
+    /// for a release on slot B. Not an answer of the owner's and not part
+    /// of `firstboot.conf`: the phone writes `SLOT=` in `boot-update.conf`
+    /// from it, only when it is the slot the phone runs from and one its
+    /// descriptor accepts (`INSTALL_ACTIVE_SLOTS`).
+    pub slot: Option<String>,
 }
 
 /// Never the values: the password hash and the Wi-Fi passphrase are not for
