@@ -1,0 +1,13 @@
+frame: phone-14-backup-verified
+backup-verified, answering id 12
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 13
+len: 31
+offset: 0
+payload sha256: ee8ccd453380d2a63739a0273a675fc777d33d95a05a0b54a9ef43151d719108
+pad byte: no
+frame bytes: 87
+frame sha256: 92e0eea18e9f464a44bfae3391ffce9c38c412cb6765a8e187c524c746895234
+payload: {"t":"backup-verified","re":12}

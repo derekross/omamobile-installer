@@ -1,0 +1,13 @@
+frame: data-3
+a short data frame at the stream's start
+direction: host to phone
+kind: 2 (data)
+flags: 0
+seq: 2
+len: 3
+offset: 0
+payload sha256: fa22dfe1da9013b3c1145040acae9089e0c08bc1c1a0719614f4b73add6f6ef5
+pad byte: no
+frame bytes: 59
+frame sha256: 7f8b193f3e0785c81890ecb5ec7fa8173811c07c8f720270ea32f214d5d313d5
+payload: 3 bytes, hex aabbcc

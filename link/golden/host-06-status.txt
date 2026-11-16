@@ -1,0 +1,13 @@
+frame: host-06-status
+status, id 6
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 5
+len: 21
+offset: 0
+payload sha256: 97ed9269a771a289a0eeb60a9b1bca4a9f4936fa251f9c4d23a07fcd46114dfb
+pad byte: no
+frame bytes: 77
+frame sha256: 98b8b45f31b642afb81df0a5f288ebc3f3461c3fe2912f5feda5291fbeffb051
+payload: {"t":"status","id":6}

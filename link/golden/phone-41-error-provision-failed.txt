@@ -1,0 +1,13 @@
+frame: phone-41-error-provision-failed
+error, sent by itself (no re)
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 40
+len: 112
+offset: 0
+payload sha256: 141511563c3392c45e8b0687dc92f827778e3b9059050cd7a11698d0e6dc3896
+pad byte: no
+frame bytes: 168
+frame sha256: 505cd69535a94b8ea8d92065f04d73322cc976096a5d180e67ea6bd772b18d0d
+payload: {"t":"error","code":"provision-failed","message":"provisioning stopped","stage":"firstboot-done","step":"modem"}

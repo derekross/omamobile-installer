@@ -1,0 +1,13 @@
+frame: limit-message-262144
+the longest message: a smoke-report whose report is a string of x that fills 262144 bytes
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 30
+len: 262144
+offset: 0
+payload sha256: 30fb2dae7d9a7011e50b62aeb0d7ab9b71e7f5d9fc8c3ef02506905542640c43
+pad byte: no
+frame bytes: 262200
+frame sha256: d6a6204fdfe890f709ce138643b041b226af8fbb48e8f604c58ce58d490dfc52
+payload: {"t":"smoke-report","re":19,"report":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ... (262144 bytes)

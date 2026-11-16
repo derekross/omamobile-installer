@@ -1,0 +1,13 @@
+frame: phone-29-error-not-allowed
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 28
+len: 112
+offset: 0
+payload sha256: 749519e4765f44715e0fda4cb500c7b018a28a28f75199e2d2ef3f4827141501
+pad byte: no
+frame bytes: 168
+frame sha256: d37e9e99298ebd090d581801eb2f8d343b1cb744c2a10ed3c82c21bdebcc1e08
+payload: {"t":"error","re":21,"code":"not-allowed","message":"not allowed now; nothing changed","stage":"firstboot-done"}

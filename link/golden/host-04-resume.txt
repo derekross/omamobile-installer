@@ -1,0 +1,13 @@
+frame: host-04-resume
+resume, id 4
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 3
+len: 96
+offset: 0
+payload sha256: 7a98b4807552106b8b49367b5b876e8a1af8350f8a1cdabacb8fbf97b6748d72
+pad byte: no
+frame bytes: 152
+frame sha256: 7d1900b187707c38302346076d2e849217e1d04567f9f9a34ce254494cb07912
+payload: {"t":"resume","id":4,"token":"101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"}

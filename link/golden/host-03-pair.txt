@@ -1,0 +1,13 @@
+frame: host-03-pair
+pair, id 3
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 2
+len: 35
+offset: 0
+payload sha256: 06658508d2125cd709f485765fa980cbd59337fb15f77c11e248e1ed2dff5323
+pad byte: no
+frame bytes: 91
+frame sha256: 6deaf1206d6e2e7d0f197d78ad681481d73e2caea555afc47b3ecdc3419c4a5a
+payload: {"t":"pair","id":3,"code":"123456"}

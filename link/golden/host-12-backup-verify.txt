@@ -1,0 +1,13 @@
+frame: host-12-backup-verify
+backup-verify, id 12
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 11
+len: 118
+offset: 0
+payload sha256: f92e9d7135f9eab790f7bd7f7594b4139a3cc70aceb2561ef2120fe0ece9c6e0
+pad byte: no
+frame bytes: 174
+frame sha256: 56c5c9475f8f0e807495824b4faa2c12d7f55cd68a88f26c95bcd96dc56deaa5
+payload: {"t":"backup-verify","id":12,"name":"efs","sha256":"202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"}

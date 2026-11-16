@@ -1,0 +1,64 @@
+{
+  "builds": [
+    {
+      "baseband": "fake-radio-1.2",
+      "bootloader": "fake-1.2",
+      "build": "TEST.260301.001",
+      "page": "https://developers.google.com/android/images#cheetah",
+      "sha256": "e351730fca55ae238b88959d2f4abc1b8935eb2229a9af3c2792e898e2fd81ac",
+      "size": 3900000015,
+      "tested": false,
+      "url": "https://dl.google.com/dl/android/aosp/cheetah-test.260301.001-factory-e351730f.zip",
+      "zip": "cheetah-test.260301.001-factory-e351730f.zip"
+    },
+    {
+      "baseband": "fake-radio-1.1",
+      "bootloader": "fake-1.1",
+      "build": "TEST.260201.001",
+      "page": "https://developers.google.com/android/images#cheetah",
+      "sha256": "f85dd73f43cd2cfca0f094a43386b26cfc100af2fc91ed79b3c6809a3390b132",
+      "size": 3900000015,
+      "tested": true,
+      "tested_with": "2026.01.02",
+      "url": "https://dl.google.com/dl/android/aosp/cheetah-test.260201.001-factory-f85dd73f.zip",
+      "zip": "cheetah-test.260201.001-factory-f85dd73f.zip"
+    },
+    {
+      "baseband": "fake-radio-1.0",
+      "bootloader": "fake-1.0",
+      "build": "TEST.260101.001",
+      "page": "https://developers.google.com/android/images#cheetah",
+      "sha256": "31c2322a3666239c70efec127da764f66b8c7418790a5387c6b5719a57f63afa",
+      "size": 49152,
+      "tested": true,
+      "tested_with": "2026.01.02",
+      "url": "https://dl.google.com/dl/android/aosp/cheetah-test.260101.001-factory-31c2322a.zip",
+      "zip": "cheetah-test.260101.001-factory-31c2322a.zip"
+    },
+    {
+      "baseband": "fake-radio-1.0",
+      "bootloader": "fake-1.0",
+      "build": "TEST.260101.001.A1",
+      "page": "https://developers.google.com/android/images#cheetah",
+      "sha256": "4046e68e6771ecaa724fd35599004ab3009ba5b700d65770b87ef2ff6e8d12a9",
+      "size": 3900000018,
+      "tested": false,
+      "url": "https://dl.google.com/dl/android/aosp/cheetah-test.260101.001.a1-factory-4046e68e.zip",
+      "zip": "cheetah-test.260101.001.a1-factory-4046e68e.zip"
+    },
+    {
+      "baseband": "fake-radio-0.9",
+      "bootloader": "fake-0.9",
+      "build": "TEST.251201.001",
+      "page": "https://developers.google.com/android/images#cheetah",
+      "sha256": "df6b4ba60607b4ad27bfa08a83e921ece67cacb379688093a1f12cacfc914741",
+      "size": 3900000015,
+      "tested": false,
+      "url": "https://dl.google.com/dl/android/aosp/cheetah-test.251201.001-factory-df6b4ba6.zip",
+      "zip": "cheetah-test.251201.001-factory-df6b4ba6.zip"
+    }
+  ],
+  "codename": "cheetah",
+  "format": 1,
+  "updated": "2026-01-02"
+}

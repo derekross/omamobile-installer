@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "MANIFEST",
-      "sha256": "2ba82bffb88f75298d92ce6a72bc86c80ce536b0f3423a167437cb2df7b37806",
+      "sha256": "844ed153759a76cee014f1013660b7febdacf9e17806d49a1b410c0ab773a09d",
       "size": 194
     },
     {
@@ -31,7 +31,7 @@
     },
     {
       "path": "images/vendor_kernel_boot.img",
-      "sha256": "989008d015571680dd228a3e2b11a19a2995bb98dd8a160edb90d9ee293a321b",
+      "sha256": "e4aca6430cdb6bdcc2d2b8c9c78456c480c3ffa29fc9d2839623ee63903eb161",
       "size": 12288
     },
     {
@@ -41,7 +41,7 @@
     },
     {
       "path": "omamobile.gpg",
-      "sha256": "97bf5d9bcdf8eebdb29cf5a9aaf066624366c9b24a9fd0b9495a1ee148d7161b",
+      "sha256": "2a45719a126c58a315dba2429b32cef89ce038df43ec87d33927797aa709340f",
       "size": 215
     },
     {
@@ -118,7 +118,21 @@
   "root_image": {
     "compression": "zstd",
     "name": "omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst",
-    "sha256": "20a4e3f73bf7dd0fb5f0235c22367c03e48a68e3d3d2b48c7be7c7946b79f82a",
+    "placeholders": [
+      {
+        "length": 4096,
+        "offset": 1228800,
+        "path": "/etc/omamobile/boot-update.conf",
+        "sha256": "737979ebb165080516b1392e2f72a246838e3811d5efc1fa70ed43c598e9b978"
+      },
+      {
+        "length": 4096,
+        "offset": 1236992,
+        "path": "/etc/omamobile/firstboot.conf",
+        "sha256": "ff50b348fd624be4aa4217370b18b9bf94b608046a424cf55d4030020484d2ff"
+      }
+    ],
+    "sha256": "00d676de0e13e6b785ca6f4ba8f1a53fd3cc469da334390ed14a1ea6a5f1c14a",
     "size": 1597234
   },
   "version": "2026.01.02"

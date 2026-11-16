@@ -1,0 +1,13 @@
+frame: phone-24-smoke-report
+smoke-report, answering id 19
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 23
+len: 123
+offset: 0
+payload sha256: 15142e87b4f7033fe412bfb1990e77d089dc7e360ef6eac7537951981e0498c9
+pad byte: no
+frame bytes: 179
+frame sha256: a5c8bf93d90f7c692b41004d33739f7f993b6f23ba93b953693367a64163d8b3
+payload: {"t":"smoke-report","re":19,"report":{"device":"cheetah","required":[{"row":"root","ok":true}],"battery":87.5,"note":null}}

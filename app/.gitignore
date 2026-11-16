@@ -1,0 +1,7 @@
+/build/
+/pkgbuild/pkg/
+/pkgbuild/src/
+*.pkg.tar.*
+/tests/record-screens/target/
+/tests/record-screens/Cargo.lock
+__pycache__/

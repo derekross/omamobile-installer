@@ -1,0 +1,13 @@
+frame: phone-13-data-end
+data-end, sent by itself (no re)
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 12
+len: 29
+offset: 0
+payload sha256: 408cd640215d21c5325bdadd419b98d7b44d399be4ff505d4d71f73fdff5a57c
+pad byte: no
+frame bytes: 85
+frame sha256: 5d8b942781ca3ea3f11b81b02abb970caf29e178b96db4f885a7f38bc9a2d9a7
+payload: {"t":"data-end","name":"efs"}

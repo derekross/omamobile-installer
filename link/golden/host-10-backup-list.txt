@@ -1,0 +1,13 @@
+frame: host-10-backup-list
+backup-list, id 10
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 9
+len: 27
+offset: 0
+payload sha256: a7afd35d8ee3816af0d5f78828d640ff974db73b5b1be5c9c482d8c5ec7cc847
+pad byte: no
+frame bytes: 83
+frame sha256: 1215e263984a050f478f2f56973a7eaac39c5d701368152a98aa41b885fb22a1
+payload: {"t":"backup-list","id":10}

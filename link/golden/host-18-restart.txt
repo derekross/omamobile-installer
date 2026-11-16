@@ -1,0 +1,13 @@
+frame: host-18-restart
+restart, id 18
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 17
+len: 23
+offset: 0
+payload sha256: 094148506a6bdc655c51bfe1bb771a260089e4de566dcdd6ab51dce3dcc9a8ea
+pad byte: no
+frame bytes: 79
+frame sha256: 9853f5d94bfdfd9ad9a90beac567354eb4376e416e828cc1a700f7d724f5d4c4
+payload: {"t":"restart","id":18}

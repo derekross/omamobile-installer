@@ -17,6 +17,27 @@ pub const SENTINEL: u8 = 0xa5;
 /// A placeholder, never a real serial number.
 pub const SERIAL: &str = "FAKESERIAL0001";
 
+/// What `reboot-bootloader` does to the pretend phone: how its restart into
+/// the bootloader ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeRestart {
+    /// It leaves the bus and comes back in Fastboot Mode, running the
+    /// bootloader of the active slot.
+    Normal,
+    /// It confirms and never leaves the bus: nothing restarts.
+    NeverLeaves,
+    /// Restarted into this slot, it starts an operating system instead of
+    /// staying in Fastboot Mode: gone until its owner's buttons
+    /// ([`FakePhone::owner_buttons`]).
+    BootsOsOn(char),
+    /// Restarted into slot b, its bootloader does not start: the phone
+    /// falls back to slot a by itself, which it marks active, and marks b
+    /// unbootable.
+    FallsBack,
+    /// It leaves and never comes back by itself.
+    NeverBack,
+}
+
 pub struct FakeState {
     pub vars: BTreeMap<String, String>,
     pub partitions: BTreeMap<String, Vec<u8>>,
@@ -37,6 +58,35 @@ pub struct FakeState {
     pub take_at_most: Option<usize>,
     /// After this many commands, report another serial number.
     pub swap_serial_after: Option<usize>,
+    /// The cable is pulled once this many commands have been received: the
+    /// next one never arrives, and nothing is answered until [`FakePhone::replug`].
+    pub unplug_at: Option<usize>,
+    /// The cable is pulled while the phone works on command number N (from
+    /// 0): the phone carries it out, and its answer never arrives.
+    pub lose_answer_at: Option<usize>,
+    /// The cable is pulled as the Nth command (from 1) that starts with
+    /// this text is sent: it never arrives. For a front end's pretend
+    /// phone, which cannot count the questions before a write.
+    pub unplug_on: Option<(String, usize)>,
+    // The two slots, for a phone that tells the version of the bootloader
+    // that runs only (the Pixel 7 Pro)
+    /// Each slot's bootloader version (a, b). With it, `version-bootloader`
+    /// and `current-slot` are the running slot's, from each restart on.
+    pub slot_versions: Option<(String, String)>,
+    /// The slot whose bootloader runs.
+    pub running: String,
+    /// `current-slot` follows `set_active` at once, before any restart:
+    /// the pretend phone of the other tests. A pretend phone with
+    /// `slot_versions` says the running slot until it restarts.
+    pub current_follows_flag: bool,
+    /// What `reboot-bootloader` does.
+    pub restart: FakeRestart,
+    /// Restarting: `Some(n)`, back after n more ticks; `Some(usize::MAX)`,
+    /// not back until the owner's buttons. Off the bus meanwhile.
+    pub away: Option<usize>,
+    /// How many restarts into the bootloader it made.
+    pub restarts: usize,
+    unplugged: bool,
     // Protocol state
     staged: Option<Vec<u8>>,
     expecting: usize,
@@ -101,6 +151,16 @@ impl FakePhone {
             short_data: false,
             take_at_most: None,
             swap_serial_after: None,
+            unplug_at: None,
+            lose_answer_at: None,
+            unplug_on: None,
+            slot_versions: None,
+            running: "a".into(),
+            current_follows_flag: true,
+            restart: FakeRestart::Normal,
+            away: None,
+            restarts: 0,
+            unplugged: false,
             staged: None,
             expecting: 0,
             incoming: Vec::new(),
@@ -145,6 +205,15 @@ impl FakePhone {
                 phone.edit(|s| s.unlock_ability = Some("get_unlock_ability: 0".into()));
             }
             "slot-b" => set(&[("current-slot", "b")]),
+            // The Pixel 7 Pro's bootloader on a reinstall: it runs from slot
+            // B and tells the version of the copy in use only
+            "slot-b-one-slot" => {
+                set(&[("current-slot", "b")]);
+                phone.edit(|s| {
+                    s.vars.remove("version-bootloader-a");
+                    s.vars.remove("version-bootloader-b");
+                });
+            }
             "one-slot" => {
                 phone.edit(|s| {
                     s.vars.remove("version-bootloader-a");
@@ -164,6 +233,40 @@ impl FakePhone {
                 slots("fake-0.9");
                 set(&[("version-baseband", "fake-radio-0.9")]);
             }
+            // A first install of the Pixel 7 Pro: stock Android on slot a,
+            // one bootloader copy told, two slots with their versions and
+            // flags, and a restart into the bootloader that works
+            "first-install" => {
+                phone.first_install("fake-1.0");
+            }
+            "first-install-locked" => {
+                phone.first_install("fake-1.0");
+                set(&[("unlocked", "no")]);
+                phone.edit(|s| s.unlock_ability = Some("get_unlock_ability: 1".into()));
+            }
+            "first-install-differ" => {
+                phone.first_install("fake-0.9");
+            }
+            "first-install-follows" => {
+                phone.first_install("fake-1.0");
+                phone.edit(|s| s.current_follows_flag = true);
+            }
+            "first-install-stays" => {
+                phone.first_install("fake-1.0");
+                phone.edit(|s| s.restart = FakeRestart::NeverLeaves);
+            }
+            "first-install-os" => {
+                phone.first_install("fake-1.0");
+                phone.edit(|s| s.restart = FakeRestart::BootsOsOn('b'));
+            }
+            "first-install-falls-back" => {
+                phone.first_install("fake-1.0");
+                phone.edit(|s| s.restart = FakeRestart::FallsBack);
+            }
+            "first-install-b-started" => {
+                phone.first_install("fake-1.0");
+                set(&[("slot-successful:b", "yes"), ("slot-unbootable:b", "no")]);
+            }
             _ => return None,
         }
         Some(phone)
@@ -174,19 +277,121 @@ impl FakePhone {
         self
     }
 
+    /// A Pixel 7 Pro as it comes from stock Android: on slot a, telling the
+    /// version of the running bootloader only, slot b's bootloader at
+    /// `slot_b`, and the slot flags of a phone whose slot b never started.
+    pub fn first_install(&self, slot_b: &str) -> &Self {
+        self.edit(|s| {
+            s.vars.remove("version-bootloader-a");
+            s.vars.remove("version-bootloader-b");
+            s.slot_versions = Some(("fake-1.0".into(), slot_b.into()));
+            s.current_follows_flag = false;
+            for (k, v) in [
+                ("slot-successful:a", "yes"),
+                ("slot-unbootable:a", "no"),
+                ("slot-retry-count:a", "3"),
+                ("slot-successful:b", "no"),
+                ("slot-unbootable:b", "yes"),
+                ("slot-retry-count:b", "0"),
+            ] {
+                s.vars.insert(k.into(), v.into());
+            }
+        })
+    }
+
+    /// Whether the phone is on the bus in Fastboot Mode now, as a front end
+    /// that lists USB devices sees it.
+    pub fn listed(&self) -> bool {
+        let s = self.0.borrow();
+        s.away.is_none() && !s.unplugged
+    }
+
+    /// A restart into the bootloader is under way (or never ended): off the
+    /// bus, as a front end that lists USB devices sees it.
+    pub fn restarting(&self) -> bool {
+        self.0.borrow().away.is_some()
+    }
+
+    /// Time passes: a restart under way gets one step nearer its end.
+    pub fn tick(&self) {
+        let back = {
+            let mut s = self.0.borrow_mut();
+            match s.away {
+                Some(usize::MAX) | None => false,
+                Some(0) => true,
+                Some(n) => {
+                    s.away = Some(n - 1);
+                    false
+                }
+            }
+        };
+        if back {
+            self.edit(|s| s.come_back());
+        }
+    }
+
+    /// The owner brings the phone to Fastboot Mode with its buttons: it runs
+    /// the active slot's bootloader.
+    pub fn owner_buttons(&self) -> &Self {
+        self.replug();
+        self.edit(|s| {
+            s.away = Some(0);
+            s.come_back()
+        })
+    }
+
+    /// The active slot, as the bootloader keeps it.
+    pub fn active(&self) -> String {
+        self.0.borrow().active_slot.clone()
+    }
+
     /// The names [`Self::scenario`] knows.
-    pub const SCENARIOS: [&'static str; 10] = [
+    pub const SCENARIOS: [&'static str; 19] = [
         "ready",
         "locked",
         "locked-oem-off",
         "other-model",
         "slot-b",
+        "slot-b-one-slot",
         "one-slot",
         "slots-differ",
         "unknown-build",
         "untested-build",
         "untested-old-build",
+        "first-install",
+        "first-install-locked",
+        "first-install-differ",
+        "first-install-follows",
+        "first-install-stays",
+        "first-install-os",
+        "first-install-falls-back",
+        "first-install-b-started",
     ];
+
+    /// The owner plugs the cable back in, with the phone still in Fastboot
+    /// Mode: what was downloaded and not flashed is gone, as is any answer
+    /// that was on its way.
+    pub fn replug(&self) -> &Self {
+        self.edit(|s| {
+            s.unplug_at = None;
+            s.lose_answer_at = None;
+            s.unplug_on = None;
+            s.unplugged = false;
+            s.staged = None;
+            s.expecting = 0;
+            s.incoming.clear();
+            s.replies.clear();
+        })
+    }
+
+    /// The commands received that change a phone: everything but `getvar:`,
+    /// `download:` (held in memory until a flash) and the unlock question.
+    pub fn changes(&self) -> Vec<String> {
+        self.not_reads()
+            .into_iter()
+            .filter(|c| !c.starts_with("download:"))
+            .collect()
+    }
 
     pub fn partition(&self, name: &str) -> Vec<u8> {
         self.0.borrow().partitions[name].clone()
@@ -281,6 +486,21 @@ pub fn unsparse(image: &[u8], target: &mut [u8]) -> core::result::Result<(), Str
 }
 
 impl FakeState {
+    /// Back in Fastboot Mode after a restart, running the active slot's
+    /// bootloader.
+    fn come_back(&mut self) {
+        self.away = None;
+        self.replies.clear();
+        self.staged = None;
+        self.running = self.active_slot.clone();
+        self.vars
+            .insert("current-slot".into(), self.running.clone());
+        if let Some((a, b)) = &self.slot_versions {
+            let v = if self.running == "a" { a } else { b }.clone();
+            self.vars.insert("version-bootloader".into(), v);
+        }
+    }
+
     fn reply(&mut self, kind: &str, text: &str) {
         self.replies.push_back(format!("{kind}{text}").into_bytes());
     }
@@ -352,8 +572,45 @@ impl FakeState {
                 Err(why) => self.reply("FAIL", &why),
             }
         } else if let Some(slot) = cmd.strip_prefix("set_active:") {
+            if slot != "a" && slot != "b" {
+                return self.reply("FAIL", "no such slot");
+            }
             self.active_slot = slot.to_string();
+            // The other tests' pretend phone reports the active slot as the
+            // current one at once
+            if self.current_follows_flag {
+                self.vars.insert("current-slot".into(), slot.to_string());
+            }
+            // As the Pixel 9a's bootloader does (Omarchy Mobile's AGENTS.md):
+            // the slot made active loses its successful mark and gets tries
+            if self.vars.contains_key(&format!("slot-successful:{slot}")) {
+                for (k, v) in [
+                    ("successful", "no"),
+                    ("unbootable", "no"),
+                    ("retry-count", "7"),
+                ] {
+                    self.vars.insert(format!("slot-{k}:{slot}"), v.into());
+                }
+            }
             self.reply("OKAY", "");
+        } else if cmd == "reboot-bootloader" {
+            self.reply("OKAY", "");
+            self.restarts += 1;
+            match self.restart {
+                FakeRestart::NeverLeaves => {}
+                FakeRestart::Normal => self.away = Some(2),
+                FakeRestart::NeverBack => self.away = Some(usize::MAX),
+                FakeRestart::BootsOsOn(slot) if self.active_slot == slot.to_string() => {
+                    self.away = Some(usize::MAX)
+                }
+                FakeRestart::BootsOsOn(_) => self.away = Some(2),
+                FakeRestart::FallsBack if self.active_slot == "b" => {
+                    self.active_slot = "a".into();
+                    self.vars.insert("slot-unbootable:b".into(), "yes".into());
+                    self.away = Some(2);
+                }
+                FakeRestart::FallsBack => self.away = Some(2),
+            }
         } else if cmd == "reboot" {
             self.rebooted = true;
             self.reply("OKAY", "");
@@ -372,7 +629,11 @@ impl FakeState {
 impl Transport for FakePhone {
     async fn send(&mut self, data: &[u8]) -> Result<usize> {
         let mut s = self.0.borrow_mut();
-        if s.rebooted {
+        if s.rebooted || s.unplugged || s.away.is_some() {
+            return Err(Error::Transport("the phone left the bus".into()));
+        }
+        if s.expecting == 0 && s.unplug_at.is_some_and(|n| s.log.len() >= n) {
+            s.unplugged = true;
             return Err(Error::Transport("the phone left the bus".into()));
         }
         if s.expecting > 0 {
@@ -388,17 +649,35 @@ impl Transport for FakePhone {
             }
             return Ok(take);
         }
+        let lose_answer = s.lose_answer_at == Some(s.log.len());
+        if let (Some((prefix, nth)), Ok(cmd)) = (s.unplug_on.clone(), core::str::from_utf8(data)) {
+            let before = s.log.iter().filter(|c| c.starts_with(&prefix)).count();
+            if cmd.starts_with(&prefix) && before + 1 == nth {
+                s.unplugged = true;
+                return Err(Error::Transport("the phone left the bus".into()));
+            }
+        }
         match core::str::from_utf8(data) {
             Ok(cmd) if data.len() <= 64 => s.command(cmd),
             _ => s.reply("FAIL", "not a command"),
+        }
+        if lose_answer {
+            s.unplugged = true;
+            s.expecting = 0;
+            s.replies.clear();
         }
         Ok(data.len())
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
-        self.0
-            .borrow_mut()
-            .replies
+        let mut s = self.0.borrow_mut();
+        if s.unplugged {
+            return Err(Error::Transport("the phone left the bus".into()));
+        }
+        if s.away.is_some() && s.replies.is_empty() {
+            return Err(Error::Transport("the phone left the bus".into()));
+        }
+        s.replies
             .pop_front()
             .ok_or_else(|| Error::Transport("timed out waiting for the phone".into()))
     }

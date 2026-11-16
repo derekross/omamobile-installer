@@ -1,0 +1,13 @@
+frame: host-15-factory-begin
+factory-begin, id 15
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 14
+len: 194
+offset: 0
+payload sha256: f435c71e49232e1882f77525e43b158a7ff0bef7700a5ce6898770b3ba7c77f1
+pad byte: no
+frame bytes: 250
+frame sha256: 782eb15fad219bd14b6e552965da36d1ea0293246992f4b90df00d2b740ff0ad
+payload: {"t":"factory-begin","id":15,"size":4000000000,"sha256":"303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f","build":"test.260101.001","name":"cheetah-test.260101.001-factory.zip"}

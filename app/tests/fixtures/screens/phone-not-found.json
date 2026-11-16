@@ -1,0 +1,22 @@
+{
+  "state": "phone",
+  "stop": null,
+  "retry": null,
+  "title": "Connect the Pixel 7 Pro",
+  "notice": null,
+  "body": [
+    "Connect the Pixel 7 Pro with a USB cable that carries data, and put it in Fastboot Mode: with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears.",
+    "The installer then asks the phone what it is. That reads; it changes nothing on the phone."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": "No phone in Fastboot Mode answered.",
+  "plan": [],
+  "footer": [
+    "Connect one phone only."
+  ],
+  "choices": [],
+  "action": "read-phone"
+}

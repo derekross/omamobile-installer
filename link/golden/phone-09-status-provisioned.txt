@@ -1,0 +1,13 @@
+frame: phone-09-status-provisioned
+status, answering id 6
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 8
+len: 453
+offset: 0
+payload sha256: f206b28d5b95696522b7aca02917d118f9ee9b09d72d237c6eef786819ac1308
+pad byte: no
+frame bytes: 509
+frame sha256: 153b440250a3ff2fec76a4be7d04796fd57f75c8913954547b7587994b2c429e
+payload: {"t":"status","re":6,"stage":"provisioned","boot":2,"release":"2026.11.08","kernel":"7.3.0-rc6-omamobile","device":"cheetah","firstboot":{"state":"done","step":"Omarchy setup","n":9,"of":9,"failed":[]},"backup":{"state":"done","parts":[]},"factory":{"state":"none","have":0,"size":0},"provision":{"state":"done","step":"","n":0,"of":0,"optional_failed":["camera"]},"link":{"boots_left":2,"closes_s":600},"battery":80,"charging":true,"free":100000000000}

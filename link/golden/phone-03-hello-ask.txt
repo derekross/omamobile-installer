@@ -1,0 +1,13 @@
+frame: phone-03-hello-ask
+hello, answering id 1
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 2
+len: 287
+offset: 0
+payload sha256: 6bec54da47a05411342979a3f85c11f0b3e8763ff2cad82cdd0792c0354a3551
+pad byte: no
+frame bytes: 343
+frame sha256: 2644b70626fab6ccaa94a4d967fea54b1f73d96b566bbf2bd4e25ec8d91da393
+payload: {"t":"hello","re":1,"proto":1,"link":"0.0.1","device":"cheetah","max_data":1048576,"nonce":"404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f","host_nonce":"606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f","stage":"firstboot-done","pair":"ask","wait_s":0}

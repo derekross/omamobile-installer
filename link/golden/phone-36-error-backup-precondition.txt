@@ -1,0 +1,13 @@
+frame: phone-36-error-backup-precondition
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 35
+len: 174
+offset: 0
+payload sha256: df628f43e634a48ad99b61e1c416c8e64eca15c0197f6fe8af3749241caf8b50
+pad byte: no
+frame bytes: 230
+frame sha256: 3b2a4340242595d9089f82b806cd9e5d26e8539b6c6b5b2b698f037d6ada9f68
+payload: {"t":"error","re":21,"code":"backup-precondition","message":"a radio partition is not read-only, unmounted and found once","stage":"firstboot-done","parts":["efs","persist"]}

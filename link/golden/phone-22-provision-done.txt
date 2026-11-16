@@ -1,0 +1,13 @@
+frame: phone-22-provision-done
+provision-done, sent by itself (no re)
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 21
+len: 100
+offset: 0
+payload sha256: 2923374d21dafe8cf2050a487e4f307a5e168b2ea836b80583ee73182c1e6313
+pad byte: no
+frame bytes: 156
+frame sha256: e96d17394acc69e55d177f32aa44bd9f7c28b81d9c3b3153525ee850bd2a38e8
+payload: {"t":"provision-done","steps":[{"step":"firmware","state":"ok"},{"step":"camera","state":"failed"}]}

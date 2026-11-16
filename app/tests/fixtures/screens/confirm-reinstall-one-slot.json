@@ -1,0 +1,39 @@
+{
+  "state": "confirm",
+  "stop": null,
+  "retry": null,
+  "title": "This is what the installer will write",
+  "notice": null,
+  "body": [
+    "The Pixel 7 Pro (cheetah) is unlocked and runs from slot b; bootloader fake-1.0, baseband fake-radio-1.0.",
+    "Google's factory image for build TEST.260101.001 is the right file (cheetah-test.260101.001-factory-31c2322a.zip).",
+    "Bootloader fake-1.0: slot B's bootloader, which the phone already runs; the install switches no slot. The phone tells the version of that copy only; slot A's was not read, and an install that stays on slot B does not need it.",
+    "Your answers: user alex (PIN), phone name alex-phone, time zone Europe/Paris, Wi-Fi not set. The phone sets up your account from them at its first start.",
+    "Every image of the release was checked against its signed checksum, and each fits its partition on this phone. The installer will write these partitions, in this order, and no other:"
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [
+    "boot_b: images/boot.img, 16384 bytes (the partition holds 16384 bytes)",
+    "init_boot_b: images/init_boot.img, 8192 bytes (the partition holds 8192 bytes)",
+    "vendor_boot_b: images/vendor_boot.img, 4096 bytes (the partition holds 16384 bytes)",
+    "vendor_kernel_boot_b: images/vendor_kernel_boot.img, 12288 bytes (the partition holds 32768 bytes)",
+    "dtbo_b: images/dtbo.img, 4096 bytes (the partition holds 8192 bytes)",
+    "userdata: omamobile-rootfs-cheetah-2026.01.02-aarch64.img.zst, 2097152 bytes unpacked, sent in 6 pieces (the partition holds 8388608 bytes). ERASES userdata",
+    "then: make slot B the active slot (set_active:b)",
+    "then: restart the phone (reboot)"
+  ],
+  "footer": [
+    "userdata will be ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again.",
+    "Slot B's boot partitions, listed above, are overwritten: this is a reinstall, and the Omarchy Mobile that is on slot B now is replaced. If slot B holds Android instead, that Android is overwritten.",
+    "Slot A itself, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are not written.",
+    "At its first start the phone sets up your account from your answers: your user name, your PIN or password, the phone's name and time zone, and the Wi-Fi network if you gave one (it connects once Google's files for Wi-Fi are on the phone). The installer puts them into the place the release's system image keeps for them as it writes userdata. Your PIN or password goes there only as a hash, made on this computer; the Wi-Fi password goes as you typed it, because the phone needs it to connect. Neither is sent anywhere but to the phone.",
+    "To go ahead, type the phone's codename: cheetah",
+    "Anything else stops the install here, with nothing written."
+  ],
+  "choices": [],
+  "action": "confirm"
+}

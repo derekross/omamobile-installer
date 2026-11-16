@@ -1,0 +1,42 @@
+{
+  "state": "unlock",
+  "stop": null,
+  "retry": null,
+  "title": "Unlock the bootloader",
+  "notice": "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.",
+  "body": [
+    "The Pixel 7 Pro is in Fastboot Mode, and its bootloader is still locked.",
+    "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, its two bootloader copies match, and this release was tested with its Android build.",
+    "Unlocking is the moment the phone is erased, as the warning said: copy off photos, messages and two-factor codes before you do it.",
+    "The phone says that \"OEM unlocking\" is not switched on yet. Until it is, the phone refuses the unlock command, so switch it on in Android's Developer options first (step 1).",
+    "The installer does not send the unlock command, and these steps are not for now. They are what a version that can install will ask of you, shown so that you know them. This version gives you no reason to take them."
+  ],
+  "quote": null,
+  "steps": [
+    {
+      "text": "Switch on \"OEM unlocking\": press Power to start Android. In Settings > About phone, tap \"Build number\" seven times. Then in Settings > System > Developer options, switch on \"OEM unlocking\". If it is greyed out, connect the phone to the internet once (it stays grey until then after a reset); if it is still grey, the phone is most likely locked to its carrier and can't run Omarchy Mobile. Then put the phone back in Fastboot Mode: with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears.",
+      "command": null
+    },
+    {
+      "text": "On a computer with Android's fastboot tool, with the phone in Fastboot Mode, run:",
+      "command": "fastboot flashing unlock"
+    },
+    {
+      "text": "On the phone, press a volume key until it says \"Unlock the bootloader\", then press Power. The phone erases itself and starts Android again.",
+      "command": null
+    },
+    {
+      "text": "Bring it back to Fastboot Mode (with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears) and let the installer look again.",
+      "command": null
+    }
+  ],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer has only asked the phone what it is and whether it can be unlocked. It has written nothing to it."
+  ],
+  "choices": [],
+  "action": "read-phone"
+}

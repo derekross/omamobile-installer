@@ -1,0 +1,13 @@
+frame: phone-32-error-locked
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 31
+len: 104
+offset: 0
+payload sha256: da100b0caa25e5028344380eb21147e7c1eb24b821d63e73c42d5edbfb499706
+pad byte: no
+frame bytes: 160
+frame sha256: a4faad62513543685ca95152433beb4e90172e0aa0de437cb9bfc6dabe0cc627
+payload: {"t":"error","re":21,"code":"locked","message":"pairing is locked","stage":"firstboot-done","wait_s":30}

@@ -1,0 +1,13 @@
+frame: phone-04-pong
+pong, answering id 2
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 3
+len: 19
+offset: 0
+payload sha256: 094ee1e3477497138060c844dfa317165442def0b028c5875462bc491ffdd9b6
+pad byte: no
+frame bytes: 75
+frame sha256: bd82e977569f7aa8fde5dfb47fa25be2fda838437d7ff9d46a1a449bf0f715ce
+payload: {"t":"pong","re":2}

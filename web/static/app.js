@@ -22,10 +22,19 @@
 // bytes are worth. A fetch the browser refuses falls back to the file the
 // person saves from Google's page.
 //
-//   /            the published release's files, and a real phone over WebUSB
+// The release comes from the release server (release-fetch.js): its latest
+// version for the phone chosen at the top, its small files checked by the
+// module before the flow begins, and, on the owner's click, its boot images
+// and root image downloaded into the browser's own storage and checked
+// against the signed manifest. Or from a release the owner saved on this
+// computer. The page as it ships uses those files for nothing but the check:
+// its flow ends at the dry run, which sends no image.
+//
+//   /            the latest release from the release server, and a real phone over WebUSB
 //   /?pretend    a pretend phone and a test bundle (self-test builds only)
 //   /?selftest   the same, driven through every state by this script
 import init, * as core from "./pkg/omamobile_installer_web.js";
+import { checkPicked, DEFAULTS, DEVICES, downloadRelease, fetchSmall, findLatest, fromPicked, largeFiles, RELEASES, ReleaseError, size, Store } from "./release-fetch.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...children) => {
@@ -38,12 +47,34 @@ const query = new URLSearchParams(location.search);
 
 let pretend = false; // a pretend phone and the built-in test bundle
 let flow = null; // core.InstallFlow
+// After a write, the install link (core.LinkPreview): its screens take the
+// flow's place. Only a preview build has it; the page as it ships has none.
+let linkFlow = null;
 let phone = null; // core.Phone: the one the person picked, or the pretend one
 let busy = Promise.resolve(); // the action in progress, for the self-test to wait on
 // Self-test builds only: a stand-in on this computer that answers in Google's
 // place ({ origin, mode }), so that a pretend run never reaches Google
 let standIn = null;
 const GOOGLE = "https://dl.google.com/";
+
+// Where the release comes from: { kind: "server", pointer, small } or
+// { kind: "picked", small, byName }. `small`: the small files as bytes, in
+// the order InstallFlow.begin takes them, and the build index
+let source = null;
+// The release's large files as File objects, once each passed its check
+// against the signed manifest: boot images in the plan's order, then the
+// root image. Null until then
+let large = null;
+// The release server. Self-test builds only: a stand-in on this computer
+let releases = RELEASES;
+let releasesStandIn = null;
+
+// What a build that is not the page as it ships may add to this script: how
+// a flow is begun, controls for a screen's action, and what the first status
+// line says once the installer is loaded. Nothing in this file sets any of
+// them, and the page as it ships loads no other script (tools/check-shipping
+// reads what it loads), so there all three stay empty.
+export const additions = { begin: null, controls: null, loaded: null };
 
 const show = (id, text, state) => {
   $(id).textContent = text;
@@ -74,10 +105,9 @@ async function start(tamper = "", slotOverride = false, fetches = false) {
     flow = core.InstallFlow.selftest($("reinstall").checked, tamper, slotOverride, fetches);
     phone = core.fake_phone($("scenario").value);
   } else {
-    const files = await Promise.all(RELEASE_FILES.map((name) => bytes("release/" + name)));
-    // The list of Google's builds, when the release has one
-    const index = await bytes("release/factory-builds.json", true);
-    flow = core.InstallFlow.begin(...files, index, $("reinstall").checked);
+    if (!source) await fromServer();
+    const { files, index } = source.small;
+    flow = additions.begin ? additions.begin(files, index, $("reinstall").checked) : core.InstallFlow.begin(...files, index, $("reinstall").checked);
   }
   const text = flow.release();
   if (text) {
@@ -88,6 +118,154 @@ async function start(tamper = "", slotOverride = false, fetches = false) {
     show("release", "the release did not pass its checks", "bad");
   }
   render();
+}
+
+// ---- The release ----------------------------------------------------------
+
+// The module's check of a release's small files: with the release keys built
+// into it, or, in a self-test build's pretend run, the test key
+function verified(files) {
+  return pretend ? core.selftest_verify_release(undefined, ...files) : core.verify_release(...files);
+}
+
+// The latest release for the chosen phone, from the release server
+async function fromServer() {
+  source = null;
+  large = null;
+  if (!pretend) show("release", "asking the release server for the latest release", "pending");
+  const pointer = await findLatest($("device").value, { base: releases });
+  const small = await fetchSmall(pointer);
+  source = { kind: "server", pointer, small };
+  await drawRelease();
+}
+
+// A release saved on this computer: its files, its folder, or its .tar
+async function fromComputer(list) {
+  if (!list?.length) return;
+  source = null;
+  large = null;
+  const picked = await fromPicked(list);
+  source = { kind: "picked", small: picked, byName: picked.byName };
+  if (!pretend) await start();
+  await drawRelease();
+  // Every large file is checked now, a piece at a time
+  await checkLarge();
+}
+
+// What the panel says, and which of its buttons can be pressed: each step
+// only once the one before it is done
+async function drawRelease(state = "") {
+  const go = $("download-release");
+  go.disabled = true;
+  if (!source) {
+    $("release-from").textContent = "No release yet.";
+    return;
+  }
+  let release = null;
+  try {
+    release = verified(source.small.files);
+  } catch (e) {
+    $("release-from").textContent = `The release did not pass its checks: ${e.message ?? e}`;
+    return;
+  }
+  const d = JSON.parse(release.describe());
+  const files = largeFiles(d, source.small.files[3]);
+  const total = files.reduce((n, f) => n + f.size, 0);
+  if (source.kind === "server") {
+    $("release-from").textContent = `From the release server: Omarchy Mobile ${d.version} for ${d.device}. Its images are ${size(total)}.`;
+    go.disabled = !!large;
+    go.textContent = "Download and check the release";
+    const storage = navigator.storage;
+    if (!large && storage?.getDirectory) {
+      try {
+        const store = await Store.open(await storage.getDirectory(), d.codename, d.version);
+        let kept = 0;
+        let complete = 0;
+        for (const f of files) {
+          const record = await store.record(f.name);
+          if (record?.sha256 !== f.sha256) continue;
+          kept += (await store.parts(f.name)).reduce((n, p) => n + p.file.size, 0);
+          if (record.complete) complete++;
+        }
+        if (complete === files.length) {
+          go.textContent = "Check the downloaded release";
+          state ||= "This release was downloaded on an earlier visit. It is read from this computer and checked again before it is used; nothing is downloaded again.";
+        } else if (kept > 0) {
+          go.textContent = "Go on with the download";
+          state ||= `${size(kept)} of ${size(total)} were downloaded on an earlier visit. The download goes on from there, and checks every byte.`;
+        }
+      } catch {
+        // No storage for this page: said when the download is asked for
+      }
+    }
+  } else {
+    $("release-from").textContent = `From this computer: Omarchy Mobile ${d.version} for ${d.device}.`;
+  }
+  if (large) state ||= "Every file of the release is here, and each one matched the signed release.";
+  $("release-state").textContent = state;
+  $("release-state").className = large ? "ok" : "";
+}
+
+function progress(files) {
+  const bar = $("release-progress");
+  const total = files.reduce((n, f) => n + f.size, 0);
+  const before = (name) => files.slice(0, files.findIndex((f) => f.name === name)).reduce((n, f) => n + f.size, 0);
+  bar.hidden = false;
+  bar.value = 0;
+  return (e) => {
+    const line = $("release-state");
+    line.className = "";
+    if (e.type === "prepared" && !e.persisted) {
+      $("release-note").textContent = "The browser did not promise to keep these files: it may delete them if the disk fills up. They are checked again before every use either way.";
+    }
+    if (e.type === "kept" || e.type === "download") {
+      bar.value = (before(e.name) + e.done) / Math.max(total, 1);
+      line.textContent = `${e.type === "kept" ? "Checking what is on this computer of" : "Downloading"} ${e.name}: ${size(e.done)} of ${size(e.size)}`;
+    } else if (e.type === "retry") {
+      line.textContent = `${e.why}. Trying again (try ${e.tries + 1} of ${DEFAULTS.tries})…`;
+    } else if (e.type === "checked") {
+      bar.value = (before(e.name) + e.size) / Math.max(total, 1);
+    }
+  };
+}
+
+// The boot images and the root image: downloaded into the browser's own
+// storage (a server release), or read from the files picked, and each
+// checked against the signed release
+async function checkLarge() {
+  if (!source) throw new Error("there is no release yet");
+  const release = verified(source.small.files);
+  const d = JSON.parse(release.describe());
+  const files = largeFiles(d, source.small.files[3]);
+  const onEvent = progress(files);
+  try {
+    if (source.kind === "picked") {
+      large = await checkPicked(release, files, source.byName, { onEvent });
+    } else {
+      const storage = navigator.storage;
+      if (!storage?.getDirectory) throw new ReleaseError("storage", "this browser gives a page no file system of its own, so it can't keep the release: pick a release saved on this computer instead");
+      const store = await Store.open(await storage.getDirectory(), d.codename, d.version);
+      large = await downloadRelease({ release, files, base_url: source.pointer.base_url, store, storage, onEvent });
+    }
+  } catch (e) {
+    large = null;
+    await drawRelease();
+    $("release-state").textContent = e.message ?? String(e);
+    $("release-state").className = "problem";
+    return;
+  } finally {
+    $("release-progress").hidden = true;
+  }
+  await drawRelease();
+  if (flow) render();
+}
+
+async function deleteKept() {
+  if (navigator.storage?.getDirectory) await Store.clear(await navigator.storage.getDirectory());
+  if (source?.kind === "server") large = null;
+  $("release-note").textContent = "";
+  await drawRelease("Nothing of a release is kept on this computer any more.");
+  if (flow) render();
 }
 
 // ---- Actions --------------------------------------------------------------
@@ -102,6 +280,10 @@ function act(action) {
       await action();
     } catch (e) {
       failure = e.message ?? String(e);
+      // A device the browser no longer has (the phone restarted, the cable
+      // moved) can't be opened again: the next step's button asks the
+      // browser's chooser again, which needs the owner's click
+      if (/disconnected|NotFoundError|no device|device was lost/i.test(failure)) phone = null;
     }
     render();
     if (failure) $("screen").append(el("p", { className: "problem", id: "failure", textContent: failure }));
@@ -263,8 +445,23 @@ function answersForm() {
 }
 
 function controls(s) {
+  const added = additions.controls?.(s);
+  if (added) return added;
   const row = el("div", { className: "actions" });
   switch (s.action) {
+    // The install link's (preview builds only)
+    case "pair": {
+      const input = el("input", { id: "pair-code", inputMode: "numeric", autocomplete: "off", placeholder: "Six-digit code" });
+      row.append(input, button("pair", "Pair with the phone", () => linkAct(() => linkFlow.pair(input.value))));
+      if (linkFlow?.pretend_shows) row.append(el("span", { id: "pretend-shows", textContent: `the pretend phone shows ${linkFlow.pretend_shows() ?? "no code"}` }));
+      break;
+    }
+    case "retry":
+      row.append(button("retry", "Try again", () => linkAct(() => linkFlow.retry())));
+      break;
+    case "wait":
+      row.append(el("p", { id: "wait", textContent: "The phone works by itself. Keep the cable in." }));
+      break;
     case "acknowledge":
       row.append(
         button("accept", "I have read this. Go on", () => flow.acknowledge_warning()),
@@ -309,20 +506,33 @@ function controls(s) {
       return answersForm();
     case "dry-run":
       row.append(
-        button("dry", "Run the dry run", async () => {
+        button("dry", phone ? "Run the dry run" : "Choose the phone and run the dry run", async () => {
           if (!phone) phone = await core.request_phone();
           await flow.dry_run(phone.again());
         }),
       );
       break;
     default:
-      row.append(button("again", "Start over", () => start()));
+      // The core says whether starting again can get past a stop (Screen.retry);
+      // where it can't, the page offers no button that would only stop again
+      if (s.retry !== "stops-again") row.append(button("again", "Start over", () => start()));
   }
   return row;
 }
 
+// One turn of the install link: the action, then the link driven until the
+// owner is needed again, each screen drawn as it comes.
+function linkAct(action) {
+  return act(async () => {
+    await action();
+    await linkFlow.run();
+  });
+}
+
 function render() {
-  const s = JSON.parse(flow.screen());
+  // No release yet and no link: nothing to draw (the status line says why)
+  if (!flow && !linkFlow) return;
+  const s = JSON.parse((linkFlow ?? flow).screen());
   const box = $("screen");
   box.hidden = false;
   box.className = s.state;
@@ -444,7 +654,7 @@ async function selftest() {
   // 1. The whole flow, with every way the factory image and the answers are refused
   await begin("ready");
   const seen = [state()];
-  check("the page says it is a preview that cannot write", $("banner").textContent.includes("cannot write to a phone") && !core.writes_enabled());
+  check("the page says it is a preview that cannot write", $("banner").textContent.includes("cannot write to a phone") && !("writes_enabled" in core) && !("connect" in core) && !("Install" in core));
   check("the warning comes first, and nothing is asked of the phone before it", state() === "warning" && sent().commands === 0 && !$("look"));
   await click("accept");
   seen.push(state());
@@ -644,6 +854,7 @@ async function selftest() {
   await click("accept");
   await click("look");
   check("the slot stop hands out no way around and says a retry stops again", text().includes("will stop here again") && !text().includes("--") && !text().includes("override") && !notice() && sent().not_reads.length === 0);
+  check("a stop that starting again can't pass offers no \"Start over\"", JSON.parse(flow.screen()).retry === "stops-again" && !$("again"));
   await begin("untested-old-build");
   await click("accept");
   await click("look");
@@ -695,6 +906,7 @@ async function selftest() {
   await begin("ready");
   await click("decline");
   check("declining the warning ends the install with nothing sent", stop() === "warning-declined" && sent().commands === 0 && text().includes("Nothing was sent to a phone."));
+  check("a stop that starting again can pass offers \"Start over\"", JSON.parse(flow.screen()).retry === "whenever" && !!$("again"));
   await begin("ready", { tamper: "manifest" });
   check("a changed manifest stops before the warning", stop() === "release-not-verified" && !$("accept") && $("release").className === "bad");
   await begin("ready", { tamper: "index" });
@@ -708,14 +920,101 @@ async function selftest() {
   published[3][100] ^= 1;
   check("the published release with one changed byte is refused", JSON.parse(core.InstallFlow.begin(...published, undefined, false).screen()).stop === "release-not-verified");
 
-  // 7. The write path against the pretend phone, and zstd (as before)
+  // 7. An install walked against the pretend phone, and zstd. A dry run:
+  // this module has no way to a session that writes, in any build
   const install = JSON.parse(await core.selftest());
   check(
-    "an install against the pretend phone writes slot B and userdata only, and the release keys refuse the test bundle",
-    install.install_done && install.userdata_matches && install.boot_b_matches && install.partitions_written.length === 6 && install.test_key_refused_by_release_keys && install.wrong_phone_refused,
+    "an install walked against the pretend phone holds every write back, and the release keys refuse the test bundle",
+    install.install_done && install.dry_run && install.writes_held_back > 7 && install.ends_with_reboot_held_back &&
+      install.sent_not_a_question.length === 0 && install.partitions_written.length === 0 && install.active_slot === "a" &&
+      install.test_key_refused_by_release_keys && install.wrong_phone_refused,
     JSON.stringify(install),
   );
   result.zstd_mib_per_s = Math.round(install.zstd_mib_per_s);
+
+  // 8. After a write, the install link (a preview build's module only): a
+  // pretend phone that speaks the link, from its first start to ready, the
+  // screens drawn by this page as the core sends them
+  if (core.LinkPreview) {
+    const seen = [];
+    const zipFile = new Blob([core.selftest_factory_zip()]);
+    linkFlow = core.LinkPreview.pretend(
+      zipFile,
+      (json) => {
+        seen.push(JSON.parse(json).state);
+        render();
+      },
+      () => {},
+    );
+    render();
+    await linkAct(() => {});
+    check("the link waits for the first start, then asks for the code the phone shows", seen[0] === "first-start" && state() === "pair" && !!$("pair-code"), seen.join(" "));
+    const right = linkFlow.pretend_shows();
+    $("pair-code").value = right === "000000" ? "111111" : "000000";
+    await click("pair");
+    check("a wrong code is said, and the code is asked again", state() === "pair" && problem().includes("not the code"), problem());
+    $("pair-code").value = right;
+    await click("pair");
+    const report = JSON.parse(linkFlow.pretend_report());
+    check(
+      "the link goes through every state to ready",
+      state() === "ready" && ["setup", "radio-backup", "factory-send", "provision", "restart", "check"].every((s) => seen.includes(s)) &&
+        report.done === "finished" && report.restarts === 1 && report.provision_starts === 1 && report.finished_files && report.backup.length === 6,
+      seen.join(" ") + " " + JSON.stringify(report),
+    );
+    linkFlow = null;
+  } else {
+    result.install_link = "not in this build";
+  }
+
+  // 9. The release, from a stand-in for the release server on another origin
+  // (CORS and Range as the real one sends them), into this browser's own
+  // file system. A made-up release signed with a test key
+  check("the page was served with a stand-in for the release server, on another origin", !!releasesStandIn && releasesStandIn.startsWith("http://127.0.0.1:") && releasesStandIn !== location.origin);
+  if (releasesStandIn) {
+    const largeAsked = async (mode) =>
+      (await (await fetch(`${releasesStandIn}/asked`)).json()).filter((a) => a.mode === mode && a.method === "GET" && (a.path.includes("/images/") || a.path.endsWith(".img.zst")));
+    const serverIn = async (mode) => {
+      releases = `${releasesStandIn}/${mode}/releases/`;
+      await fromServer();
+    };
+    const panelSays = () => $("release-state").textContent;
+    await click("delete-release");
+    await serverIn("cut");
+    check("the latest release is found on the server and its signed small files pass, and the download can be asked for", $("release-from").textContent.startsWith("From the release server: Omarchy Mobile 2026.01.02") && !$("download-release").disabled, $("release-from").textContent);
+    let t = performance.now();
+    await click("download-release");
+    result.release_download_ms = Math.round(performance.now() - t);
+    const cut = await largeAsked("cut");
+    const rootAsked = cut.filter((a) => a.path.endsWith(".img.zst"));
+    check(
+      "a download that is cut goes on with a range, and every file is checked",
+      large?.length === 6 && $("release-state").className === "ok" && rootAsked.length === 2 && rootAsked[0].range === null && /^bytes=[1-9][0-9]*-$/.test(rootAsked[1].range ?? "") && cut.length === 7 && $("download-release").disabled,
+      `${panelSays()} ${JSON.stringify(rootAsked)}`,
+    );
+    check("the files are this browser's own file system's, read from disk", large?.every((f) => f instanceof File) && large.at(-1).size === JSON.parse(flow.release()).root_image.size);
+    // A later visit: the same release, kept
+    t = performance.now();
+    await serverIn("cut");
+    check("on a later visit the kept release is offered for checking, not for download", $("download-release").textContent === "Check the downloaded release" && panelSays().includes("nothing is downloaded again"), `${$("download-release").textContent} ${panelSays()}`);
+    await click("download-release");
+    result.release_check_kept_ms = Math.round(performance.now() - t);
+    check("and nothing is downloaded again", large?.length === 6 && (await largeAsked("cut")).length === 7, panelSays());
+    await serverIn("badsum");
+    await click("delete-release");
+    await serverIn("badsum");
+    await click("download-release");
+    check("a root image with one byte changed is refused, and nothing of it is kept", large === null && $("release-state").className === "problem" && panelSays().includes("is not the signed release's file") && panelSays().includes("deleted"), panelSays());
+    await serverIn("badsig");
+    check("a signature that does not verify: no download is offered", $("release-from").textContent.startsWith("The release did not pass its checks") && $("download-release").disabled && (await largeAsked("badsig")).length === 0, $("release-from").textContent);
+    await click("delete-release");
+    await serverIn("norange+cut");
+    await click("download-release");
+    check("a server without Range: the file is started over, and the download completes", large?.length === 6 && (await largeAsked("norange+cut")).filter((a) => a.path.endsWith(".img.zst")).length === 2, panelSays());
+    await click("delete-release");
+    check("the downloaded release can be deleted", large === null && panelSays().includes("Nothing of a release is kept"));
+    releases = `${releasesStandIn}/ok/releases/`;
+  }
 
   result.failed = failures;
   result.pass = failures.length === 0;
@@ -723,17 +1022,44 @@ async function selftest() {
   return result;
 }
 
+// For a script that sets `additions`: the flow and the phone as they are now,
+// and this script's own helpers. The page as it ships has no such script.
+export const page = {
+  core,
+  $,
+  el,
+  act,
+  button,
+  render,
+  start,
+  get flow() {
+    return flow;
+  },
+  get busy() {
+    return busy;
+  },
+  get phone() {
+    return phone;
+  },
+  // The release's large files, each checked against the signed release, or null
+  get large() {
+    return large;
+  },
+  set phone(picked) {
+    phone = picked;
+  },
+};
+
 // ---- Start ----------------------------------------------------------------
 
 async function main() {
   try {
     await init();
-    show("core", `loaded${core.writes_enabled() ? "" : " (this build can't write to a phone)"}`, "ok");
+    show("core", additions.loaded ?? "loaded (this page cannot write to a phone)", "ok");
   } catch (e) {
     show("core", `the installer did not load: ${e.message ?? e}`, "bad");
     return;
   }
-  if (core.writes_enabled()) $("banner").textContent = "This build can write to a phone.";
   const selftesting = query.has("selftest");
   if (query.has("pretend") || selftesting) {
     if (!core.fake_phone) {
@@ -744,14 +1070,44 @@ async function main() {
     $("scenario").append(...core.fake_phone_scenarios().map((name) => el("option", { value: name, textContent: name })));
     $("scenario-label").hidden = false;
   }
+  if (pretend) {
+    // A self-test build's pretend run downloads from a stand-in on this
+    // computer (web/serve.py --releases), or not at all
+    const config = await fetch("releases-stand-in.json");
+    if (config.ok) {
+      releasesStandIn = (await config.json()).origin;
+      releases = `${releasesStandIn}/ok/releases/`;
+    }
+  }
+  $("device").append(...DEVICES.map((d) => el("option", { value: d.codename, textContent: `${d.name} (${d.codename})` })));
+  $("release-panel").hidden = false;
+  const panel = (action) => () => {
+    busy = (async () => {
+      try {
+        await action();
+      } catch (e) {
+        $("release-state").textContent = e.message ?? String(e);
+        $("release-state").className = "problem";
+      }
+    })();
+    return busy;
+  };
+  $("download-release").addEventListener("click", panel(checkLarge));
+  $("delete-release").addEventListener("click", panel(deleteKept));
+  for (const id of ["bundle-files", "bundle-folder"]) $(id).addEventListener("change", panel(() => fromComputer($(id).files)));
+  $("device").addEventListener("change", panel(async () => {
+    source = null;
+    await start();
+  }));
   $("options").hidden = false;
   $("restart").addEventListener("click", () => act(() => start()));
   $("scenario").addEventListener("change", () => act(() => start()));
   $("reinstall").addEventListener("change", () => act(() => start()));
   try {
     await start();
+    if (pretend && releasesStandIn) await fromServer();
   } catch (e) {
-    show("release", e.message ?? String(e), "bad");
+    show("release", `${e.message ?? String(e)}. A release saved on this computer can be picked below the phone's name.`, "bad");
   }
   if (selftesting) {
     $("selftest-section").hidden = false;

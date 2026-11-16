@@ -1,0 +1,13 @@
+frame: limit-message-262088-padded
+the longest message that takes the pad byte: 56 + 262088 = 262144
+direction: phone to host
+kind: 1 (message)
+flags: 1
+seq: 31
+len: 262088
+offset: 0
+payload sha256: 93fc470765325915bf88152eb4ac945f6865c0e8ba8e6982449ce8580d725dc1
+pad byte: yes
+frame bytes: 262145
+frame sha256: 4048a0a91f3ce127ab4309fb4b90d5b0f37d71be7dbf12dd512f0b2ea66a2a6d
+payload: {"t":"smoke-report","re":19,"report":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ... (262088 bytes)

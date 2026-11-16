@@ -1,0 +1,23 @@
+{
+  "state": "stopped",
+  "stop": "dry-run-refused",
+  "retry": "stops-again",
+  "title": "The dry run stopped",
+  "notice": null,
+  "body": [
+    "The checks an install starts with did not pass (phone: images/vendor_kernel_boot.img is 12288 bytes, larger than vendor_kernel_boot_b (8192 bytes)).",
+    "If this looks wrong for your phone, tell us at https://github.com/derekross/omarchy-mobile/issues"
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer only asked the phone what it is. It has written nothing to it.",
+    "Starting the installer again as things are will stop here again."
+  ],
+  "choices": [],
+  "action": "none"
+}

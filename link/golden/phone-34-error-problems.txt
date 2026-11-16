@@ -1,0 +1,13 @@
+frame: phone-34-error-problems
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 33
+len: 218
+offset: 0
+payload sha256: ee37053623bc40cea1a0bd6a1646647bf9710313e71c2e339b657bc75beedef3
+pad byte: no
+frame bytes: 274
+frame sha256: 7a413170cd08662a71bbe33db13974c775c4d7f06ce2120627bdeb39aa49897f
+payload: {"t":"error","re":21,"code":"problems","message":"the answers were refused; nothing was kept","stage":"firstboot-done","problems":[{"field":"username","reason":"reserved"},{"field":"timezone","reason":"no-such-zone"}]}

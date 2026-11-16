@@ -1,0 +1,13 @@
+frame: phone-07-bye
+bye, answering id 5
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 6
+len: 18
+offset: 0
+payload sha256: 9113fb02e9e5ed984ee5190613378b0318ae813d3980bb82bc29bfdd8916211d
+pad byte: no
+frame bytes: 74
+frame sha256: c2e77ff44f7806aa56fc76e8e90c5bfc45727dc3ed38aca85f28f1501d7f21eb
+payload: {"t":"bye","re":5}

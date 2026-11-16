@@ -1,0 +1,13 @@
+frame: host-14-abort
+abort, id 14
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 13
+len: 21
+offset: 0
+payload sha256: d6d7157c409a797522565cf318bb03c16dc905ffddc92b46f6d8b492e99a7c47
+pad byte: no
+frame bytes: 77
+frame sha256: 6a5760953a7e5b05aef75862b0321f94784bfadd50ff3b5d1ba522d389d4bff9
+payload: {"t":"abort","id":14}

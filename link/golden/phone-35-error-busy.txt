@@ -1,0 +1,13 @@
+frame: phone-35-error-busy
+error, answering id 21
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 34
+len: 96
+offset: 0
+payload sha256: 76d898a00d1ec19f268d172298293ad67277df2e52cca853b7ad0745bcfaa050
+pad byte: no
+frame bytes: 152
+frame sha256: 81fd7744183387832c7e574b2f42c9b2658549c6cc0bdd6c6639bcb6128c860e
+payload: {"t":"error","re":21,"code":"busy","message":"another step is running","stage":"firstboot-done"}

@@ -10,7 +10,9 @@
 # gets an empty /dev and no /sys/bus/usb.
 #
 # Nothing is fetched from Google either: the downloads of the factory image
-# go to a stand-in that web/serve.py runs on this computer. And the browser
+# go to a stand-in that web/serve.py runs on this computer. Nor from the
+# release server: the page's download of a release goes to a stand-in
+# (web/test/release-server.mjs) with a release signed by a test key. And the browser
 # itself is held to this computer: it can resolve no host but 127.0.0.1, and
 # its own background services (updates, sync, reports) are switched off, so
 # neither the page nor the browser reaches Google or anyone else.
@@ -34,9 +36,16 @@ rm -rf "$work"; mkdir -p "$work/profile"
 port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 # --stand-in: Google's server is a stand-in on this computer, and the page's
 # policy lets it fetch from nowhere else, so the run reaches nothing of Google's
-python3 "$here/serve.py" "$port" --stand-in >"$work/server.log" 2>&1 &
+# --releases: the release server is a stand-in on this computer too
+# (web/test/release-server.mjs, a release signed with a test key)
+command -v node >/dev/null || { echo "selftest: node is needed for the release server's stand-in" >&2; exit 1; }
+node "$here/test/release-server.mjs" >"$work/releases.log" 2>&1 &
+releases=$!
+for _ in $(seq 50); do grep -q "^http://" "$work/releases.log" && break; sleep 0.1; done
+releases_origin=$(head -1 "$work/releases.log")
+python3 "$here/serve.py" "$port" --stand-in --releases "$releases_origin" >"$work/server.log" 2>&1 &
 server=$!
-trap 'kill "$server" ${chrome:-} 2>/dev/null || true' EXIT
+trap 'kill "$server" "$releases" ${chrome:-} 2>/dev/null || true' EXIT
 for _ in $(seq 50); do grep -q "^http://" "$work/server.log" && break; sleep 0.1; done
 
 hide=()

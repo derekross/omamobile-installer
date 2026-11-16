@@ -1,0 +1,13 @@
+frame: host-19-smoke
+smoke, id 19
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 18
+len: 21
+offset: 0
+payload sha256: dcb4cf7c132dca80576ece6f3b54c489fc390cdcec32ecbd3e5d3d1b87b5822b
+pad byte: no
+frame bytes: 77
+frame sha256: 4f75b027d6a834887dbf001ef0670d39fa1867519cb7d84b3d4f73f42f260a84
+payload: {"t":"smoke","id":19}

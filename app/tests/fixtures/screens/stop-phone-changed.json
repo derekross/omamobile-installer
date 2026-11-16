@@ -1,0 +1,24 @@
+{
+  "state": "stopped",
+  "stop": "phone-changed",
+  "retry": "after-fix",
+  "title": "This is not the phone the install was started on",
+  "notice": null,
+  "body": [
+    "The phone connected now is not the phone this install looked at first.",
+    "Connect one phone only, the one you mean to install, and keep it connected."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer only asked each of the two phones what it is, and the first whether it can be unlocked. It has written nothing to either.",
+    "If you unlocked the first phone's bootloader, that erased that phone: Android starts on it as new.",
+    "Start the installer again once that is done."
+  ],
+  "choices": [],
+  "action": "none"
+}

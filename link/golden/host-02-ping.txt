@@ -1,0 +1,13 @@
+frame: host-02-ping
+ping, id 2
+direction: host to phone
+kind: 1 (message)
+flags: 0
+seq: 1
+len: 19
+offset: 0
+payload sha256: cce77de695afc2fda8ab80546ba68413136cac935be22b153c4d199a76ca1848
+pad byte: no
+frame bytes: 75
+frame sha256: a4993fc87a4f646efe18e7502238fb44cc2b1f1e73d6ef813c75732864b42033
+payload: {"t":"ping","id":2}

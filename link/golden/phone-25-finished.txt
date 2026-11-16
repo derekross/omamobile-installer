@@ -1,0 +1,13 @@
+frame: phone-25-finished
+finished, answering id 20
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 24
+len: 24
+offset: 0
+payload sha256: f03af5096939213b56adcbe8daea25f9c29611a34b19e9945a8b7c01cdf9e996
+pad byte: no
+frame bytes: 80
+frame sha256: 3789fd95685919f90df13a15191d821697ad1927a627ca9983c723999d8e81c1
+payload: {"t":"finished","re":20}

@@ -1,0 +1,13 @@
+frame: phone-10-answers-ok
+answers-ok, answering id 7
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 9
+len: 25
+offset: 0
+payload sha256: 14f319ec7dfa4ef75e4e37dd264cf452a2c04400c71ab08022c65bbff14d3c13
+pad byte: no
+frame bytes: 81
+frame sha256: a2c2a2329e9b79e6d064e1b1bbfdd5fa7d0d44ac090e341c5c940ab99522e029
+payload: {"t":"answers-ok","re":7}

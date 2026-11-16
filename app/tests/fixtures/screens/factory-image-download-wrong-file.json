@@ -1,0 +1,30 @@
+{
+  "state": "factory-image",
+  "stop": null,
+  "retry": null,
+  "title": "Google's factory image",
+  "notice": null,
+  "body": [
+    "The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. Omarchy Mobile does not host them or pass them on.",
+    "This phone's bootloader and baseband match Google's build TEST.260101.001, which release 2026.01.02 was tested with.",
+    "(Also in the list with the same two versions, which can't be told apart from here: TEST.260101.001.A1. TEST.260101.001 is the tested one, and the one used.)",
+    "You accepted Google's terms for build TEST.260101.001 on 2026-11-12 at 14:03 UTC. The installer keeps that for this run only and sends it nowhere.",
+    "The installer downloads the image from Google's own server, dl.google.com, to this computer: cheetah-test.260101.001-factory-31c2322a.zip, about 0.0 MB. It then checks the file's size and SHA-256 against the release's signed list, and uses nothing of the file before that.",
+    "If you already saved that file from Google's page, you can hand it to the installer instead."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": "https://developers.google.com/android/images#cheetah",
+  "file": {
+    "name": "cheetah-test.260101.001-factory-31c2322a.zip",
+    "size": 49152,
+    "build": "TEST.260101.001"
+  },
+  "problem": "some-other-file.zip is not the file for this phone. The file to save from Google's page is cheetah-test.260101.001-factory-31c2322a.zip",
+  "plan": [],
+  "footer": [
+    "The file comes from Google and stays on this computer. Nothing of it is sent anywhere."
+  ],
+  "choices": [],
+  "action": "download"
+}

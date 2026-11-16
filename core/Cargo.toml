@@ -10,18 +10,29 @@ publish.workspace = true
 default = ["openpgp"]
 # Signature check with rPGP. Off only to measure what it costs in the wasm.
 openpgp = ["dep:pgp"]
+# The pretend phone that speaks the install link (the protocol crate's
+# in-memory daemon, `omamobile-link/sim`): for the tests, the command-line
+# tool's `fake-phone` build and the page's self-test. Never in a shipping
+# build (tools/check-shipping).
+pretend-link = ["omamobile-link/sim"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 ruzstd = "0.9"
+# The install link's protocol, with no I/O (link/, docs/LINK.md): the core
+# drives its host machine after the write (core/src/link.rs).
+omamobile-link = { path = "../link" }
 pgp = { version = "0.21", optional = true, default-features = false }
 
 [dev-dependencies]
 pollster = "1"
 pgp = { version = "0.21", default-features = false }
 rand = "0.8"
+omamobile-link = { path = "../link", features = ["sim"] }
+# The tests drive the install link against its pretend phone
+omamobile-installer-core = { path = ".", default-features = false, features = ["openpgp", "pretend-link"] }
 
 # rPGP on wasm32-unknown-unknown needs its "wasm" feature (getrandom's "js"
 # backend and web-time). Verifying uses neither random numbers nor the clock.

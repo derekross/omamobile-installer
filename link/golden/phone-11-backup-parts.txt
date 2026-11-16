@@ -1,0 +1,13 @@
+frame: phone-11-backup-parts
+backup-parts, answering id 10
+direction: phone to host
+kind: 1 (message)
+flags: 0
+seq: 10
+len: 125
+offset: 0
+payload sha256: 1ec264eb792748d4d8e29250afb00bf69a283cb809884eca29dad240e1655654
+pad byte: no
+frame bytes: 181
+frame sha256: 39a184380142f278cd3729f0bfc47e0355c94f25bd5f493b8b8ef59cfed587db
+payload: {"t":"backup-parts","re":10,"parts":[{"name":"efs","size":3000,"checked":true},{"name":"devinfo","size":10,"checked":false}]}

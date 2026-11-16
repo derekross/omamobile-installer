@@ -1,0 +1,38 @@
+{
+  "state": "slot-b",
+  "stop": null,
+  "retry": null,
+  "title": "What is on this phone's slot B?",
+  "notice": null,
+  "body": [
+    "The Pixel 7 Pro is running from its second system copy (slot B). Omarchy Mobile is installed on slot B, and Android is kept on the first copy (slot A) as the way back.",
+    "A phone runs from slot B for one of two reasons: Omarchy Mobile was installed on it before, or Android moved there with a system update (an update is written to the other copy, and the phone then starts from it). From Fastboot Mode the installer can't tell which, so it asks you.",
+    "If Omarchy Mobile is on slot B, the installer installs it again there: it writes slot B's boot partitions and userdata again, and the phone keeps starting from slot B. It switches no slot, so the bootloader the phone runs now, slot B's, is the one it will start with, and the installer checks that one.",
+    "If you say Omarchy Mobile and slot B holds Android, the install overwrites the Android this phone is using. What is left on slot A is the Android from before the update, which may no longer start; getting the phone back to Android may then take Google's own tools and factory image.",
+    "If you don't know, say so: the installer then tells you how to find out."
+  ],
+  "quote": null,
+  "steps": [],
+  "link": null,
+  "file": null,
+  "problem": null,
+  "plan": [],
+  "footer": [
+    "The installer only asked the phone what it is. It has written nothing to it, and writes nothing before you have answered."
+  ],
+  "choices": [
+    {
+      "answer": "omarchy-mobile",
+      "label": "Omarchy Mobile is on slot B: install it again"
+    },
+    {
+      "answer": "android",
+      "label": "Android is on slot B, after a system update"
+    },
+    {
+      "answer": "not-sure",
+      "label": "I am not sure"
+    }
+  ],
+  "action": "slot-b"
+}
