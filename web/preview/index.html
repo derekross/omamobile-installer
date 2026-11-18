@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omarchy Mobile installer (write preview, not for use)</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="preview.js"></script>
+</head>
+<body>
+<main>
+<h1>Omarchy Mobile installer <small>write preview</small></h1>
+<p id="banner" class="banner">This is a write preview, made for an attended test and not for use. Unlike the page that ships, this build can write to a phone: it erases userdata and writes slot B's boot partitions. It has never been run against a real phone.</p>
+
+<section id="status">
+<p id="core" class="pending">loading the installer</p>
+<p id="release" class="pending">waiting for the installer</p>
+<p id="options" hidden><label id="scenario-label" hidden>A pretend phone: <select id="scenario"></select></label> <label><input id="reinstall" type="checkbox"> slot B already holds Omarchy Mobile (a reinstall)</label> <button id="restart" type="button">Start over</button></p>
+</section>
+
+<ol id="progress" hidden>
+<li data-state="warning">The warning</li>
+<li data-state="phone unlock">The phone</li>
+<li data-state="google-terms factory-image">Google's factory image</li>
+<li data-state="answers">About you</li>
+<li data-state="dry-run">The dry run</li>
+<li data-state="confirm">What will be written</li>
+<li data-state="write installed">The write</li>
+</ol>
+
+<section id="screen" hidden aria-live="polite"></section>
+
+<section id="selftest-section" hidden>
+<h2>Self-test</h2>
+<pre id="selftest" class="pending">running</pre>
+</section>
+</main>
+</body>
+</html>
