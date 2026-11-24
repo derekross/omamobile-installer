@@ -180,7 +180,10 @@ pub fn verify_detached(
             "the signature does not verify with a trusted key".into(),
         ))
     } else {
-        Err(sig_err("not signed by an Omarchy Mobile key: the keyring holds none of the trusted fingerprints".into()))
+        Err(sig_err(
+            "not signed by an Omamobile key: the keyring holds none of the trusted fingerprints"
+                .into(),
+        ))
     }
 }
 

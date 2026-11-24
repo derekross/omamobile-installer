@@ -1,8 +1,8 @@
-# Installing the Omarchy Mobile installer on your computer
+# Installing the Omamobile installer on your computer
 
-**Not published yet.** No download of the installer exists until the maintainer has run the checks in [GO-LIVE.md](GO-LIVE.md) and published the first release. Until then, this page says how it will work; the [command-line installer](https://github.com/derekross/omarchy-mobile#quick-start) is the way to install today.
+**Not published yet.** No download of the installer exists until the maintainer has run the checks in [GO-LIVE.md](GO-LIVE.md) and published the first release. Until then, this page says how it will work; the [command-line installer](https://github.com/derekross/omamobile#quick-start) is the way to install today.
 
-The installer is a desktop app, "Omarchy Mobile Installer". It walks you through putting Omarchy Mobile on your phone, which is plugged into this computer with a USB cable. **Installing erases the phone.** The app says so, and writes nothing until you have typed your phone's codename.
+The installer is a desktop app, "Omamobile Installer". It walks you through putting Omamobile on your phone, which is plugged into this computer with a USB cable. **Installing erases the phone.** The app says so, and writes nothing until you have typed your phone's codename.
 
 It runs on Linux on a 64-bit PC (x86_64). Windows and macOS are not supported.
 
@@ -31,7 +31,7 @@ It must print `OK` after your file's name. If it prints `FAILED`, delete the fil
 sudo pacman -U ./omainstall-X.Y.Z-1-x86_64.pkg.tar.zst
 ```
 
-Type your password when asked. pacman installs everything the app needs along with it. Then open **Omarchy Mobile Installer** from the app launcher (on Omarchy: Super + Space, then type "installer").
+Type your password when asked. pacman installs everything the app needs along with it. Then open **Omamobile Installer** from the app launcher (on Omarchy: Super + Space, then type "installer").
 
 To remove it later: `sudo pacman -R omainstall`.
 
@@ -48,7 +48,7 @@ An AppImage is one file that holds the app and what it needs to draw its window,
 
    If it says something about FUSE, install your distribution's FUSE 2 library (Ubuntu 22.04: `sudo apt install libfuse2`; Ubuntu 24.04: `sudo apt install libfuse2t64`; Fedora: `sudo dnf install fuse-libs`), or start it with `./omainstall-vX.Y.Z-x86_64.AppImage --appimage-extract-and-run`.
 
-2. Install the tools the install uses after it has written the phone. The app runs Omarchy Mobile's own setup scripts, which unpack the firmware from Google's factory image and talk to the phone over SSH. They need these commands: `bash`, `python3`, `ssh` and `ssh-keygen`, `unzip`, `lpunpack` and `simg2img`, `fsck.erofs`, `debugfs`, `readelf`, `lz4`, `zstd` and `cpio`.
+2. Install the tools the install uses after it has written the phone. The app runs Omamobile's own setup scripts, which unpack the firmware from Google's factory image and talk to the phone over SSH. They need these commands: `bash`, `python3`, `ssh` and `ssh-keygen`, `unzip`, `lpunpack` and `simg2img`, `fsck.erofs`, `debugfs`, `readelf`, `lz4`, `zstd` and `cpio`.
 
    - Fedora: `sudo dnf install python3 openssh-clients unzip android-tools erofs-utils e2fsprogs binutils lz4 zstd cpio`
    - Ubuntu and Debian: `sudo apt install python3 openssh-client unzip android-sdk-libsparse-utils erofs-utils e2fsprogs binutils lz4 zstd cpio`. Ubuntu and Debian don't package `lpunpack` everywhere; check with `command -v lpunpack`. Without it, the firmware step can't run, and Omarchy or Arch is the way to finish an install for now.

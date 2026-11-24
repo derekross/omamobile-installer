@@ -3,7 +3,7 @@
 # omamobile-link-gadget add|remove: put the install link's USB function on
 # the phone's gadget, and take it off again (INSTALL-LINK-PLAN §3.3, §4).
 #
-# This file moves to omarchy-mobile's package omamobile-install-link
+# This file moves to omamobile's package omamobile-install-link
 # (/usr/lib/omamobile-install-link/omamobile-link-gadget) with the daemon;
 # it is here, beside the daemon it works with, until that package exists.
 #

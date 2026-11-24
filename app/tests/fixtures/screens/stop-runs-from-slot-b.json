@@ -5,8 +5,8 @@
   "title": "This phone runs from its second system copy",
   "notice": null,
   "body": [
-    "This phone is running from its second system copy (slot B). Omarchy Mobile is written there, and Android must stay on the first copy (slot A) as your way back.",
-    "If Omarchy Mobile is already on this phone and you are installing it again, start the installer again and say that this is a reinstall.",
+    "This phone is running from its second system copy (slot B). Omamobile is written there, and Android must stay on the first copy (slot A) as your way back.",
+    "If Omamobile is already on this phone and you are installing it again, start the installer again and say that this is a reinstall.",
     "If the phone runs Android (it moves to slot B after an Android system update), Android has to be put on slot A first. The install guide says how."
   ],
   "quote": null,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Repair (docs/DESIGN.md §11, "Repair"; Omarchy Mobile's ACTIVE-SLOT-PLAN
+//! Repair (docs/DESIGN.md §11, "Repair"; Omamobile's ACTIVE-SLOT-PLAN
 //! §2): for a release that installs on the slot the phone runs from
 //! (manifest format 2), the way back from a bad kernel. Against the fake
 //! phone; no USB.
@@ -604,7 +604,7 @@ fn the_screens_of_a_repair_say_what_is_written_and_what_is_kept() {
     assert!(words.contains("userdata was not written"));
     // What it should do, and what it can't promise
     assert!(
-        words.contains("It should start Omarchy Mobile from slot a"),
+        words.contains("It should start Omamobile from slot a"),
         "{words}"
     );
     assert!(

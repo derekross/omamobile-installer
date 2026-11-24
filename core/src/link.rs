@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! After the write: the install link, from the phone's first start to a
-//! phone that is ready (Omarchy Mobile's INSTALL-LINK-PLAN, stage L6).
+//! phone that is ready (Omamobile's INSTALL-LINK-PLAN, stage L6).
 //!
 //! The flow ([`crate::flow::Flow`]) ends its write with the phone restarting
-//! into Omarchy Mobile. A release whose root image offers the install link
+//! into Omamobile. A release whose root image offers the install link
 //! (`manifest.json`'s `install_link`) goes on here: [`crate::flow::Flow::link`]
 //! hands over what the write pinned, and a [`LinkFlow`] takes the install
 //! through the link's states, as screens, the same for every front end:
@@ -1338,7 +1338,7 @@ impl LinkFlow {
             s.body = stop.message.clone();
             s.action = "none";
             s.footer = vec![
-                "Omarchy Mobile is installed on the phone. What the install link did before this stop is kept on the phone, and the installer started again goes on from there, with no new write, for as long as the phone offers the link.".into(),
+                "Omamobile is installed on the phone. What the install link did before this stop is kept on the phone, and the installer started again goes on from there, with no new write, for as long as the phone offers the link.".into(),
                 "The phone offers the link at every start until it has an account, and after that for three more starts, ten minutes each without the installer.".into(),
             ];
             s.fit_to_print();
@@ -1349,7 +1349,7 @@ impl LinkFlow {
                 s.state = "first-start";
                 s.title = format!("Waiting for the {phone}'s first start");
                 s.body = vec![
-                    "The phone is starting Omarchy Mobile for the first time. At this first start it grows the system to fill its storage, which can take a few minutes. Then it shows a six-digit code on its screen.".into(),
+                    "The phone is starting Omamobile for the first time. At this first start it grows the system to fill its storage, which can take a few minutes. Then it shows a six-digit code on its screen.".into(),
                     "Keep the phone connected to this computer with the same cable. The installer finds it by itself.".into(),
                 ];
                 self.missing_words(&mut s);
@@ -1528,10 +1528,10 @@ impl LinkFlow {
                 s.action = "none";
                 s.title = format!("Your {phone} is ready");
                 s.body = vec![
-                    "Omarchy Mobile is installed and set up: your account, Google's firmware for this phone, and the phone's own check are done. Unlock the phone with the PIN or password you chose.".into(),
+                    "Omamobile is installed and set up: your account, Google's firmware for this phone, and the phone's own check are done. Unlock the phone with the PIN or password you chose.".into(),
                 ];
                 if self.optional_failed.iter().any(|s| s == "camera") {
-                    s.body.push("Cameras: not set up. The phone works without them; a later update of Omarchy Mobile can set them up.".into());
+                    s.body.push("Cameras: not set up. The phone works without them; a later update of Omamobile can set them up.".into());
                 }
                 let others: Vec<&str> = self
                     .optional_failed

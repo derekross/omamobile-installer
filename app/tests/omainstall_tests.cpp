@@ -624,7 +624,7 @@ private slots:
             // The question takes the core's answers and nothing else, and
             // has no main action: each answer is its own button.
             if (backend.action() == "slot-b") {
-                for (const char *other : {"", "yes", "Omarchy Mobile", "omarchy"})
+                for (const char *other : {"", "yes", "Omamobile", "omarchy"})
                     QVERIFY2(!backend.answerSlotB(other), other);
                 QVERIFY(!backend.primaryAction());
             }
@@ -2281,7 +2281,7 @@ private slots:
         w.settle();
         QVERIFY(w.click("primaryButton"));
         QVERIFY(at(backend, "installed"));
-        QCOMPARE(backend.screen().value("title").toString(), QString("Omarchy Mobile is written, and the phone is restarting"));
+        QCOMPARE(backend.screen().value("title").toString(), QString("Omamobile is written, and the phone is restarting"));
         QVERIFY(whats.contains("verify") && whats.contains("write"));
         QVERIFY(whats.indexOf("verify") < whats.indexOf("write"));
         w.settle();
@@ -2582,7 +2582,7 @@ private slots:
             backend.start();
             QVERIFY(goTo(backend, "slot-b", "/somewhere/saved.zip"));
             w.settle();
-            QCOMPARE(w.texts("choiceButton"), (QStringList{"Omarchy Mobile is on slot B: install it again",
+            QCOMPARE(w.texts("choiceButton"), (QStringList{"Omamobile is on slot B: install it again",
                                                             "Android is on slot B, after a system update", "I am not sure"}));
             QVERIFY(!w.shown("primaryButton"));
             QVERIFY(!w.shown("secondaryButton"));
@@ -2615,7 +2615,7 @@ private slots:
 
     void theRealToolAReinstallFromSlotBOnAPhoneThatTellsOneBootloaderCopy() {
         // The Pixel 7 Pro on a reinstall, in a window that installs: the
-        // core asks what slot B holds, the person clicks Omarchy Mobile, and
+        // core asks what slot B holds, the person clicks Omamobile, and
         // the bootloader-slot check passes with slot B's version, which the
         // phone already runs (docs/DESIGN.md §6, decided on 2026-11-13).
         RealTool tool("slot-b-one-slot");

@@ -191,10 +191,10 @@ fn an_install_sends_these_commands_in_this_order_and_nothing_else() {
     assert_eq!(screen.action, "none");
     assert_eq!(
         screen.title,
-        "Omarchy Mobile is written, and the phone is restarting"
+        "Omamobile is written, and the phone is restarting"
     );
     assert_eq!(screen.body[0], "Every image was written, and the phone confirmed each one: boot_b, init_boot_b, vendor_boot_b, vendor_kernel_boot_b, dtbo_b, userdata.");
-    assert!(screen.body[1].starts_with("Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B."));
+    assert!(screen.body[1].starts_with("Slot B is the active slot, and the phone was told to restart. It now starts Omamobile from slot B."));
     // The first start: the account from the answers, then the lock
     assert!(screen.body[1].contains("sets up your account from your answers"));
     assert!(screen.body[1].contains("unlock it with your PIN or password"));
@@ -1538,7 +1538,7 @@ fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {
         pieces
     );
 
-    // A reinstall says that the Omarchy Mobile on the phone is replaced
+    // A reinstall says that the Omamobile on the phone is replaced
     let phone = FakePhone::scenario("slot-b").unwrap();
     let mut flow = Flow::begin(
         &bundle.files(),
@@ -1553,7 +1553,7 @@ fn the_confirmation_lists_every_partition_its_size_and_what_is_erased() {
     drive(&mut flow, &bundle, &phone, "cheetah", "confirm");
     let screen = flow.screen();
     assert!(screen.body[0].contains("runs from slot b"));
-    assert_eq!(screen.footer[1], "Slot B's boot partitions, listed above, are overwritten: this is a reinstall, and the Omarchy Mobile that is on slot B now is replaced. If slot B holds Android instead, that Android is overwritten.");
+    assert_eq!(screen.footer[1], "Slot B's boot partitions, listed above, are overwritten: this is a reinstall, and the Omamobile that is on slot B now is replaced. If slot B holds Android instead, that Android is overwritten.");
     // Its two bootloader copies were both reported: nothing rests on slot
     // B's alone, and no line says so
     assert!(screen
@@ -1799,13 +1799,13 @@ fn the_owner_is_asked_what_slot_b_holds_and_each_answer_does_what_it_says() {
     assert_eq!(screen.notice, None);
     let answers: Vec<&str> = screen.choices.iter().map(|c| c.answer).collect();
     assert_eq!(answers, ["omarchy-mobile", "android", "not-sure"]);
-    assert!(screen.choices[0].label.contains("Omarchy Mobile"));
+    assert!(screen.choices[0].label.contains("Omamobile"));
     assert!(screen.choices[1].label.contains("Android"));
     // What a wrong answer costs is on the screen before it is given
     assert!(screen
         .body
         .iter()
-        .any(|l| l.contains("If you say Omarchy Mobile and slot B holds Android, the install overwrites the Android this phone is using")));
+        .any(|l| l.contains("If you say Omamobile and slot B holds Android, the install overwrites the Android this phone is using")));
     assert!(screen.footer[0].contains("has written nothing"));
     // Only the questions: the answer is asked of the owner, not the phone
     assert!(phone.log().iter().all(|c| c.starts_with("getvar:")));
@@ -1815,7 +1815,7 @@ fn the_owner_is_asked_what_slot_b_holds_and_each_answer_does_what_it_says() {
         .answers(&support::drive::answers(), "testsalt0123")
         .is_err());
 
-    // Omarchy Mobile: a reinstall, judged again with no new question sent
+    // Omamobile: a reinstall, judged again with no new question sent
     let sent = phone.log().len();
     flow.answer_slot_b(SlotBHolds::OmarchyMobile).unwrap();
     assert_eq!(phone.log().len(), sent);

@@ -57,7 +57,7 @@ pub fn vendor_kernel_boot(size: usize) -> Vec<u8> {
     vendor_kernel_boot_with(size, &[])
 }
 
-/// The storage guard's marker as Omarchy Mobile's `bin/omamobile
+/// The storage guard's marker as Omamobile's `bin/omamobile
 /// initramfs` packs it for a release on the running slot, a path in the
 /// archive and its bytes.
 pub const GUARD_MARKER: (&str, &[u8]) = ("./etc/omamobile-ufs-rw-slot", b"running\n");
@@ -160,7 +160,7 @@ pub const PLACEHOLDERS: [(&str, usize); 2] = [
 /// one block.
 pub fn placeholder(path: &str) -> Vec<u8> {
     omamobile_installer_core::firstboot::pad_placeholder(
-        format!("# Omarchy Mobile: the place for {path}, kept by the release image.\n").as_bytes(),
+        format!("# Omamobile: the place for {path}, kept by the release image.\n").as_bytes(),
         4096,
     )
     .unwrap()
@@ -562,7 +562,7 @@ impl TestBundle {
             json!({"erases_userdata": true, "partition": "userdata", "source": "root_image"}),
         );
         let mut manifest = json!({
-            "format": 1, "version": "2026.01.02", "label": "test", "name": "Omarchy Mobile",
+            "format": 1, "version": "2026.01.02", "label": "test", "name": "Omamobile",
             "device": {"codename": codename, "name": "Pixel 7 Pro"},
             "kernel": {"commit": "000000000000", "release": "7.3.0-test"},
             "files": files.iter().map(|(p, d)| json!({"path": p, "sha256": sha256_hex(d), "size": d.len()})).collect::<Vec<_>>(),

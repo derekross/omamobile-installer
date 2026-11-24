@@ -107,7 +107,7 @@ fn the_terms_step_shows_googles_words_and_nothing_is_downloaded_before_they_are_
     let quote = screen.quote.clone().expect("the terms are quoted");
     assert!(quote
         .intro
-        .contains("These are Google's words, not Omarchy Mobile's"));
+        .contains("These are Google's words, not Omamobile's"));
     assert_eq!(
         quote.lines,
         [
@@ -144,7 +144,7 @@ fn the_terms_step_shows_googles_words_and_nothing_is_downloaded_before_they_are_
     // In our own words: whose the files are, and that nobody passes them on
     let body = screen.body.join(" ");
     assert!(body.contains("Google's page says these files are for use only on your own Pixel, and Google does not allow them to be redistributed."));
-    assert!(body.contains("So the installer downloads them straight from Google to this computer, for this phone, and Omarchy Mobile does not host them or pass them on."));
+    assert!(body.contains("So the installer downloads them straight from Google to this computer, for this phone, and Omamobile does not host them or pass them on."));
     assert!(body.contains(PHONE_BUILD));
     assert!(body.contains("downloads nothing until you accept"));
     // None of Google's words pass as ours
@@ -181,7 +181,7 @@ fn the_terms_step_shows_googles_words_and_nothing_is_downloaded_before_they_are_
     assert!(body.contains("You accepted Google's terms for build TEST.260101.001 on 2026-11-12 at 14:03 UTC. The installer keeps that for this run only and sends it nowhere."));
     assert!(body.contains("The installer downloads the image from Google's own server, dl.google.com, to this computer"));
     assert!(body.contains("uses nothing of the file before that"));
-    assert!(body.contains("Omarchy Mobile does not host them or pass them on."));
+    assert!(body.contains("Omamobile does not host them or pass them on."));
     // Asked once
     assert!(flow.accept_google_terms(NOW).is_err());
     assert!(flow.decline_google_terms().is_err());
@@ -657,7 +657,7 @@ fn mismatch_stop(flow: &Flow, why: Mismatch, says: &str) {
         assert!(message.contains("The installer uses nothing of that file, and what it had downloaded of it is deleted from this computer."));
         assert!(message.contains("Starting the installer again downloads the file afresh."));
     }
-    assert!(message.contains("https://github.com/derekross/omarchy-mobile/issues"));
+    assert!(message.contains("https://github.com/derekross/omamobile/issues"));
     assert_eq!(
         (stop.retry, stop.phone),
         (Retry::Whenever, PhoneFact::OnlyRead)

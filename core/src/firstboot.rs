@@ -42,7 +42,7 @@
 //! comment line, `#` and spaces up to the last byte, which is a newline
 //! (with two bytes left `#\n`, with one `\n`, with none nothing). Every
 //! reader of the two files skips comment lines, so the padding is never
-//! read as an answer; Omarchy Mobile's `rootfs/placeholders fill` is the
+//! read as an answer; Omamobile's `rootfs/placeholders fill` is the
 //! same rule.
 //!
 //! The password is hashed here with sha512-crypt, the `$6$` scheme that
@@ -222,7 +222,7 @@ const fn line_len(key: &str, value: usize) -> usize {
 /// never cut.
 pub const SSH_KEY_MAX: usize = PLACEHOLDER_LEN as usize - WORST_ANSWERS - line_len("SSH_KEY", 0);
 
-const HEADER: &str = "# Written by the Omarchy Mobile installer on the computer; omamobile-firstboot reads and deletes it.\n";
+const HEADER: &str = "# Written by the Omamobile installer on the computer; omamobile-firstboot reads and deletes it.\n";
 
 /// One OpenSSH public key line, as `omamobile-firstboot` takes it (its
 /// `SSHKEY_RE`): a key type it knows, the key, an optional comment of
@@ -524,7 +524,7 @@ pub fn root_answers_on(
         // SLOT= on its own line before AUTO_WRITE=, which stays the last
         // line of the text (the install link's check reads it there)
         let text = format!(
-            "# Written by the Omarchy Mobile installer: a release install takes kernel updates through\n# omamobile-boot-update's pacman hook (docs/RELEASES.md §5.3). AUTO_WRITE=no stops it.\n{}AUTO_WRITE={}\n",
+            "# Written by the Omamobile installer: a release install takes kernel updates through\n# omamobile-boot-update's pacman hook (docs/RELEASES.md §5.3). AUTO_WRITE=no stops it.\n{}AUTO_WRITE={}\n",
             slot.map(|s| format!("SLOT={s}\n")).unwrap_or_default(),
             if yes { "yes" } else { "no" }
         );
@@ -635,7 +635,7 @@ mod tests {
         let hash = sha512_crypt(b"4812", "saltstring").unwrap();
         assert_eq!(
             String::from_utf8(files[0].content.clone()).unwrap(),
-            format!("# Written by the Omarchy Mobile installer on the computer; omamobile-firstboot reads and deletes it.\nUSERNAME=alex\nPASSWORD_HASH={hash}\nHOSTNAME=alex-phone\nTIMEZONE=Europe/Paris\nSSH_KEY={key}\nCREDENTIAL=pin\nFULL_NAME=Alex Example\nEMAIL=alex@example.org\nWIFI_SSID=Home network\nWIFI_PSK=correct horse\n")
+            format!("# Written by the Omamobile installer on the computer; omamobile-firstboot reads and deletes it.\nUSERNAME=alex\nPASSWORD_HASH={hash}\nHOSTNAME=alex-phone\nTIMEZONE=Europe/Paris\nSSH_KEY={key}\nCREDENTIAL=pin\nFULL_NAME=Alex Example\nEMAIL=alex@example.org\nWIFI_SSID=Home network\nWIFI_PSK=correct horse\n")
         );
         assert_eq!((files[1].path, files[1].mode), (AUTHORIZED_KEYS, 0o600));
         assert_eq!(files[1].content, format!("{key}\n").into_bytes());

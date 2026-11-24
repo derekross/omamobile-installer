@@ -8,7 +8,7 @@ use omamobile_installer_core::Error;
 use serde_json::{json, Value};
 use support::bundle::{TestBundle, PHONE_BUILD};
 
-/// device/cheetah/factory-builds.json as Omarchy Mobile carries it (branch
+/// device/cheetah/factory-builds.json as Omamobile carries it (branch
 /// installer-cheetah-index, 2026-11-10): public metadata about Google's builds.
 const REAL: &[u8] = include_bytes!("../../fixtures/index/cheetah-factory-builds.json");
 

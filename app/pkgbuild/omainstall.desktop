@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Omarchy Mobile Installer
-Name[de]=Omarchy Mobile Installer
-Comment=Guides you through installing Omarchy Mobile on a phone
-Comment[de]=Führt dich durch die Installation von Omarchy Mobile auf einem Telefon
+Name=Omamobile Installer
+Name[de]=Omamobile Installer
+Comment=Guides you through installing Omamobile on a phone
+Comment[de]=Führt dich durch die Installation von Omamobile auf einem Telefon
 Exec=omainstall open
 Icon=omainstall
 Terminal=false

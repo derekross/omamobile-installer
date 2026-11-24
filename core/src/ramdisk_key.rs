@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! The owner's SSH key in slot B's initramfs, as Omarchy Mobile's
+//! The owner's SSH key in slot B's initramfs, as Omamobile's
 //! `tools/install-phone` puts it there (its "The owner's key in slot B's
 //! initramfs"): `/root/.ssh/authorized_keys` in a cpio archive after the
 //! shipped one, inside the vendor ramdisk of the image that carries it
@@ -214,7 +214,7 @@ pub fn size_with_owner_key(img: &[u8], key: &str) -> Result<u64> {
 }
 
 /// How much a vendor ramdisk may unpack to before it is refused: far more
-/// than an initramfs of Omarchy Mobile's (tens of megabytes), and a bound
+/// than an initramfs of Omamobile's (tens of megabytes), and a bound
 /// on what a crafted image can make this computer hold.
 const MAX_UNPACKED: usize = 256 << 20;
 /// A legacy LZ4 block's largest unpacked size, as the format defines it.
@@ -350,7 +350,7 @@ pub fn guard_marker(img: &[u8]) -> Result<Option<Vec<u8>>> {
 
 /// A format-2 release's initramfs must map the storage guard to the slot
 /// the phone runs from: the marker is there and says `running`. Otherwise
-/// the release is refused before anything is written, as Omarchy Mobile's
+/// the release is refused before anything is written, as Omamobile's
 /// `make-bundle` and `install-phone` refuse it: an initramfs from before
 /// the guard learnt the running slot would leave slot A's partitions
 /// read-only and slot B's writable on a phone that runs from slot A.

@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "The install did not run through (the phone answered FAIL to 'flash:dtbo_b': injected failure).",
-    "If it stops the same way again, tell us at https://github.com/derekross/omarchy-mobile/issues"
+    "If it stops the same way again, tell us at https://github.com/derekross/omamobile/issues"
   ],
   "quote": null,
   "steps": [],

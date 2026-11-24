@@ -7,7 +7,7 @@
   "body": [
     "This run was started with the statement that the bootloader version read from the phone's other system copy is fake-0.9, the same as the copy in use. The copy in use has another version: the phone reports fake-1.0.",
     "If the version was mistyped, start the installer again with the version that was read from the phone.",
-    "If fake-0.9 is what was read from the other copy, the two copies differ, and Omarchy Mobile can't be installed on this phone as it is. Don't write a bootloader by hand: a wrong one can leave the phone unable to start. Ask at https://github.com/derekross/omarchy-mobile/issues"
+    "If fake-0.9 is what was read from the other copy, the two copies differ, and Omamobile can't be installed on this phone as it is. Don't write a bootloader by hand: a wrong one can leave the phone unable to start. Ask at https://github.com/derekross/omamobile/issues"
   ],
   "quote": null,
   "steps": [],

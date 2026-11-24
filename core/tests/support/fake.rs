@@ -619,7 +619,7 @@ impl FakeState {
             if self.current_follows_flag {
                 self.vars.insert("current-slot".into(), slot.to_string());
             }
-            // As the Pixel 9a's bootloader does (Omarchy Mobile's AGENTS.md):
+            // As the Pixel 9a's bootloader does (Omamobile's AGENTS.md):
             // the slot made active loses its successful mark and gets tries
             if self.vars.contains_key(&format!("slot-successful:{slot}")) {
                 for (k, v) in [

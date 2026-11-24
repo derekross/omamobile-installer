@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "The phone restarted into slot B's bootloader and did not come back to Fastboot Mode in time. It may have started an operating system from slot B (an older Android, or whatever slot B holds), or slot B's bootloader may not have started.",
-    "Bring it back to Fastboot Mode with its buttons: with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears. If it does not get there, hold Power for about 30 seconds, then try the buttons again; if it still does not, ask at https://github.com/derekross/omarchy-mobile/issues before you do anything else.",
+    "Bring it back to Fastboot Mode with its buttons: with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears. If it does not get there, hold Power for about 30 seconds, then try the buttons again; if it still does not, ask at https://github.com/derekross/omamobile/issues before you do anything else.",
     "If an operating system starts and asks for anything (a factory reset, \"Try again\"), choose nothing: go to Fastboot Mode with the buttons instead.",
     "Slot B may still be the active slot. Bring the phone to Fastboot Mode (with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears) and start the installer again: it sees that this run left slot B active and offers to put slot A back first. With Android's fastboot tool, with the phone in Fastboot Mode (with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears): \"fastboot --set-active=a\", then \"fastboot reboot-bootloader\"."
   ],

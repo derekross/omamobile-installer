@@ -5,7 +5,7 @@
   "title": "Android runs from slot B",
   "notice": null,
   "body": [
-    "You said that Android is on slot B, where an Android system update moved it. Omarchy Mobile is written to slot B, so installing now would overwrite the Android this phone uses.",
+    "You said that Android is on slot B, where an Android system update moved it. Omamobile is written to slot B, so installing now would overwrite the Android this phone uses.",
     "Android has to be put back on the first system copy (slot A) first, and slot A made the one the phone starts from. The install guide says how."
   ],
   "quote": null,

@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "The checks an install starts with did not pass (phone: images/vendor_kernel_boot.img is 12288 bytes, larger than vendor_kernel_boot_b (8192 bytes)).",
-    "If this looks wrong for your phone, tell us at https://github.com/derekross/omarchy-mobile/issues"
+    "If this looks wrong for your phone, tell us at https://github.com/derekross/omamobile/issues"
   ],
   "quote": null,
   "steps": [],

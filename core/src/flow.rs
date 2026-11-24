@@ -33,7 +33,7 @@
 //! the same dry run first, with every image of the release walked through
 //! it, then lists exactly what it will write and what is erased, and waits
 //! for the phone's codename to be typed. What is written, and in which order,
-//! is what Omarchy Mobile's `tools/install-phone` writes: slot B's boot
+//! is what Omamobile's `tools/install-phone` writes: slot B's boot
 //! images, `userdata`, then `set_active:b` and `reboot`.
 //!
 //! [`Flow::begin_write`] is the one place a session that can write is
@@ -61,7 +61,7 @@
 //! saves the file from Google's page and hands it in.
 //!
 //! **A release that installs on the running slot** (manifest format 2,
-//! Omarchy Mobile's ACTIVE-SLOT-PLAN) has none of the slot B steps: no
+//! Omamobile's ACTIVE-SLOT-PLAN) has none of the slot B steps: no
 //! question of what slot B holds, no measurement of the other bootloader
 //! slot, no bootloader-slot check or stop, and no `set_active` at all. Its
 //! one slot rule is that the phone's `current-slot` is one the release
@@ -104,7 +104,7 @@ use crate::slot_probe::{
 use crate::{Error, Result};
 use serde::Serialize;
 
-pub(crate) const ISSUES: &str = "https://github.com/derekross/omarchy-mobile/issues";
+pub(crate) const ISSUES: &str = "https://github.com/derekross/omamobile/issues";
 const DOWNLOAD: &str = "https://omamobile.org/download";
 /// What Google's factory images page asks a person to accept before it hands
 /// out a file. Google's words, shown as Google's on the terms step.
@@ -130,7 +130,7 @@ pub const UNLOCK_COMMAND: &str = "fastboot flashing unlock";
 /// Said on the unlock screen, before its steps, by a flow that ends at the
 /// dry run ([`Flow::ends_at_dry_run`]): the steps there erase the phone, and
 /// such a flow installs nothing afterwards.
-pub const NO_INSTALL_YET: &str = "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.";
+pub const NO_INSTALL_YET: &str = "This version of the installer cannot install Omamobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.";
 /// The phones whose slot handling this write path was written for: what
 /// `set_active:b` costs and what a failed start falls back to differ from
 /// phone to phone, and only these were read up on. A release for another
@@ -164,7 +164,7 @@ pub const GO_BACK_TO_ANDROID: &str = "The way back to Android is Google's factor
 
 /// What a release on the running slot (format 2) does to Android, said on
 /// the warning and the confirmation.
-pub const ANDROID_REPLACED: &str = "Android on this phone is replaced: Omarchy Mobile is written over the Android the phone starts now, and no copy of Android is kept on the phone to go back to.";
+pub const ANDROID_REPLACED: &str = "Android on this phone is replaced: Omamobile is written over the Android the phone starts now, and no copy of Android is kept on the phone to go back to.";
 
 /// Shown on every screen once the maintainer's override has skipped the
 /// bootloader-slot check, so both front ends say it in the same words.
@@ -186,7 +186,7 @@ pub const SLOT_B_BOOTLOADER_IN_USE: &str =
 /// the release's descriptor allows it too (`BOOTLOADER_SLOT_PROBE=yes`):
 /// Tensor Pixels, whose bootloader keeps the slot flags in its own storage
 /// and changes them on `set_active`. A Qualcomm A/B phone keeps them in the
-/// GPT's attributes, a write Omarchy Mobile allows only by hand, so no such
+/// GPT's attributes, a write Omamobile allows only by hand, so no such
 /// phone is on this list whatever its descriptor says (docs/DESIGN.md §6).
 pub const SLOT_PROBE_DEVICES: [&str; 1] = ["cheetah"];
 
@@ -230,7 +230,7 @@ impl ProbeAnswer {
 /// `answer` is [`SlotBHolds::answer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotBHolds {
-    /// Omarchy Mobile: this is a reinstall.
+    /// Omamobile: this is a reinstall.
     OmarchyMobile,
     /// Android, moved there by a system update.
     Android,
@@ -258,7 +258,7 @@ impl SlotBHolds {
     }
     fn label(self) -> &'static str {
         match self {
-            SlotBHolds::OmarchyMobile => "Omarchy Mobile is on slot B: install it again",
+            SlotBHolds::OmarchyMobile => "Omamobile is on slot B: install it again",
             SlotBHolds::Android => "Android is on slot B, after a system update",
             SlotBHolds::NotSure => "I am not sure",
         }
@@ -314,7 +314,7 @@ impl core::fmt::Debug for WriteToken {
 /// What the person running the install said up front.
 #[derive(Debug, Clone, Default)]
 pub struct FlowOptions {
-    /// Slot B already holds Omarchy Mobile and this installs it again.
+    /// Slot B already holds Omamobile and this installs it again.
     /// Without it a phone running from slot B stops the install, or, in a
     /// front end that can ask ([`Self::asks_what_slot_b_holds`]), is asked
     /// what slot B holds.
@@ -346,7 +346,7 @@ pub struct FlowOptions {
     pub maintainer_skip_bootloader_slot_check: bool,
     /// The owner's statement about a phone that reports one bootloader
     /// slot's version only: the other slot's version was read from the
-    /// phone, and it is this one. It is the rule of Omarchy Mobile's
+    /// phone, and it is this one. It is the rule of Omamobile's
     /// `tools/install-phone` (`--bootloader-slots-match VERSION`), which
     /// `tools/install-guided` applies before the unlock steps too:
     ///
@@ -437,7 +437,7 @@ pub struct FlowOptions {
 
 /// What a front end says where it offers Repair (the command line's
 /// `repair`): exactly what is written and what is kept.
-pub const REPAIR_HELP: &str = "Repairs a phone that runs Omarchy Mobile from a release that installs on the slot the phone runs from (manifest format 2), when a kernel update left it unable to start: it writes the release's boot images again to the slot the phone runs from (each to its partition with that slot's suffix), then restarts the phone. Nothing else: userdata is NOT written, so your account and everything on the phone are kept; no slot is made active; the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. It needs no factory image and no answers. The phone's drivers are kernel modules kept in its system on userdata for one kernel version each: use the release whose kernel is the one the phone last started, or the phone starts without its drivers (no screen graphics, Wi-Fi, modem, charging readings or temperature limits) and is put right over USB SSH with omamobile-boot-update rollback, run first and before any update, or by a full install. If the phone runs Android, don't repair it: a repair overwrites the boot images Android starts from. The phone has to be unlocked and in Fastboot Mode on the slot the release accepts. The run first checks the phone and every image against the release's signed checksums, then lists each partition and waits for you to type the phone's codename; nothing is written before that.";
+pub const REPAIR_HELP: &str = "Repairs a phone that runs Omamobile from a release that installs on the slot the phone runs from (manifest format 2), when a kernel update left it unable to start: it writes the release's boot images again to the slot the phone runs from (each to its partition with that slot's suffix), then restarts the phone. Nothing else: userdata is NOT written, so your account and everything on the phone are kept; no slot is made active; the other slot, the bootloader, radio, persist, efs, modem, devinfo and vbmeta are never written. It needs no factory image and no answers. The phone's drivers are kernel modules kept in its system on userdata for one kernel version each: use the release whose kernel is the one the phone last started, or the phone starts without its drivers (no screen graphics, Wi-Fi, modem, charging readings or temperature limits) and is put right over USB SSH with omamobile-boot-update rollback, run first and before any update, or by a full install. If the phone runs Android, don't repair it: a repair overwrites the boot images Android starts from. The phone has to be unlocked and in Fastboot Mode on the slot the release accepts. The run first checks the phone and every image against the release's signed checksums, then lists each partition and waits for you to type the phone's codename; nothing is written before that.";
 
 /// Said on a Repair's warning, its confirmation and its last screen: what
 /// it keeps, and the ways back if it does not help.
@@ -552,7 +552,7 @@ pub enum Step {
     /// and none answered.
     Phone { not_found: bool },
     /// The phone runs from slot B, and the run was not said to be a
-    /// reinstall: the owner is asked what slot B holds, Omarchy Mobile or
+    /// reinstall: the owner is asked what slot B holds, Omamobile or
     /// Android after a system update, since fastboot can't tell the two
     /// apart. Only in a front end that can ask
     /// ([`FlowOptions::asks_what_slot_b_holds`]).
@@ -887,7 +887,7 @@ fn write_stopped_footer(reach: WriteReach, on_slot_b: bool) -> Vec<String> {
     let slot_a = "Slot A, where Android is, was not written, and it is still the slot the phone starts from.";
     let slot_b_broken = "The phone was running from slot B, which is the slot being written, so it may not start until an install has run through.";
     let erased = "What Android had stored on the phone is erased. If the phone starts Android now, Android finds its data gone and asks for a factory reset.";
-    let reinstall = "If the installer then says that the phone runs from slot B, or asks what is on slot B, that is this install. Start the phone once from its Fastboot Mode screen, so that it runs slot B's own bootloader, bring it back to Fastboot Mode, and start the installer again as a reinstall: slot B holds Omarchy Mobile.";
+    let reinstall = "If the installer then says that the phone runs from slot B, or asks what is on slot B, that is this install. Start the phone once from its Fastboot Mode screen, so that it runs slot B's own bootloader, bring it back to Fastboot Mode, and start the installer again as a reinstall: slot B holds Omamobile.";
     let lines: Vec<&str> = match reach {
         WriteReach::Nothing => vec![
             "No write reached the phone: the installer sent it nothing that changes it.",
@@ -931,7 +931,7 @@ fn write_stopped_footer(reach: WriteReach, on_slot_b: bool) -> Vec<String> {
         ],
         WriteReach::SlotSet | WriteReach::Rebooted => vec![
             "Every image was written, the phone confirmed each one, and slot B is the active slot. Only the restart was not confirmed.",
-            "Restart the phone from its Fastboot Mode screen (Start): it then starts Omarchy Mobile from slot B.",
+            "Restart the phone from its Fastboot Mode screen (Start): it then starts Omamobile from slot B.",
             "Or start the installer again, with the phone in Fastboot Mode: it writes every image again, from the first.",
             reinstall,
         ],
@@ -962,7 +962,7 @@ fn write_stopped_running_footer(reach: WriteReach, slot: Slot) -> Vec<String> {
         ],
         WriteReach::Userdata { pieces } => vec![
             format!("The install stopped while it was writing userdata: slot {slot}'s boot images are written, and {pieces} pieces of the system image, with one more that may be partly written."),
-            format!("The phone starts from slot {slot}, which now holds Omarchy Mobile's boot images, and its system image is not complete: it does not start until an install has run through. What Android had stored on the phone is erased."),
+            format!("The phone starts from slot {slot}, which now holds Omamobile's boot images, and its system image is not complete: it does not start until an install has run through. What Android had stored on the phone is erased."),
             again.to_string(),
             android,
         ],
@@ -970,7 +970,7 @@ fn write_stopped_running_footer(reach: WriteReach, slot: Slot) -> Vec<String> {
         // made active, so the phone starts what was written to its slot
         _ => vec![
             format!("Every image was written to slot {slot}, and the phone confirmed each one. The restart was not sent, or the phone did not confirm it."),
-            format!("If the phone is still in Fastboot Mode, restart it from its Fastboot Mode screen (Start): it starts the slot it runs from, slot {slot}, which holds Omarchy Mobile now. If the installer said the phone's current slot changed, start the installer again instead."),
+            format!("If the phone is still in Fastboot Mode, restart it from its Fastboot Mode screen (Start): it starts the slot it runs from, slot {slot}, which holds Omamobile now. If the installer said the phone's current slot changed, start the installer again instead."),
             "Or start the installer again with the phone in Fastboot Mode: it checks the phone again and writes every image again, from the first.".to_string(),
         ],
     }
@@ -1084,7 +1084,7 @@ pub struct AnswerProblem {
     pub message: String,
 }
 
-/// The owner's answers, each within the rules of Omarchy Mobile's
+/// The owner's answers, each within the rules of Omamobile's
 /// `tools/install-phone`. Kept in memory by the front end only; the flow
 /// keeps a summary without the secrets.
 #[derive(Clone)]
@@ -1432,7 +1432,7 @@ pub struct ScreenChoice {
     pub label: String,
 }
 
-/// Words that are not Omarchy Mobile's, with whose they are.
+/// Words that are not Omamobile's, with whose they are.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Quote {
     /// Whose words follow, in ours.
@@ -1636,7 +1636,7 @@ impl Flow {
                     "This release did not pass its checks",
                     vec![
                         format!("The release's files did not pass their checks, so nothing of them is used ({e})."),
-                        format!("Fetch the release again from {DOWNLOAD}. If it fails the same way, the files are not the ones Omarchy Mobile signed: don't install them, and tell us at {ISSUES}"),
+                        format!("Fetch the release again from {DOWNLOAD}. If it fails the same way, the files are not the ones Omamobile signed: don't install them, and tell us at {ISSUES}"),
                     ],
                 );
                 return flow;
@@ -1676,7 +1676,7 @@ impl Flow {
                 Retry::StopsAgain,
                 "This release can't repair a phone",
                 vec![
-                    format!("This release of Omarchy Mobile for the {name} ({codename}) is written to slot B and makes slot B the active slot, with Android kept on slot A. A repair is for a release that installs on the slot the phone runs from, and writes that slot's boot images again."),
+                    format!("This release of Omamobile for the {name} ({codename}) is written to slot B and makes slot B the active slot, with Android kept on slot A. A repair is for a release that installs on the slot the phone runs from, and writes that slot's boot images again."),
                     format!("A phone installed from such a release is put right by installing it again. To repair a phone, use a release made to install on the slot the phone runs from, from {DOWNLOAD}."),
                 ],
             );
@@ -1952,8 +1952,8 @@ impl Flow {
                 "The phone's bootloader is locked",
                 vec![
                     "A repair writes the boot images of the slot the phone runs from, and only an unlocked phone takes them. This phone's bootloader is locked.".into(),
-                    "Unlocking it erases the phone, which is what a repair is there to avoid, so the installer does not show the steps for it here. A phone that runs Omarchy Mobile was unlocked to install it; if it is locked now, it most likely runs Android again.".into(),
-                    format!("To install Omarchy Mobile on it anyway, use the installer's install, which erases the phone. To ask about this phone, open an issue: {ISSUES}"),
+                    "Unlocking it erases the phone, which is what a repair is there to avoid, so the installer does not show the steps for it here. A phone that runs Omamobile was unlocked to install it; if it is locked now, it most likely runs Android again.".into(),
+                    format!("To install Omamobile on it anyway, use the installer's install, which erases the phone. To ask about this phone, open an issue: {ISSUES}"),
                 ],
             ),
             Judged::Locked => {
@@ -1969,8 +1969,8 @@ impl Flow {
         Ok(())
     }
 
-    /// The owner's answer to what slot B holds ([`Step::SlotB`]). Omarchy
-    /// Mobile makes the run a reinstall, and the phone the flow just looked
+    /// The owner's answer to what slot B holds ([`Step::SlotB`]). Omamobile
+    /// makes the run a reinstall, and the phone the flow just looked
     /// at is judged again as one, with no new question sent to it: the
     /// bootloader copy, the build, the lock. Android, or not sure, stops
     /// the install with nothing sent and nothing written.
@@ -2003,7 +2003,7 @@ impl Flow {
                 Retry::StopsAgain,
                 "Android runs from slot B",
                 vec![
-                    "You said that Android is on slot B, where an Android system update moved it. Omarchy Mobile is written to slot B, so installing now would overwrite the Android this phone uses.".into(),
+                    "You said that Android is on slot B, where an Android system update moved it. Omamobile is written to slot B, so installing now would overwrite the Android this phone uses.".into(),
                     "Android has to be put back on the first system copy (slot A) first, and slot A made the one the phone starts from. The install guide says how.".into(),
                 ],
             ),
@@ -2015,7 +2015,7 @@ impl Flow {
                     "Find out what is on slot B first",
                     vec![
                         "The installer goes on only once you know what slot B holds: if it is Android, an install would overwrite the Android this phone uses.".into(),
-                        format!("Start the phone from its Fastboot Mode screen (Start) and see what starts: Omarchy Mobile or Android. Then bring it back to Fastboot Mode ({keys}) and start the installer again."),
+                        format!("Start the phone from its Fastboot Mode screen (Start) and see what starts: Omamobile or Android. Then bring it back to Fastboot Mode ({keys}) and start the installer again."),
                         "That restart also matters if an installer made slot B active and the phone has not started since: until it restarts, the phone may still be running the other copy's bootloader, and the version it tells is then that copy's.".into(),
                     ],
                 );
@@ -2135,7 +2135,7 @@ impl Flow {
                         Retry::StopsAgain,
                         "The phone's two bootloader copies differ",
                         vec![
-                            format!("The installer measured the phone's second bootloader copy: slot A's is {}, slot B's is {other}. Omarchy Mobile starts from slot B, so both have to be the same version, and they are not.", report.bootloader),
+                            format!("The installer measured the phone's second bootloader copy: slot A's is {}, slot B's is {other}. Omamobile starts from slot B, so both have to be the same version, and they are not.", report.bootloader),
                             "Slot A is the active slot again, and the phone runs its bootloader.".into(),
                             "With different versions the phone may not start from slot B. Google's own tools put the same version on both: the install guide says how.".into(),
                         ],
@@ -2240,8 +2240,8 @@ impl Flow {
             Retry::StopsAgain,
             "This phone runs from its second system copy",
             vec![
-                "This phone is running from its second system copy (slot B). Omarchy Mobile is written there, and Android must stay on the first copy (slot A) as your way back.".into(),
-                "If Omarchy Mobile is already on this phone and you are installing it again, start the installer again and say that this is a reinstall.".into(),
+                "This phone is running from its second system copy (slot B). Omamobile is written there, and Android must stay on the first copy (slot A) as your way back.".into(),
+                "If Omamobile is already on this phone and you are installing it again, start the installer again and say that this is a reinstall.".into(),
                 "If the phone runs Android (it moves to slot B after an Android system update), Android has to be put on slot A first. The install guide says how.".into(),
             ],
         );
@@ -2366,9 +2366,9 @@ impl Flow {
                         Retry::StopsAgain,
                         "This phone's bootloader isn't one this release knows",
                         vec![
-                            format!("The {name} reports bootloader {}, and no build in the release's list of Google's builds has it. A phone that runs Omarchy Mobile from this release has a bootloader the list holds, so the installer does not repair this one.", report.bootloader),
+                            format!("The {name} reports bootloader {}, and no build in the release's list of Google's builds has it. A phone that runs Omamobile from this release has a bootloader the list holds, so the installer does not repair this one.", report.bootloader),
                             "If the phone runs Android, don't repair it: a repair overwrites the boot images of the slot the phone starts from, and Android's with them.".into(),
-                            format!("If the phone runs Omarchy Mobile, use the release it was installed from, or ask at {ISSUES}"),
+                            format!("If the phone runs Omamobile, use the release it was installed from, or ask at {ISSUES}"),
                         ],
                     );
                     return Judged::Stopped;
@@ -2382,7 +2382,7 @@ impl Flow {
         } else {
             let on_slot_b = report.current_slot == "b";
             if on_slot_b && !self.options.reinstall {
-                // Fastboot can't tell Omarchy Mobile on slot B from Android
+                // Fastboot can't tell Omamobile on slot B from Android
                 // after an update: the owner is asked, where the front end can
                 // ask, once, and only before the phone has been judged ready
                 let asking = self.options.asks_what_slot_b_holds
@@ -2408,7 +2408,7 @@ impl Flow {
                     Retry::StopsAgain,
                     "The phone's two bootloader copies differ",
                     vec![
-                        format!("The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omarchy Mobile starts from slot B, so both have to be the same version, and they are not (A: {a}, B: {b})."),
+                        format!("The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omamobile starts from slot B, so both have to be the same version, and they are not (A: {a}, B: {b})."),
                         "With different versions the phone may not start from slot B. Google's own tools put the same version on both: the install guide says how.".into(),
                     ],
                 );
@@ -2433,7 +2433,7 @@ impl Flow {
                     vec![
                         format!("This run was started with the statement that the bootloader version read from the phone's other system copy is {stated}, the same as the copy in use. The copy in use has another version: the phone reports {phone}."),
                         "If the version was mistyped, start the installer again with the version that was read from the phone.".into(),
-                        format!("If {stated} is what was read from the other copy, the two copies differ, and Omarchy Mobile can't be installed on this phone as it is. Don't write a bootloader by hand: a wrong one can leave the phone unable to start. Ask at {ISSUES}"),
+                        format!("If {stated} is what was read from the other copy, the two copies differ, and Omamobile can't be installed on this phone as it is. Don't write a bootloader by hand: a wrong one can leave the phone unable to start. Ask at {ISSUES}"),
                     ],
                 );
                     return Judged::Stopped;
@@ -2525,9 +2525,9 @@ impl Flow {
                         newer_tested: Some(newer.clone()),
                     },
                     Retry::AfterFix,
-                    "This phone's Android build hasn't been tested with Omarchy Mobile",
+                    "This phone's Android build hasn't been tested with Omamobile",
                     vec![
-                        format!("This phone's bootloader and baseband match Google's build {build}, but no Omarchy Mobile release has been tested with that build's firmware, so the installer does not use it."),
+                        format!("This phone's bootloader and baseband match Google's build {build}, but no Omamobile release has been tested with that build's firmware, so the installer does not use it."),
                         format!("The list has a newer build that was tested: {newer}. If Android offers an update to it, install it (Settings > System > System update) and start the installer again."),
                         after_update.into(),
                     ],
@@ -2543,11 +2543,11 @@ impl Flow {
                         newer_tested: None,
                     },
                     Retry::StopsAgain,
-                    "This phone's Android build has not been tested with Omarchy Mobile yet",
+                    "This phone's Android build has not been tested with Omamobile yet",
                     vec![
-                        format!("This phone's bootloader and baseband match Google's build {build}. That build has not been tested with Omarchy Mobile yet, and the installer uses a build only after a release was tested with it."),
+                        format!("This phone's bootloader and baseband match Google's build {build}. That build has not been tested with Omamobile yet, and the installer uses a build only after a release was tested with it."),
                         "Nothing you can install today changes that. No newer build in the release's list was tested either, so an Android update does not help.".into(),
-                        format!("What you can do is wait: once build {build} has been tested, a later release of Omarchy Mobile lists it as tested, and the installer then goes on with this phone as it is. To ask about it, or to see whether someone already has, use the project's issue tracker: {ISSUES}"),
+                        format!("What you can do is wait: once build {build} has been tested, a later release of Omamobile lists it as tested, and the installer then goes on with this phone as it is. To ask about it, or to see whether someone already has, use the project's issue tracker: {ISSUES}"),
                     ],
                 );
                 return Judged::Stopped;
@@ -2615,7 +2615,7 @@ impl Flow {
                 Retry::StopsAgain,
                 "This release can't be installed on the slot this phone runs from yet",
                 vec![
-                    format!("The {name} keeps two copies of its system, slot A and slot B, and runs from one of them; Omarchy Mobile is written to the one it runs from. This phone runs from slot {}, and this release installs only on {list} for now: installing on slot {} is not supported yet.", report.current_slot, report.current_slot),
+                    format!("The {name} keeps two copies of its system, slot A and slot B, and runs from one of them; Omamobile is written to the one it runs from. This phone runs from slot {}, and this release installs only on {list} for now: installing on slot {} is not supported yet.", report.current_slot, report.current_slot),
                     "A phone runs from slot B after an Android system update. Don't make the other slot active by hand to get past this stop: that starts the other slot's bootloader, at a version the installer has not read, and can leave the phone unable to start.".into(),
                     format!("A later release may install on slot {}. To ask about this phone, open an issue: {ISSUES}", report.current_slot),
                 ],
@@ -2658,7 +2658,7 @@ impl Flow {
         let why = if !probe_declared {
             "Reading the other copy's version means making that copy the active one, restarting into it and switching back. The installer does not do that to this phone model yet.".to_string()
         } else if report.current_slot == "a" && slot_b_reads_as_started(&report.slot_flags) {
-            "This release lets the installer measure the other copy on a first install, by making it the active one, restarting into it and switching back. This phone's slot B reads as a slot that has started and can start again, which is what an earlier install of Omarchy Mobile sent back to slot A looks like, and also Android after a system update; the installer can't tell the two apart, so it measures neither. If Omarchy Mobile is on slot B, start it from there and install again as a reinstall.".to_string()
+            "This release lets the installer measure the other copy on a first install, by making it the active one, restarting into it and switching back. This phone's slot B reads as a slot that has started and can start again, which is what an earlier install of Omamobile sent back to slot A looks like, and also Android after a system update; the installer can't tell the two apart, so it measures neither. If Omamobile is on slot B, start it from there and install again as a reinstall.".to_string()
         } else if !(self.options.write && self.options.can_probe_slots) || self.options.reinstall {
             "This release lets the installer measure the other copy on a first install, by making it the active one, restarting into it and switching back, with your yes. That writes the bootloader's slot flags, so a dry run does not do it, and neither does a front end that can't restart the phone: the command-line tool's \"install --write\" and the desktop app do, before anything is written.".to_string()
         } else {
@@ -2669,7 +2669,7 @@ impl Flow {
             Retry::StopsAgain,
             "The installer can't check the phone's second bootloader copy",
             vec![
-                format!("The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omarchy Mobile starts from slot B, so slot B's bootloader has to be the same version as slot A's, and this phone only tells the version of the copy in use ({}).", report.bootloader),
+                format!("The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omamobile starts from slot B, so slot B's bootloader has to be the same version as slot A's, and this phone only tells the version of the copy in use ({}).", report.bootloader),
                 why,
                 format!("If the two copies differ, the phone may not start from slot B, so the installer stops rather than guess. To ask about this phone, open an issue: {ISSUES}"),
             ],
@@ -3709,7 +3709,7 @@ impl Flow {
             .filter(|_| release.manifest().on_running_slot())
             .unwrap_or(Slot::B);
         let name = release.manifest().boot_writes[at].partition(slot);
-        Some(format!("{} is written with this computer's SSH public key added to the initramfs it carries, after the release's own files, as Omarchy Mobile's install-phone adds it, so that the phone's rescue SSH lets this computer in. Every other byte written is the release's.", name.name()))
+        Some(format!("{} is written with this computer's SSH public key added to the initramfs it carries, after the release's own files, as Omamobile's install-phone adds it, so that the phone's rescue SSH lets this computer in. Every other byte written is the release's.", name.name()))
     }
 
     /// The current step as text. See [`Screen`].
@@ -3750,7 +3750,7 @@ impl Flow {
             extras: false,
             action: "none",
         };
-        let developer_options = String::from("In Settings > About phone, tap \"Build number\" seven times. Then in Settings > System > Developer options, switch on \"OEM unlocking\". If it is greyed out, connect the phone to the internet once (it stays grey until then after a reset); if it is still grey, the phone is most likely locked to its carrier and can't run Omarchy Mobile.");
+        let developer_options = String::from("In Settings > About phone, tap \"Build number\" seven times. Then in Settings > System > Developer options, switch on \"OEM unlocking\". If it is greyed out, connect the phone to the internet once (it stays grey until then after a reset); if it is still grey, the phone is most likely locked to its carrier and can't run Omamobile.");
         match &self.step {
             Step::Warning if self.options.repair => {
                 s.state = "warning";
@@ -3758,7 +3758,7 @@ impl Flow {
                 s.title = "Repair: read this once".into();
                 s.body = vec!["It is the only warning; nothing will ask again.".into()];
                 s.steps = vec![
-                    step(format!("A repair is for a {name} that runs Omarchy Mobile and no longer starts, for example after a kernel update: it writes this release's boot images again to the slot the phone runs from, then restarts the phone. It needs the phone unlocked and in Fastboot Mode: {keys}.")),
+                    step(format!("A repair is for a {name} that runs Omamobile and no longer starts, for example after a kernel update: it writes this release's boot images again to the slot the phone runs from, then restarts the phone. It needs the phone unlocked and in Fastboot Mode: {keys}.")),
                     step(REPAIR_ANDROID),
                     step(REPAIR_KEEPS),
                     step(format!(
@@ -3775,8 +3775,8 @@ impl Flow {
                 s.title = "Read this once".into();
                 s.body = vec!["It is the only warning; nothing will ask again.".into()];
                 s.steps = vec![
-                    step("The phone is erased. Everything on it is lost: photos, messages, apps, accounts and two-factor codes. Copy off what you want to keep first. If its bootloader is still locked, unlocking it (the next step) is what erases it, before anything of Omarchy Mobile is written."),
-                    step(format!("Omarchy Mobile replaces Android as the phone's system. There are no Google apps and no Play Store, and Android apps don't run on it. This release is a {label}: some things a phone normally does are missing or unfinished. The list for this phone: https://omamobile.org/devices/{codename}")),
+                    step("The phone is erased. Everything on it is lost: photos, messages, apps, accounts and two-factor codes. Copy off what you want to keep first. If its bootloader is still locked, unlocking it (the next step) is what erases it, before anything of Omamobile is written."),
+                    step(format!("Omamobile replaces Android as the phone's system. There are no Google apps and no Play Store, and Android apps don't run on it. This release is a {label}: some things a phone normally does are missing or unfinished. The list for this phone: https://omamobile.org/devices/{codename}")),
                     if self.on_running_slot() {
                         step(format!("{ANDROID_REPLACED} {GO_BACK_TO_ANDROID}"))
                     } else {
@@ -3803,10 +3803,10 @@ impl Flow {
                 s.action = "slot-b";
                 s.title = "What is on this phone's slot B?".into();
                 s.body = vec![
-                    format!("The {name} is running from its second system copy (slot B). Omarchy Mobile is installed on slot B, and Android is kept on the first copy (slot A) as the way back."),
-                    "A phone runs from slot B for one of two reasons: Omarchy Mobile was installed on it before, or Android moved there with a system update (an update is written to the other copy, and the phone then starts from it). From Fastboot Mode the installer can't tell which, so it asks you.".into(),
-                    "If Omarchy Mobile is on slot B, the installer installs it again there: it writes slot B's boot partitions and userdata again, and the phone keeps starting from slot B. It switches no slot, so the bootloader the phone runs now, slot B's, is the one it will start with, and the installer checks that one.".into(),
-                    "If you say Omarchy Mobile and slot B holds Android, the install overwrites the Android this phone is using. What is left on slot A is the Android from before the update, which may no longer start; getting the phone back to Android may then take Google's own tools and factory image.".into(),
+                    format!("The {name} is running from its second system copy (slot B). Omamobile is installed on slot B, and Android is kept on the first copy (slot A) as the way back."),
+                    "A phone runs from slot B for one of two reasons: Omamobile was installed on it before, or Android moved there with a system update (an update is written to the other copy, and the phone then starts from it). From Fastboot Mode the installer can't tell which, so it asks you.".into(),
+                    "If Omamobile is on slot B, the installer installs it again there: it writes slot B's boot partitions and userdata again, and the phone keeps starting from slot B. It switches no slot, so the bootloader the phone runs now, slot B's, is the one it will start with, and the installer checks that one.".into(),
+                    "If you say Omamobile and slot B holds Android, the install overwrites the Android this phone is using. What is left on slot A is the Android from before the update, which may no longer start; getting the phone back to Android may then take Google's own tools and factory image.".into(),
                     "If you don't know, say so: the installer then tells you how to find out.".into(),
                 ];
                 s.choices = SlotBHolds::ALL
@@ -3830,7 +3830,7 @@ impl Flow {
                     .map(|r| r.bootloader.clone())
                     .unwrap_or_default();
                 s.body = vec![
-                    format!("The {name} keeps two copies of its system, slot A and slot B, each with its own bootloader. Android runs from slot A, whose bootloader is {version}. Omarchy Mobile is written to slot B, and the install ends by making slot B the one the phone starts from, so slot B's bootloader has to be the same version. This phone tells the version of the copy it runs only."),
+                    format!("The {name} keeps two copies of its system, slot A and slot B, each with its own bootloader. Android runs from slot A, whose bootloader is {version}. Omamobile is written to slot B, and the install ends by making slot B the one the phone starts from, so slot B's bootloader has to be the same version. This phone tells the version of the copy it runs only."),
                     "The installer can measure slot B's version itself. It makes slot B the active slot and restarts the phone into slot B's bootloader, reads the version there, then makes slot A the active slot again and restarts back. The phone restarts into its bootloader twice, showing its Fastboot Mode screen each time; it does not start Android or anything else. How long a restart takes has not been timed on a real phone yet: the installer waits up to a minute and a half for each.".into(),
                     "Nothing is written to the phone's partitions. What changes is the bootloader's own record of which slot to start (its slot flags), which the installer sets back to slot A. Starting a slot's bootloader can also change that slot's flags; the installer reads them before and after, shows what changed, and stops if slot A could not start.".into(),
                     "The risk: this starts slot B's bootloader before its version is known, and checking that version is the reason for the measurement. If slot B's bootloader does not start, or the phone starts an operating system instead of staying in Fastboot Mode, it may not come back by itself. The way back is below; read it before you answer.".into(),
@@ -3922,7 +3922,7 @@ impl Flow {
                     } else if self.slot_check_skipped {
                         "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, and this release was tested with its Android build. Its second bootloader copy was not checked.".into()
                     } else if self.slot_b_bootloader_in_use {
-                        format!("The installer has checked what it can before you erase anything: this is the right model, it runs from slot B and you said slot B holds Omarchy Mobile (a reinstall), and this release was tested with its Android build. The bootloader it reports is {SLOT_B_BOOTLOADER_IN_USE}.")
+                        format!("The installer has checked what it can before you erase anything: this is the right model, it runs from slot B and you said slot B holds Omamobile (a reinstall), and this release was tested with its Android build. The bootloader it reports is {SLOT_B_BOOTLOADER_IN_USE}.")
                     } else if self.slots_on_owners_word {
                         "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, and this release was tested with its Android build. Its second bootloader copy was not read by the installer: that it matches the first is the statement this run was started with.".into()
                     } else if self.probe_pending {
@@ -3968,11 +3968,11 @@ impl Flow {
                 s.title = "Google's terms for the factory image".into();
                 s.body = vec![
                     format!("The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. This phone's bootloader and baseband match Google's build {}, which release {} was tested with, and the installer can download that image for you from Google's own server.", build.build, build.tested_with.as_deref().unwrap_or("")),
-                    "Google's page says these files are for use only on your own Pixel, and Google does not allow them to be redistributed. So the installer downloads them straight from Google to this computer, for this phone, and Omarchy Mobile does not host them or pass them on.".into(),
+                    "Google's page says these files are for use only on your own Pixel, and Google does not allow them to be redistributed. So the installer downloads them straight from Google to this computer, for this phone, and Omamobile does not host them or pass them on.".into(),
                     "Before Google's download page hands out a factory image, it asks you to accept Google's terms. The installer asks you the same here, and downloads nothing until you accept.".into(),
                 ];
                 s.quote = Some(Quote {
-                    intro: "From Google's download page (the link below). These are Google's words, not Omarchy Mobile's:".into(),
+                    intro: "From Google's download page (the link below). These are Google's words, not Omamobile's:".into(),
                     lines: GOOGLE_TERMS.iter().map(|l| l.to_string()).collect(),
                     after: vec![GOOGLE_TERMS_THIRD_PARTY.into()],
                     links: vec![
@@ -4002,7 +4002,7 @@ impl Flow {
                 s.state = "factory-image";
                 s.title = "Google's factory image".into();
                 s.body = vec![
-                    "The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. Omarchy Mobile does not host them or pass them on.".into(),
+                    "The phone's Wi-Fi, Bluetooth, sound, camera and modem need files that only Google may hand out. They are in Google's \"factory image\" for the phone. Omamobile does not host them or pass them on.".into(),
                     format!("This phone's bootloader and baseband match Google's build {}, which release {} was tested with.", build.build, build.tested_with.as_deref().unwrap_or("")),
                 ];
                 if !same_pair.is_empty() {
@@ -4226,7 +4226,7 @@ impl Flow {
                         "userdata will be ERASED: everything Android stored on the phone is lost.".into(),
                         format!("{ANDROID_REPLACED} Slot {slot}'s boot partitions, listed above, are the ones Android starts from now, and they are overwritten."),
                         if plan.other_slot_started {
-                            format!("The other slot, slot {}, reads as a slot that has started: whatever is on it (an earlier Omarchy Mobile, or an Android) is left as it is, and the phone does not start from it.", slot.other())
+                            format!("The other slot, slot {}, reads as a slot that has started: whatever is on it (an earlier Omamobile, or an Android) is left as it is, and the phone does not start from it.", slot.other())
                         } else {
                             format!("The other slot, slot {}, is left as it is.", slot.other())
                         },
@@ -4253,7 +4253,7 @@ impl Flow {
                     s.footer = vec![
                     "userdata will be ERASED: everything Android stored on the phone is lost, and Android on slot A needs a factory reset if it is ever started again.".into(),
                     if plan.current_slot == "b" {
-                        "Slot B's boot partitions, listed above, are overwritten: this is a reinstall, and the Omarchy Mobile that is on slot B now is replaced. If slot B holds Android instead, that Android is overwritten.".into()
+                        "Slot B's boot partitions, listed above, are overwritten: this is a reinstall, and the Omamobile that is on slot B now is replaced. If slot B holds Android instead, that Android is overwritten.".into()
                     } else {
                         "Slot B's boot partitions, listed above, are overwritten.".into()
                     },
@@ -4306,7 +4306,7 @@ impl Flow {
             }
             Step::Installed(plan) => {
                 s.state = "installed";
-                s.title = "Omarchy Mobile is written, and the phone is restarting".into();
+                s.title = "Omamobile is written, and the phone is restarting".into();
                 s.body = vec![
                     format!(
                         "Every image was written, and the phone confirmed each one: {}.",
@@ -4316,7 +4316,7 @@ impl Flow {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
-                    "Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B. At its first start the system grows to fill the phone's storage and sets up your account from your answers, which can take a few minutes. Then it starts into your account, locked: unlock it with your PIN or password.".into(),
+                    "Slot B is the active slot, and the phone was told to restart. It now starts Omamobile from slot B. At its first start the system grows to fill the phone's storage and sets up your account from your answers, which can take a few minutes. Then it starts into your account, locked: unlock it with your PIN or password.".into(),
                     if self.options.after_write_steps {
                         "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone yet. They come next, with the release's own tools: the USB connection to the phone, its first start, the radio backup, the firmware from Google's factory image, a restart and a check. Wi-Fi connects to the network you gave once the firmware is on the phone.".into()
                     } else {
@@ -4324,8 +4324,8 @@ impl Flow {
                     },
                 ];
                 let restart = match plan.running_slot {
-                    Some(slot) => format!("The phone was told to restart. It now starts Omarchy Mobile from slot {slot}, the slot it ran Android from; no slot was made active."),
-                    None => "Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B.".into(),
+                    Some(slot) => format!("The phone was told to restart. It now starts Omamobile from slot {slot}, the slot it ran Android from; no slot was made active."),
+                    None => "Slot B is the active slot, and the phone was told to restart. It now starts Omamobile from slot B.".into(),
                 };
                 if plan.running_slot.is_some() {
                     s.body[1] = format!("{restart} At its first start the system grows to fill the phone's storage and sets up your account from your answers, which can take a few minutes. Then it starts into your account, locked: unlock it with your PIN or password.");
@@ -4338,7 +4338,7 @@ impl Flow {
                 }
                 s.footer = if plan.running_slot.is_some() {
                     vec![
-                        "Android is no longer on this phone: Omarchy Mobile replaced it.".into(),
+                        "Android is no longer on this phone: Omamobile replaced it.".into(),
                         GO_BACK_TO_ANDROID.into(),
                     ]
                 } else {
@@ -4361,7 +4361,7 @@ impl Flow {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
-                    format!("The phone was told to restart. It should start Omarchy Mobile from slot {slot}, the slot it ran from, with this release's kernel, {kernel_release}; no slot was made active."),
+                    format!("The phone was told to restart. It should start Omamobile from slot {slot}, the slot it ran from, with this release's kernel, {kernel_release}; no slot was made active."),
                     format!("userdata was not written, so your account and everything stored on the phone are still there. If {kernel_release} is the kernel the phone last started, its system holds that kernel's drivers and the phone should start into your account as before."),
                     format!("If the screen stays dark or on the boot logo, or Wi-Fi, the modem or charging don't work, the phone's system holds no drivers for {kernel_release}: reach the phone over the USB cable with SSH and, first and before any update, run \"omamobile-boot-update rollback\", which puts back the kernel it ran before, or install again, which erases the phone."),
                 ];
@@ -4508,7 +4508,7 @@ fn probe_stop_words(why: &ProbeTrouble, keys: &str) -> (&'static str, Vec<String
         ProbeTrouble::SlotBStarted => (
             "Slot B reads as a slot that has started",
             vec![
-                "This phone's slot B reads as a slot that has started and can start again: an earlier install of Omarchy Mobile sent back to slot A looks like that, and so does Android after a system update. The installer can't tell the two apart, so it measures neither, and nothing was sent to the phone for it.".into(),
+                "This phone's slot B reads as a slot that has started and can start again: an earlier install of Omamobile sent back to slot A looks like that, and so does Android after a system update. The installer can't tell the two apart, so it measures neither, and nothing was sent to the phone for it.".into(),
                 ask,
             ],
             Retry::StopsAgain,

@@ -148,7 +148,7 @@ fn a_locked_phone_is_shown_the_command_and_sent_nothing() {
     };
     assert!(at("==> Unlock the bootloader") < at("    !!  This version of the installer cannot"));
     assert!(at("    !!  This version of the installer cannot") < at("fastboot flashing unlock"));
-    assert!(flat(&out).contains("!! This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it."));
+    assert!(flat(&out).contains("!! This version of the installer cannot install Omamobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it."));
     // The phone was asked whether it would take the command, and said yes
     assert!(flat(&out).contains("The phone says that \"OEM unlocking\" is already switched on"));
     assert!(!flat(&out).contains("Developer options"));
@@ -262,12 +262,12 @@ fn each_stop_ends_the_tool_with_the_cores_words() {
         ),
         (
             "untested-build",
-            "This phone's Android build has not been tested with Omarchy Mobile yet",
+            "This phone's Android build has not been tested with Omamobile yet",
             "will stop here again",
         ),
         (
             "untested-old-build",
-            "This phone's Android build hasn't been tested with Omarchy Mobile",
+            "This phone's Android build hasn't been tested with Omamobile",
             "once that is done",
         ),
     ] {
@@ -286,7 +286,7 @@ fn each_stop_ends_the_tool_with_the_cores_words() {
     let out = flat(&out);
     assert!(out.contains("Nothing you can install today changes that."));
     assert!(out.contains("What you can do is wait"));
-    assert!(out.contains("https://github.com/derekross/omarchy-mobile/issues"));
+    assert!(out.contains("https://github.com/derekross/omamobile/issues"));
     assert!(!out.contains("System update") && !out.contains("install it"));
     // Not tested, and a newer build is: updating Android to it is the advice
     let (_, out, _) = flow("untested-old-build", &[], "yes\n");
@@ -354,7 +354,7 @@ fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
             "The dry run",
             "This is what the installer will write",
             "Writing to the phone",
-            "Omarchy Mobile is written, and the phone is restarting"
+            "Omamobile is written, and the phone is restarting"
         ]
     );
     // Before the confirmation: each partition with its sizes, what is
@@ -429,8 +429,8 @@ fn with_write_and_the_typed_codename_the_tool_writes_slot_b_and_userdata() {
     assert!(out.contains("userdata, the flash the phone took longest over: piece "));
     assert!(!out.contains("sent and not confirmed"));
     // After the last write: what the owner is told
-    let after = flat(&out[out.find("==> Omarchy Mobile is written").unwrap()..]);
-    assert!(after.contains("It now starts Omarchy Mobile from slot B."));
+    let after = flat(&out[out.find("==> Omamobile is written").unwrap()..]);
+    assert!(after.contains("It now starts Omamobile from slot B."));
     assert!(after.contains("sets up your account from your answers"));
     assert!(!after.contains("no user account"));
     assert!(!out.contains("4812") && !out.contains("FAKESERIAL"));
@@ -564,7 +564,7 @@ fn a_phone_that_tells_one_bootloader_slot_is_written_on_the_owners_statement_onl
     assert_eq!(code, 0, "{out}\n{err}");
     assert_eq!(
         *titles(&out).last().unwrap(),
-        "Omarchy Mobile is written, and the phone is restarting"
+        "Omamobile is written, and the phone is restarting"
     );
     let asked = out.find("Codename: ").unwrap();
     let confirmation = &out[out
@@ -839,7 +839,7 @@ fn install_needs_dry_run_or_write_and_the_test_key_is_for_the_pretend_phone() {
     std::fs::copy(fixture().join("test-key.gpg"), copy.join("omamobile.gpg")).unwrap();
     let (code, _, err) = run(&["verify", copy.to_str().unwrap()], "");
     assert_eq!(code, 1);
-    assert!(err.contains("not signed by an Omarchy Mobile key"), "{err}");
+    assert!(err.contains("not signed by an Omamobile key"), "{err}");
 }
 
 #[test]
@@ -857,7 +857,7 @@ fn a_reinstall_from_slot_b_is_written_with_the_version_slot_b_reports() {
     assert_eq!(code, 0, "{out}\n{err}");
     assert_eq!(
         *titles(&out).last().unwrap(),
-        "Omarchy Mobile is written, and the phone is restarting"
+        "Omamobile is written, and the phone is restarting"
     );
     let asked = out.find("Codename: ").unwrap();
     let confirmation = flat(
@@ -949,7 +949,7 @@ fn a_release_on_the_running_slot_writes_slot_a_of_a_phone_from_stock_and_sends_n
             "The dry run",
             "This is what the installer will write",
             "Writing to the phone",
-            "Omarchy Mobile is written, and the phone is restarting"
+            "Omamobile is written, and the phone is restarting"
         ]
     );
     let asked = out.find("Codename: ").unwrap();
@@ -992,9 +992,9 @@ fn a_release_on_the_running_slot_writes_slot_a_of_a_phone_from_stock_and_sends_n
         "{sent:?}"
     );
     assert!(out.contains("(partitions written: boot_a, dtbo_a, init_boot_a, userdata, vendor_boot_a, vendor_kernel_boot_a)"), "{out}");
-    let after = flat(&out[out.find("==> Omarchy Mobile is written").unwrap()..]);
+    let after = flat(&out[out.find("==> Omamobile is written").unwrap()..]);
     assert!(
-        after.contains("It now starts Omarchy Mobile from slot a"),
+        after.contains("It now starts Omamobile from slot a"),
         "{after}"
     );
     assert!(after.contains("Android is no longer on this phone"));

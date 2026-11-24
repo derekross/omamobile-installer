@@ -16,7 +16,7 @@ ApplicationWindow {
     minimumWidth: 720
     minimumHeight: 560
     visible: true
-    title: qsTr("Omarchy Mobile Installer")
+    title: qsTr("Omamobile Installer")
     color: "#0e0e10"
 
     Material.theme: Material.Dark
@@ -261,7 +261,7 @@ ApplicationWindow {
                 spacing: 12
 
                 Text {
-                    text: qsTr("Omarchy Mobile Installer")
+                    text: qsTr("Omamobile Installer")
                     color: "#e6e6ea"
                     font.pixelSize: 15
                     font.bold: true
@@ -487,7 +487,7 @@ ApplicationWindow {
                         onClicked: win.secondary()
                     }
                     // On the first screen of a run that writes: Repair a
-                    // phone that runs Omarchy Mobile and no longer starts,
+                    // phone that runs Omamobile and no longer starts,
                     // instead of an install (docs/DESIGN.md §11). The core's
                     // own warning for it comes next.
                     ActionButton {

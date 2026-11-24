@@ -210,10 +210,7 @@ fn hash_root(
 fn cmd_verify(dir: &Path) -> Res<()> {
     let release = verify_bundle(dir)?;
     let m = release.manifest();
-    println!(
-        "Omarchy Mobile {} ({}) for {}",
-        m.version, m.label, m.codename
-    );
+    println!("Omamobile {} ({}) for {}", m.version, m.label, m.codename);
     match find_root(dir, &m.root_image.name) {
         Some(path) => {
             hash_root(&release, &mut File::open(&path)?)?;
@@ -1724,7 +1721,7 @@ const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR
 const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written. A reinstall from slot B does not need it (--reinstall).";
 
 /// What `help` says about `--reinstall`.
-const REINSTALL_HELP: &str = "Slot B already holds Omarchy Mobile, and this installs it again. Without it a phone that runs from slot B stops: Android runs from slot B after a system update, and an install would overwrite it. On a phone that runs from slot B and tells the version of one bootloader copy only (the Pixel 7 Pro), the copy it tells is slot B's, the bootloader the phone already runs, and the install switches no slot, so --bootloader-slots-match is not needed. Say it only if Omarchy Mobile is on slot B: if Android is, the install overwrites the Android the phone is using. On a phone that runs from slot A it changes nothing.";
+const REINSTALL_HELP: &str = "Slot B already holds Omamobile, and this installs it again. Without it a phone that runs from slot B stops: Android runs from slot B after a system update, and an install would overwrite it. On a phone that runs from slot B and tells the version of one bootloader copy only (the Pixel 7 Pro), the copy it tells is slot B's, the bootloader the phone already runs, and the install switches no slot, so --bootloader-slots-match is not needed. Say it only if Omamobile is on slot B: if Android is, the install overwrites the Android the phone is using. On a phone that runs from slot A it changes nothing.";
 
 /// `omamobile-install help`: the commands, and what `--write` does to a
 /// phone, in the core's words.

@@ -93,7 +93,7 @@ fn a_first_install_measures_the_other_slot_and_writes() {
     assert_eq!(code, 0, "{out}\n{err}");
     let shown = titles(&out);
     assert_eq!(shown[2], "Measure the phone's second bootloader copy?");
-    assert!(shown.contains(&"Omarchy Mobile is written, and the phone is restarting"));
+    assert!(shown.contains(&"Omamobile is written, and the phone is restarting"));
     let text = flat(&out);
     assert!(text
         .contains("Measure slot B's bootloader (two restarts into the bootloader) (type measure)"));

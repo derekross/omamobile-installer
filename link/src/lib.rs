@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! The install link's protocol: what a freshly installed Omarchy Mobile
+//! The install link's protocol: what a freshly installed Omamobile
 //! phone and the installer say to each other over USB at the phone's first
-//! start. Protocol 1, as omarchy-mobile's `docs/INSTALL-LINK-PLAN.md` §5
+//! start. Protocol 1, as omamobile's `docs/INSTALL-LINK-PLAN.md` §5
 //! lays it out since its correction of 2026-11-12; `docs/LINK.md` in this
 //! repository says how the crate is meant to be used and where it still
 //! differs from that document. The number is fixed at the crate's first tag.
