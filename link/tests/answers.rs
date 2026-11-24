@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! The owner's answers are judged by the rules the phone's first start
-//! applies: `omamobile-firstboot`'s `validate` (omarchy-mobile,
+//! applies: `omamobile-firstboot`'s `validate` (omamobile,
 //! packages/omamobile-firstboot/bin/omamobile-firstboot, lines 120-153).
 //!
 //! `the_same_verdict_as_first_boot_itself` runs that script on every case

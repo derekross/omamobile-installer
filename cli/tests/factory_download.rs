@@ -291,7 +291,7 @@ fn the_terms_are_shown_and_accepted_before_the_tool_downloads_and_checks_the_fil
     );
     // Google's words, marked as Google's and set apart, with the pages they name
     let text = flat(&out);
-    assert!(text.contains("These are Google's words, not Omarchy Mobile's:"));
+    assert!(text.contains("These are Google's words, not Omamobile's:"));
     assert!(text.contains("\"Downloading of the system image and use of the device software is subject to the Google Terms of Service\""));
     assert!(text.contains(
         "\"By continuing, you agree to the Google Terms of Service and Privacy Policy\""
@@ -304,7 +304,7 @@ fn the_terms_are_shown_and_accepted_before_the_tool_downloads_and_checks_the_fil
     assert!(text.contains(
         "for use only on your own Pixel, and Google does not allow them to be redistributed"
     ));
-    assert!(text.contains("Omarchy Mobile does not host them or pass them on"));
+    assert!(text.contains("Omamobile does not host them or pass them on"));
     // Nothing was fetched before the terms were answered
     let terms_at = out.find(TERMS).unwrap();
     let asked_at = out.find("Type yes to accept").unwrap();

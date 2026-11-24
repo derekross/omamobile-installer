@@ -57,7 +57,7 @@ export function holdsTheAnswers(assert, userdata, raw) {
     return new TextDecoder().decode(userdata.subarray(p.offset, p.offset + p.length)).replace(/\0+$/, "");
   };
   const conf = text("/etc/omamobile/firstboot.conf");
-  assert.match(conf, /^# Written by the Omarchy Mobile installer/);
+  assert.match(conf, /^# Written by the Omamobile installer/);
   for (const line of ["USERNAME=alex", "HOSTNAME=alex-phone", "TIMEZONE=Europe/Paris", "CREDENTIAL=pin"]) assert.ok(conf.split("\n").includes(line), `${line} in ${conf}`);
   assert.ok(!/^(PASSWORD|PIN)=/m.test(conf), "the PIN is not there as typed");
   const hash = conf.match(/^PASSWORD_HASH=\$6\$([./0-9A-Za-z]{16})\$[./0-9A-Za-z]{86}$/m);

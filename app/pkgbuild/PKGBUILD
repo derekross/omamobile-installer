@@ -4,11 +4,11 @@
 # (app/bin/install does the same). Both binaries go to /usr/bin, where the
 # app finds the tool (docs/APP.md §2: beside the app's own binary, then on
 # PATH). The tool is built as it ships: no `fake-phone` feature, so it has
-# no pretend phone and trusts only Omarchy Mobile's release key.
+# no pretend phone and trusts only Omamobile's release key.
 pkgname=omainstall
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Guides you through installing Omarchy Mobile on a phone (not yet run against a real phone through this app)'
+pkgdesc='Guides you through installing Omamobile on a phone (not yet run against a real phone through this app)'
 arch=('x86_64' 'aarch64')
 url='https://github.com/derekross/omamobile-installer'
 license=('MIT')

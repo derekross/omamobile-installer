@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! The owner's answers, checked by the rules the phone's first start applies.
 //!
-//! The rules are `omamobile-firstboot`'s (omarchy-mobile,
+//! The rules are `omamobile-firstboot`'s (omamobile,
 //! `packages/omamobile-firstboot/bin/omamobile-firstboot`), reproduced here
 //! with the line each comes from, so the installer can say what is wrong
 //! under a field before anything is sent, and the phone can refuse the same

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! A release that installs on the slot the phone runs from (manifest
-//! format 2, Omarchy Mobile's ACTIVE-SLOT-PLAN), against the fake phone.
+//! format 2, Omamobile's ACTIVE-SLOT-PLAN), against the fake phone.
 //! No USB.
 //!
 //! Each test reads the pretend phone's record of what it was sent. What
@@ -508,7 +508,7 @@ fn the_confirmation_says_android_is_replaced_and_the_way_back() {
     drive(&mut flow, &bundle, &phone, "cheetah", "");
     let done = flow.screen();
     assert_eq!(done.state, "installed");
-    assert!(done.body[1].contains("starts Omarchy Mobile from slot a"));
+    assert!(done.body[1].contains("starts Omamobile from slot a"));
     assert!(done.footer.iter().any(|l| l == GO_BACK_TO_ANDROID));
     assert!(!done
         .footer

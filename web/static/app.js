@@ -113,7 +113,7 @@ async function start(tamper = "", slotOverride = false, fetches = false) {
   if (text) {
     const d = JSON.parse(text);
     const who = pretend ? "a test bundle, signed by a test key" : `signed by ${d.signed_by}`;
-    show("release", `Omarchy Mobile ${d.version} (${d.label}) for ${d.device} (${d.codename}), ${who}`, "ok");
+    show("release", `Omamobile ${d.version} (${d.label}) for ${d.device} (${d.codename}), ${who}`, "ok");
   } else {
     show("release", "the release did not pass its checks", "bad");
   }
@@ -172,7 +172,7 @@ async function drawRelease(state = "") {
   const files = largeFiles(d, source.small.files[3]);
   const total = files.reduce((n, f) => n + f.size, 0);
   if (source.kind === "server") {
-    $("release-from").textContent = `From the release server: Omarchy Mobile ${d.version} for ${d.device}. Its images are ${size(total)}.`;
+    $("release-from").textContent = `From the release server: Omamobile ${d.version} for ${d.device}. Its images are ${size(total)}.`;
     go.disabled = !!large;
     go.textContent = "Download and check the release";
     const storage = navigator.storage;
@@ -199,7 +199,7 @@ async function drawRelease(state = "") {
       }
     }
   } else {
-    $("release-from").textContent = `From this computer: Omarchy Mobile ${d.version} for ${d.device}.`;
+    $("release-from").textContent = `From this computer: Omamobile ${d.version} for ${d.device}.`;
   }
   if (large) state ||= "Every file of the release is here, and each one matched the signed release.";
   $("release-state").textContent = state;
@@ -670,13 +670,13 @@ async function selftest() {
       quoted.length === 2 &&
       quoted[0] === "Downloading of the system image and use of the device software is subject to the Google Terms of Service" &&
       quoted[1] === "By continuing, you agree to the Google Terms of Service and Privacy Policy" &&
-      $("quote").textContent.includes("These are Google's words, not Omarchy Mobile's") &&
+      $("quote").textContent.includes("These are Google's words, not Omamobile's") &&
       $("quote").textContent.includes('"may also be subject to certain third-party terms of service, which can be found in Settings > About phone > Legal information"'),
     text(),
   );
   const termsLinks = [...document.querySelectorAll("#quote .links a")].map((a) => a.href);
   check("the terms step links Google's terms, its privacy policy and its page for this build", termsLinks.join(" ") === "https://policies.google.com/terms https://policies.google.com/privacy" && $("google").href === "https://developers.google.com/android/images#cheetah" && $("google").target === "_blank", termsLinks.join(" "));
-  check("the terms step says whose the files are and that nobody passes them on", text().includes("for use only on your own Pixel, and Google does not allow them to be redistributed") && text().includes("Omarchy Mobile does not host them or pass them on") && text().includes("downloads nothing until you accept"));
+  check("the terms step says whose the files are and that nobody passes them on", text().includes("for use only on your own Pixel, and Google does not allow them to be redistributed") && text().includes("Omamobile does not host them or pass them on") && text().includes("downloads nothing until you accept"));
   check("nothing is fetched and no file is taken before the terms are answered", !$("download") && !$("zip") && (await asked()) === before);
   await click("decline-terms");
   seen.push(state());
@@ -805,7 +805,7 @@ async function selftest() {
   check(
     "a locked phone is told first, right under the title, that this version cannot install and not to unlock for it",
     $("screen").children[1] === $("notice") &&
-      notice() === "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it." &&
+      notice() === "This version of the installer cannot install Omamobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it." &&
       text().includes("This version gives you no reason to take them."),
     notice(),
   );
@@ -864,7 +864,7 @@ async function selftest() {
   await click("look");
   check(
     "not tested, and nothing newer is: told to wait, not to update Android",
-    $("screen").querySelector("h2").textContent.endsWith("has not been tested with Omarchy Mobile yet") && text().includes("Nothing you can install today changes that") && text().includes("What you can do is wait") && text().includes("/issues") && !text().includes("System update") && text().includes("will stop here again"),
+    $("screen").querySelector("h2").textContent.endsWith("has not been tested with Omamobile yet") && text().includes("Nothing you can install today changes that") && text().includes("What you can do is wait") && text().includes("/issues") && !text().includes("System update") && text().includes("will stop here again"),
     text(),
   );
 
@@ -981,7 +981,7 @@ async function selftest() {
     const panelSays = () => $("release-state").textContent;
     await click("delete-release");
     await serverIn("cut");
-    check("the latest release is found on the server and its signed small files pass, and the download can be asked for", $("release-from").textContent.startsWith("From the release server: Omarchy Mobile 2026.01.02") && !$("download-release").disabled, $("release-from").textContent);
+    check("the latest release is found on the server and its signed small files pass, and the download can be asked for", $("release-from").textContent.startsWith("From the release server: Omamobile 2026.01.02") && !$("download-release").disabled, $("release-from").textContent);
     let t = performance.now();
     await click("download-release");
     result.release_download_ms = Math.round(performance.now() - t);

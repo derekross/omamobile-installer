@@ -2,7 +2,7 @@
 // A stand-in for the release server (pkgs.omamobile.org/releases/), on
 // 127.0.0.1, for the tests of the page's download (web/test) and for the
 // page's self-test in a headless browser (web/selftest.sh). It answers as
-// omarchy-mobile's tools/server/releases-nginx.sh sets the real one up: any
+// omamobile's tools/server/releases-nginx.sh sets the real one up: any
 // origin may read (Access-Control-Allow-Origin: *, the range headers
 // exposed, an OPTIONS preflight answered 204), byte ranges with an ETag and
 // If-Range, exact Content-Length, no compression.

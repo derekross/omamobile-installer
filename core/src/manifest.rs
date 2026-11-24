@@ -6,7 +6,7 @@
 //! - **Format 1** writes slot B: `<image>_b` for each boot image, then
 //!   `userdata`, then `set-active b` and `reboot`, with both bootloader
 //!   slots required to match.
-//! - **Format 2** ("install on the running slot", Omarchy Mobile's
+//! - **Format 2** ("install on the running slot", Omamobile's
 //!   ACTIVE-SLOT-PLAN): the writes name images, not partitions; the slot is
 //!   the phone's `current-slot`, read at run time and only when it is one of
 //!   `install.accept_current_slots`; then `userdata` and `reboot`, with no
@@ -44,14 +44,14 @@ pub const FORMAT: u64 = 1;
 /// Format 2: the slot the phone runs from, and no `set-active`.
 pub const FORMAT_RUNNING_SLOT: u64 = 2;
 /// The storage guard's marker in a format-2 release's initramfs: the init
-/// maps the guard's list to the running slot (Omarchy Mobile's
+/// maps the guard's list to the running slot (Omamobile's
 /// `bin/omamobile initramfs`). A format-2 release whose initramfs lacks it
 /// is refused before anything is written ([`crate::ramdisk_key::guard_marker`]).
 pub const GUARD_MARKER: &str = "/etc/omamobile-ufs-rw-slot";
 /// What [`GUARD_MARKER`] holds.
 pub const GUARD_MARKER_VALUE: &str = "running";
 /// The files a release's root image keeps a place for, for the owner's
-/// answers (Omarchy Mobile's `rootfs/placeholders`, RELEASES §6.1): the
+/// answers (Omamobile's `rootfs/placeholders`, RELEASES §6.1): the
 /// first-boot answers and the boot hook's switch. Each is one block.
 pub const PLACEHOLDER_PATHS: [&str; 2] = [
     "/etc/omamobile/firstboot.conf",
@@ -777,7 +777,7 @@ impl Manifest {
             _ => {}
         }
         // Which slot an install writes: the descriptor decides, and the
-        // signed plan must say the same (Omarchy Mobile's INSTALL_SLOT and
+        // signed plan must say the same (Omamobile's INSTALL_SLOT and
         // INSTALL_ACTIVE_SLOTS)
         match (conf.install_slot()?, &self.slot_plan) {
             (None, SlotPlan::SlotB) => {}

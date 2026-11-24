@@ -82,7 +82,7 @@ impl DeviceConf {
         }
     }
 
-    /// `INSTALL_SLOT` and `INSTALL_ACTIVE_SLOTS` (Omarchy Mobile's
+    /// `INSTALL_SLOT` and `INSTALL_ACTIVE_SLOTS` (Omamobile's
     /// ACTIVE-SLOT-PLAN §7, step 6): which slot a release install writes.
     /// `None`: slot B (`INSTALL_SLOT` absent or `b`), manifest format 1.
     /// `Some(slots)`: `INSTALL_SLOT=active`, manifest format 2, on a phone

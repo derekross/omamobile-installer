@@ -20,7 +20,7 @@
 // server and a stand-in file system (web/test). It holds no rule about a
 // phone and sends nothing to one.
 
-// Where releases are published (omarchy-mobile docs/RELEASES.md §6). The
+// Where releases are published (omamobile docs/RELEASES.md §6). The
 // server sends CORS headers for every page and allows Range requests.
 export const RELEASES = "https://pkgs.omamobile.org/releases/";
 
@@ -564,7 +564,7 @@ export async function checkPicked(release, files, byName, { onEvent, readBytes =
 
 // A tar's members, by name: File objects that are slices of the
 // tar, read from disk only when read. The release's .tar is GNU tar, made by
-// omarchy-mobile's tools/lib/bundle-tar.sh: ustar headers, GNU long names
+// omamobile's tools/lib/bundle-tar.sh: ustar headers, GNU long names
 // ('L'), pax headers ('x') read for a path and a size.
 export async function readTar(tar) {
   const out = new Map();

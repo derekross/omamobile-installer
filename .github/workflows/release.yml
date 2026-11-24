@@ -210,6 +210,6 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-            --title "Omarchy Mobile installer $TAG" \
+            --title "Omamobile installer $TAG" \
             --notes "Draft: built by the Release workflow from $GITHUB_SHA. Publish only after docs/GO-LIVE.md. How to install: docs/INSTALL-APP.md." \
             dist/*

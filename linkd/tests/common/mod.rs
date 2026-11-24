@@ -157,7 +157,7 @@ impl Phone {
         );
         p.write(
             "/usr/share/omamobile/rootfs/MANIFEST",
-            b"# Omarchy Mobile root image\nversion: 2026.01.01\n",
+            b"# Omamobile root image\nversion: 2026.01.01\n",
         );
         p.write(
             "/proc/bootconfig",

@@ -2,7 +2,7 @@
 //! The golden frames: under `link/golden/`, for each frame `NAME.bin` (the
 //! bytes of one bulk transfer), `NAME.hex` (the same bytes as text) and
 //! `NAME.txt` (what the frame is). They are the contract the phone's daemon
-//! in omarchy-mobile is checked against (INSTALL-LINK-PLAN §12 Q8, §11.1),
+//! in omamobile is checked against (INSTALL-LINK-PLAN §12 Q8, §11.1),
 //! and this test fails when the encoding changes by a single byte.
 //!
 //! The text form is for the other repository, whose pull-request gate
@@ -355,7 +355,7 @@ fn the_golden_files_read_back_as_what_they_say() {
         }
         if path.extension().is_some_and(|e| e == "hex") {
             // The text form and the bytes agree, read from disk alone: this
-            // is what omarchy-mobile's test does with its copy
+            // is what omamobile's test does with its copy
             let text = std::fs::read_to_string(&path).unwrap();
             let bytes = hex_bytes(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"));
             let bin = std::fs::read(path.with_extension("bin"))

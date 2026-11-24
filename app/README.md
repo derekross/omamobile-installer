@@ -2,7 +2,7 @@
 
 ![The window at the end of a dry run: what an install would write](docs/screens/34-dry-run-only-done.png)
 
-The desktop window of the [Omarchy Mobile installer](../README.md): it guides a person through installing Omarchy Mobile on a phone plugged into this computer. It is built the way Omarchy's own apps are: C++ and Qt Quick, one window, one job, driven from the keyboard, following the desktop's theme.
+The desktop window of the [Omamobile installer](../README.md): it guides a person through installing Omamobile on a phone plugged into this computer. It is built the way Omarchy's own apps are: C++ and Qt Quick, one window, one job, driven from the keyboard, following the desktop's theme.
 
 **It has never been run against a real phone.** Started as it is, it goes through the steps of an install up to the dry run, which lists what an install would write, and ends there: such a window cannot write to a phone. Started with `--write` it goes on: it lists what it will write and what is erased, waits for the phone's codename to be typed, and writes. That path has run against a pretend phone only, and on a Pixel 7 Pro, the one phone it is for, the window reaches it as a reinstall only (the phone runs from slot B; the window asks what slot B holds) and stops a first install before it: [docs/STATUS.md](docs/STATUS.md) says what works, what has never run, what is left out on purpose, and how the app's first attended run goes. [docs/screens/](docs/screens/) has a picture of each screen of a pretend install.
 
@@ -26,7 +26,7 @@ makepkg -si          # builds both (Rust and Qt), runs the tool's own tests, ins
 
 `app/bin/install` does the same. `makepkg -s` installs what it needs to build that is missing (the Rust toolchain, `cargo`, among it); the package then needs, besides Qt, what the steps after the write run: OpenSSH, Python, `unzip`, `android-tools`, `erofs-utils`, `e2fsprogs`, `binutils`, `lz4`, `zstd` and `cpio`. NetworkManager is optional: without it you give this computer the address 172.16.42.2/24 on the phone's USB link yourself.
 
-Then "Omarchy Mobile Installer" is in the launcher, or from a terminal:
+Then "Omamobile Installer" is in the launcher, or from a terminal:
 
 ```sh
 omainstall open DIR                    # a dry run, with a release's directory
@@ -56,7 +56,7 @@ While a field has the focus, letters go to the field. While a button has the foc
 
 ```sh
 omainstall                              # the window (the same as `open`)
-omainstall open [--reinstall] [DIR]     # a dry run. --reinstall: slot B already holds Omarchy Mobile; DIR: a release's directory
+omainstall open [--reinstall] [DIR]     # a dry run. --reinstall: slot B already holds Omamobile; DIR: a release's directory
 omainstall open --write [--reinstall] DIR   # an install: ERASES the phone once its codename is typed in the window
 omainstall check [--json]               # no display: find the installer's tool, say its version and protocol number
 ```
@@ -102,4 +102,4 @@ OMAINSTALL_TOOL=$PWD/tests/stand-in-tool build/omainstall      # try the window 
 
 ## Licence
 
-MIT, as the rest of Omarchy Mobile; see [LICENSE](LICENSE). The theme, the translator and the project's shape follow Omacut, Monologue and Hype (MIT, David Heinemeier Hansson).
+MIT, as the rest of Omamobile; see [LICENSE](LICENSE). The theme, the translator and the project's shape follow Omacut, Monologue and Hype (MIT, David Heinemeier Hansson).

@@ -2,11 +2,11 @@
   "state": "installed",
   "stop": null,
   "retry": null,
-  "title": "Omarchy Mobile is written, and the phone is restarting",
+  "title": "Omamobile is written, and the phone is restarting",
   "notice": null,
   "body": [
     "Every image was written, and the phone confirmed each one: boot_b, init_boot_b, vendor_boot_b, vendor_kernel_boot_b, dtbo_b, userdata.",
-    "Slot B is the active slot, and the phone was told to restart. It now starts Omarchy Mobile from slot B. At its first start the system grows to fill the phone's storage and sets up your account from your answers, which can take a few minutes. Then it starts into your account, locked: unlock it with your PIN or password.",
+    "Slot B is the active slot, and the phone was told to restart. It now starts Omamobile from slot B. At its first start the system grows to fill the phone's storage and sets up your account from your answers, which can take a few minutes. Then it starts into your account, locked: unlock it with your PIN or password.",
     "The radio backup and Google's files for Wi-Fi, Bluetooth, sound, camera and modem are not on the phone: this version of the installer does nothing after the restart. So Wi-Fi does not connect yet; the network you gave is kept for when it does."
   ],
   "quote": null,

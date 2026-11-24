@@ -562,7 +562,7 @@ fn a_locked_bootloader_gets_guidance_and_nothing_is_sent() {
 #[test]
 fn a_flow_that_ends_at_a_dry_run_says_so_before_the_unlock_steps() {
     // The sentence an owner reads before the steps that erase the phone
-    assert_eq!(NO_INSTALL_YET, "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.");
+    assert_eq!(NO_INSTALL_YET, "This version of the installer cannot install Omamobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.");
     let bundle = TestBundle::new();
     for scenario in ["locked", "locked-oem-off"] {
         let phone = phone(scenario);
@@ -1191,16 +1191,17 @@ fn a_phone_whose_pair_is_not_listed_or_not_tested_stops() {
     assert_eq!(s.retry, Retry::StopsAgain);
     assert_eq!(
         s.title,
-        "This phone's Android build has not been tested with Omarchy Mobile yet"
+        "This phone's Android build has not been tested with Omamobile yet"
     );
     let text = s.message.join(" ");
-    assert!(text
-        .contains("build TEST.260301.001. That build has not been tested with Omarchy Mobile yet"));
+    assert!(
+        text.contains("build TEST.260301.001. That build has not been tested with Omamobile yet")
+    );
     assert!(text.contains("Nothing you can install today changes that"));
     assert!(text.contains("an Android update does not help"));
     // What the owner can do: wait, or the issue tracker
     assert!(text.contains("What you can do is wait"));
-    assert!(text.contains("https://github.com/derekross/omarchy-mobile/issues"));
+    assert!(text.contains("https://github.com/derekross/omamobile/issues"));
     // No advice to update, in any of the words the other stops use for it
     for advice in [
         "System update",
@@ -1227,7 +1228,7 @@ fn a_phone_whose_pair_is_not_listed_or_not_tested_stops() {
     look(&mut flow, &phone).unwrap();
     let s = stop(&flow).clone();
     assert_eq!((s.id(), s.retry), ("build-not-tested", Retry::StopsAgain));
-    assert!(s.title.ends_with("not been tested with Omarchy Mobile yet"));
+    assert!(s.title.ends_with("not been tested with Omamobile yet"));
     assert!(!s.message.join(" ").contains("System update"));
     // And when the only tested builds are older than the phone's
     let phone = self::phone("ready");
@@ -1256,7 +1257,7 @@ fn a_phone_whose_pair_is_not_listed_or_not_tested_stops() {
             newer_tested: None
         }
     );
-    assert!(s.title.ends_with("not been tested with Omarchy Mobile yet"));
+    assert!(s.title.ends_with("not been tested with Omamobile yet"));
     assert!(!s.message.join(" ").contains("System update"));
 
     // Listed, not tested, and a newer build was: that one is named
@@ -1274,7 +1275,7 @@ fn a_phone_whose_pair_is_not_listed_or_not_tested_stops() {
     assert_eq!(s.retry, Retry::AfterFix);
     assert_eq!(
         s.title,
-        "This phone's Android build hasn't been tested with Omarchy Mobile"
+        "This phone's Android build hasn't been tested with Omamobile"
     );
     assert!(s.message.join(" ").contains(
         "a newer build that was tested: TEST.260101.001. If Android offers an update to it, install it"
@@ -1328,7 +1329,7 @@ fn a_factory_zip_with_a_wrong_name_size_or_digest_is_not_taken() {
     let body = screen.body.join(" ");
     assert!(body
         .contains("You did not accept Google's terms in the installer, so it downloads nothing."));
-    assert!(body.contains("Omarchy Mobile does not host them or pass them on."));
+    assert!(body.contains("Omamobile does not host them or pass them on."));
     assert!(matches!(
         flow.factory_download(0),
         Err(Error::Refused(why)) if why.contains("Google's terms were not accepted")

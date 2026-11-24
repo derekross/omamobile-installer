@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! The build index, `factory-builds.json` (Omarchy Mobile's
+//! The build index, `factory-builds.json` (Omamobile's
 //! docs/INSTALL-GUIDED.md §5, written by its `tools/factory-index`): which of
 //! Google's factory images matches a phone. Metadata only, never a file of
 //! Google's: for each build its id, the bootloader and baseband versions it

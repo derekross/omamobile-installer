@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "The installer finds Google's factory image for a phone by its bootloader and baseband versions, and this phone reports no baseband version.",
-    "Please tell us at https://github.com/derekross/omarchy-mobile/issues"
+    "Please tell us at https://github.com/derekross/omamobile/issues"
   ],
   "quote": null,
   "steps": [],

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Spike: the shared core of the Omarchy Mobile installer.
+//! Spike: the shared core of the Omamobile installer.
 //!
 //! One crate, built natively (the CLI, a desktop app) and to WebAssembly (the
 //! web flasher). It holds every rule that decides what may be written to a

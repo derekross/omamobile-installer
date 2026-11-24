@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! The steps after the write, in the tool's `json` mode (docs/DESIGN.md
-//! §13, decided by the maintainer on 2026-11-13): what Omarchy Mobile's
+//! §13, decided by the maintainer on 2026-11-13): what Omamobile's
 //! `tools/install-guided` does once `tools/install-phone` has written a
 //! phone, with the release's own tools, until the install link does it.
 //!
@@ -93,7 +93,7 @@ if [ -n "$v" ]; then printf %s "$v" | sha256sum | cut -d" " -f1; else echo no-se
     /// its first start is over when systemd has finished starting.
     pub const FIRST_START_DONE: &str = "test -e /var/lib/omamobile/firstboot/done || { ! test -e /etc/omamobile/firstboot.conf && systemctl is-system-running 2>/dev/null | grep -cE '^(running|degraded)$' >/dev/null; }";
     /// Holds off the phone's sleep while the steps after the write work on
-    /// it, as Omarchy Mobile's `tools/install-guided` does (#814): a freshly
+    /// it, as Omamobile's `tools/install-guided` does (#814): a freshly
     /// written phone has no firmware yet, so its modem and the modem's sleep
     /// inhibitor can't start, and auto-sleep put it to sleep between its
     /// first start and the radio backup, which drops USB (2026-11-15). A
@@ -104,7 +104,7 @@ if [ -n "$v" ]; then printf %s "$v" | sha256sum | cut -d" " -f1; else echo no-se
     pub const BOOT_ID: &str = "cat /proc/sys/kernel/random/boot_id";
     pub const SYSTEM: &str = "systemctl is-system-running";
     /// install-guided's restart: the modem's unit is stopped first, since
-    /// `reboot-to` stops no unit (Omarchy Mobile's AGENTS.md, section 2).
+    /// `reboot-to` stops no unit (Omamobile's AGENTS.md, section 2).
     pub const RESTART: &str = "systemctl stop omamobile-modem >/dev/null 2>&1; (sleep 1; reboot-to omamobile) >/dev/null 2>&1 &";
 }
 
@@ -747,7 +747,7 @@ impl After {
                 );
                 s.body = vec![
                     format!(
-                        "Omarchy Mobile {} was written to a {name} from this computer ({}), and the steps after the write did not all run: {}.",
+                        "Omamobile {} was written to a {name} from this computer ({}), and the steps after the write did not all run: {}.",
                         self.record.release().unwrap_or("of another release"),
                         self.record.started(),
                         self.left().join(", ")
@@ -767,7 +767,7 @@ impl After {
                 );
                 s.body = vec![
                     format!(
-                        "Omarchy Mobile {} was written to a {name} from this computer ({}), and the steps after the write did not all run: {}.",
+                        "Omamobile {} was written to a {name} from this computer ({}), and the steps after the write did not all run: {}.",
                         self.record.release().unwrap_or("of another release"),
                         self.record.started(),
                         self.left().join(", ")
@@ -820,7 +820,7 @@ impl After {
             Step::FirstStart => {
                 let mut s = blank("first-start", "The phone's first start");
                 s.body = vec![
-                    "The phone is starting Omarchy Mobile for the first time. It makes the system fill the phone's storage and sets up your account, and this computer's SSH key, from your answers, which takes a few minutes. Leave the phone connected and alone.".into(),
+                    "The phone is starting Omamobile for the first time. It makes the system fill the phone's storage and sets up your account, and this computer's SSH key, from your answers, which takes a few minutes. Leave the phone connected and alone.".into(),
                     format!(
                         "The installer waits for it over the USB connection, for up to {}.",
                         minutes(self.seams.waits.first_start)
@@ -907,7 +907,7 @@ impl After {
                 s.action = "none";
                 s.body = body.clone();
                 s.footer = vec![
-                    "Omarchy Mobile is written to the phone, and what the setup has done so far stays done. Starting the installer again goes on from here.".into(),
+                    "Omamobile is written to the phone, and what the setup has done so far stays done. Starting the installer again goes on from here.".into(),
                 ];
                 s
             }
@@ -1043,7 +1043,7 @@ impl After {
                 title: "The phone doesn't tell its serial number".into(),
                 body: vec![
                     "The phone that answers over the USB cable doesn't tell its serial number, so the installer can't be sure it is the phone it wrote, and it won't back up, change or restart a phone it can't be sure of. Nothing was read from it but that.".into(),
-                    "Please open an issue: https://github.com/derekross/omarchy-mobile/issues".into(),
+                    "Please open an issue: https://github.com/derekross/omamobile/issues".into(),
                 ],
                 retry: Retry::StopsAgain,
             };
@@ -1054,7 +1054,7 @@ impl After {
                 title: "Another phone answers over the USB cable".into(),
                 body: vec![
                     "The phone that answers over the USB cable is not the phone this install wrote. It was asked which phone it is, and nothing else: nothing was copied from it, put on it or restarted.".into(),
-                    format!("Unplug every other phone that runs Omarchy Mobile, connect the {} this install is for, and start the installer again.", self.device_name),
+                    format!("Unplug every other phone that runs Omamobile, connect the {} this install is for, and start the installer again.", self.device_name),
                 ],
                 retry: Retry::AfterFix,
             };

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// omainstall — guides a person through installing Omarchy Mobile on a phone
+// omainstall — guides a person through installing Omamobile on a phone
 // plugged into this computer. A front end: the installer's core decides every
 // step and every sentence, through its command-line tool (docs/APP.md).
 

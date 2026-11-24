@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# Stage L3 of the install link (Omarchy Mobile's INSTALL-LINK-PLAN §11.1,
+# Stage L3 of the install link (Omamobile's INSTALL-LINK-PLAN §11.1,
 # docs/LINKD.md §5): omamobile-linkd on real FunctionFS over the kernel's
 # virtual USB controller, dummy_hcd, on this computer. The one part that
 # needs root.
@@ -430,7 +430,7 @@ for speed in $speeds; do
   put 0x1d6b "$g/idVendor"; put 0x0104 "$g/idProduct"; put 0x0100 "$g/bcdDevice"; put 0x0200 "$g/bcdUSB"
   put "$max" "$g/max_speed"
   run mkdir "$g/strings/0x409"
-  put "Omarchy Mobile L3 test" "$g/strings/0x409/manufacturer"
+  put "Omamobile L3 test" "$g/strings/0x409/manufacturer"
   put "L3 test gadget" "$g/strings/0x409/product"
   put "l3-test" "$g/strings/0x409/serialnumber"
   run mkdir "$g/configs/c.1"

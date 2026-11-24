@@ -5,7 +5,7 @@
   "title": "The phone's two bootloader copies differ",
   "notice": null,
   "body": [
-    "The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omarchy Mobile starts from slot B, so both have to be the same version, and they are not (A: fake-1.0, B: fake-0.9).",
+    "The phone keeps two copies of its system (slot A and slot B), each with its own bootloader. Omamobile starts from slot B, so both have to be the same version, and they are not (A: fake-1.0, B: fake-0.9).",
     "With different versions the phone may not start from slot B. Google's own tools put the same version on both: the install guide says how."
   ],
   "quote": null,

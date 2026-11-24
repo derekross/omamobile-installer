@@ -87,7 +87,7 @@ fn a_write_goes_on_through_the_link_to_a_phone_that_is_ready() {
     let t = titles(&out);
     let from = t
         .iter()
-        .position(|t| *t == "Omarchy Mobile is written, and the phone is restarting")
+        .position(|t| *t == "Omamobile is written, and the phone is restarting")
         .expect("the write ran through");
     assert_eq!(
         &t[from + 1..],

@@ -16,12 +16,12 @@
 //!   -> activate_and_reboot
 //! ```
 //!
-//! That is the order of Omarchy Mobile's `tools/install-phone`: slot B's
+//! That is the order of Omamobile's `tools/install-phone`: slot B's
 //! boot images in the descriptor's order, `userdata`, `set_active:b` (what
 //! `fastboot --set-active=b` sends), `reboot`. Nothing else is done about
 //! the slots: no other slot is made active, and no slot is marked.
 //!
-//! A format-2 release (the slot the phone runs from, Omarchy Mobile's
+//! A format-2 release (the slot the phone runs from, Omamobile's
 //! ACTIVE-SLOT-PLAN) is the same sequence on another slot and with one
 //! command fewer: the boot images of the slot `current-slot` names at
 //! `connect` (one the release accepts), read again before the first write
@@ -334,7 +334,7 @@ pub struct PhoneReport {
 /// of the spellings a bootloader may use.
 ///
 /// A line with an empty value is a slot the phone did not report, as in
-/// Omarchy Mobile's `tools/install-phone` (`[[ -n $bl_a && -n $bl_b ]]`):
+/// Omamobile's `tools/install-phone` (`[[ -n $bl_a && -n $bl_b ]]`):
 /// two empty answers are not "both reported and equal". This is the one
 /// place a per-slot version is read, for the flow's judge ([`probe`]) and
 /// for every session (`connect`).
@@ -685,7 +685,7 @@ fn parse_size(text: &str) -> Option<u64> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct PhoneOptions {
-    /// Slot B is the current slot and holds Omarchy Mobile. Without it a
+    /// Slot B is the current slot and holds Omamobile. Without it a
     /// phone running from slot B is refused: stock Android runs there after
     /// a system update. With it, on a phone that runs from slot B and
     /// reports one bootloader copy's version only, that version is slot
@@ -1153,7 +1153,7 @@ impl<T: Transport> Session<T> {
             _ => return Err(Error::Phone(format!("the phone only reports slot {current_slot}'s bootloader ({bootloader}); the other slot must be checked and confirmed"))),
         }
         if current_slot == "b" && !options.reinstall {
-            return Err(Error::Phone("the phone runs from slot b. If stock Android is there, installing would overwrite it; if it is Omarchy Mobile, say so (reinstall)".into()));
+            return Err(Error::Phone("the phone runs from slot b. If stock Android is there, installing would overwrite it; if it is Omamobile, say so (reinstall)".into()));
         }
         Ok(())
     }

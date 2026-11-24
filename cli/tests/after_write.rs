@@ -874,9 +874,7 @@ fn after_a_write_on_the_running_slot_the_same_steps_follow_and_the_slot_is_recor
     let installed = tool.install(&release);
     assert_eq!(installed.state(), "installed", "{}", installed.text());
     assert!(
-        installed
-            .text()
-            .contains("starts Omarchy Mobile from slot a"),
+        installed.text().contains("starts Omamobile from slot a"),
         "{}",
         installed.text()
     );

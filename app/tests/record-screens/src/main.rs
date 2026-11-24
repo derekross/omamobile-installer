@@ -177,7 +177,7 @@ fn main() {
 
     // A phone that runs from slot B, in a front end that asks what slot B
     // holds (the app's): the question, the stop for each answer that is not
-    // Omarchy Mobile, and a reinstall's dry run on a phone that tells one
+    // Omamobile, and a reinstall's dry run on a phone that tells one
     // bootloader copy's version (the Pixel 7 Pro's)
     let asking = || FlowOptions {
         asks_what_slot_b_holds: true,

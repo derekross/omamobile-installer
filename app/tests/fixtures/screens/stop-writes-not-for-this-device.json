@@ -7,7 +7,7 @@
   "body": [
     "This release is for the Pixel 7 Pro (panther). This version of the installer writes only to: cheetah.",
     "An install ends by making slot B the phone's active slot. What that costs, and what the phone falls back to when a start fails, differ from model to model, and for this model they have not been worked into this installer.",
-    "A dry run works for this phone. To install, use the installer that comes with the release (https://omamobile.org/download), or ask at https://github.com/derekross/omarchy-mobile/issues"
+    "A dry run works for this phone. To install, use the installer that comes with the release (https://omamobile.org/download), or ask at https://github.com/derekross/omamobile/issues"
   ],
   "quote": null,
   "steps": [],

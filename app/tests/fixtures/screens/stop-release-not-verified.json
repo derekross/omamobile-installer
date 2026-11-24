@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "The release's files did not pass their checks, so nothing of them is used (checksum: manifest.json doesn't match SHA256SUMS).",
-    "Fetch the release again from https://omamobile.org/download. If it fails the same way, the files are not the ones Omarchy Mobile signed: don't install them, and tell us at https://github.com/derekross/omarchy-mobile/issues"
+    "Fetch the release again from https://omamobile.org/download. If it fails the same way, the files are not the ones Omamobile signed: don't install them, and tell us at https://github.com/derekross/omamobile/issues"
   ],
   "quote": null,
   "steps": [],

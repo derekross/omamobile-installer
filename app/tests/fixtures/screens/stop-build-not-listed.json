@@ -8,7 +8,7 @@
     "No build in the release's list of Google's builds has both this phone's bootloader (fake-7.7) and its baseband (fake-radio-7.7). The installer uses a build only when both match and the release was tested with it; there is no nearest build.",
     "If Android offers an update, install it (Settings > System > System update) and start the installer again.",
     "After an Android update, Android runs from slot B and the two bootloader copies can differ; the installer then stops for that, and the install guide has the way to put Android back on slot A.",
-    "If Android is up to date, its build is newer than this release knows. Open an issue so it can be added: https://github.com/derekross/omarchy-mobile/issues"
+    "If Android is up to date, its build is newer than this release knows. Open an issue so it can be added: https://github.com/derekross/omamobile/issues"
   ],
   "quote": null,
   "steps": [],

@@ -2,7 +2,7 @@
 //! The owner's answers in the root image's placeholders (docs/DESIGN.md
 //! §12, the decision of 2026-11-13), against the fake phone. No USB.
 //!
-//! The first test makes a small real ext4 image the way Omarchy Mobile's
+//! The first test makes a small real ext4 image the way Omamobile's
 //! `rootfs/build-inside` makes the root image (`mkfs.ext4 -d`, 4096-byte
 //! blocks, the two placeholder files), installs it through the flow, and
 //! reads what the fake phone holds with e2fsprogs: `e2fsck -fn` must find
@@ -414,7 +414,7 @@ fn the_placeholders_hold_the_answers_padded_to_the_block() {
     }
     let conf = String::from_utf8(blocks[1].2.clone()).unwrap();
     let (text, padding) = conf.split_at(conf.find("\n#").unwrap() + 1);
-    assert!(text.starts_with("# Written by the Omarchy Mobile installer"));
+    assert!(text.starts_with("# Written by the Omamobile installer"));
     assert!(text.ends_with("WIFI_PSK=not-a-real-passphrase\n"), "{text}");
     assert!(padding.starts_with('#') && padding[1..padding.len() - 1].bytes().all(|b| b == b' '));
     assert_eq!(answers.auto_write(), Some(true));
@@ -557,7 +557,7 @@ fn the_longest_answers_and_key_fit_the_block_and_a_byte_more_is_refused() {
     let key = format!("ssh-ed25519 AAAA {}", "c".repeat(SSH_KEY_MAX - 17));
     assert_eq!(key.len(), SSH_KEY_MAX);
     // docs/DESIGN.md §12 gives the number
-    assert_eq!(SSH_KEY_MAX, 3539);
+    assert_eq!(SSH_KEY_MAX, 3544);
     // 16 characters of salt, the longest
     let salt = "abcdefgh12345678";
     let answers = root_answers(&release, &longest, Some(&key), salt).unwrap();

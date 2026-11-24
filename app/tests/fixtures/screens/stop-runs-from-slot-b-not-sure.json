@@ -6,7 +6,7 @@
   "notice": null,
   "body": [
     "The installer goes on only once you know what slot B holds: if it is Android, an install would overwrite the Android this phone uses.",
-    "Start the phone from its Fastboot Mode screen (Start) and see what starts: Omarchy Mobile or Android. Then bring it back to Fastboot Mode (with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears) and start the installer again.",
+    "Start the phone from its Fastboot Mode screen (Start) and see what starts: Omamobile or Android. Then bring it back to Fastboot Mode (with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears) and start the installer again.",
     "That restart also matters if an installer made slot B active and the phone has not started since: until it restarts, the phone may still be running the other copy's bootloader, and the version it tells is then that copy's."
   ],
   "quote": null,

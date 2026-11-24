@@ -65,7 +65,7 @@ async function run() {
     ["SHA256SUMS", "SHA256SUMS.sig", "omamobile.gpg", "manifest.json", "MANIFEST", "device.conf"].map(async (n) => new File([await (await fetch(`release/${n}`)).arrayBuffer()], n)),
   );
   await pick("bundle-files", published);
-  check("the page takes a saved release's files in place of the release server's", !!page.flow && $("release-from").textContent.startsWith("From this computer: Omarchy Mobile 2026.11.08"), $("release-from").textContent);
+  check("the page takes a saved release's files in place of the release server's", !!page.flow && $("release-from").textContent.startsWith("From this computer: Omamobile 2026.11.08"), $("release-from").textContent);
   const fetched = async (name) => new Uint8Array(await (await fetch(`test-release/${name}`)).arrayBuffer());
   const releaseFiles = async () => {
     const release = JSON.parse(page.flow.release());

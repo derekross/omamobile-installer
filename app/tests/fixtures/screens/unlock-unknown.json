@@ -3,7 +3,7 @@
   "stop": null,
   "retry": null,
   "title": "Unlock the bootloader",
-  "notice": "This version of the installer cannot install Omarchy Mobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.",
+  "notice": "This version of the installer cannot install Omamobile yet. It only checks the phone and lists what an install would write. Unlocking the bootloader erases the phone, and there is no reason to unlock it for this version: do not unlock the phone for it.",
   "body": [
     "The Pixel 7 Pro is in Fastboot Mode, and its bootloader is still locked.",
     "The installer has checked what it can before you erase anything: this is the right model, it runs from slot A or is a reinstall, its two bootloader copies match, and this release was tested with its Android build.",
@@ -13,7 +13,7 @@
   "quote": null,
   "steps": [
     {
-      "text": "If \"OEM unlocking\" is not switched on yet: press Power to start Android. In Settings > About phone, tap \"Build number\" seven times. Then in Settings > System > Developer options, switch on \"OEM unlocking\". If it is greyed out, connect the phone to the internet once (it stays grey until then after a reset); if it is still grey, the phone is most likely locked to its carrier and can't run Omarchy Mobile. Then put the phone back in Fastboot Mode: with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears.",
+      "text": "If \"OEM unlocking\" is not switched on yet: press Power to start Android. In Settings > About phone, tap \"Build number\" seven times. Then in Settings > System > Developer options, switch on \"OEM unlocking\". If it is greyed out, connect the phone to the internet once (it stays grey until then after a reset); if it is still grey, the phone is most likely locked to its carrier and can't run Omamobile. Then put the phone back in Fastboot Mode: with the phone off, hold Volume Down, then also hold Power, until Fastboot Mode appears.",
       "command": null
     },
     {

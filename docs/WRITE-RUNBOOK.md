@@ -2,7 +2,7 @@
 
 Status: **not run.** Written offline, with no phone. Nothing in this file has been tried on hardware. Results go in the last section, with the date and the installer's commit.
 
-This is the first attended run of `omamobile-install install --write` (DESIGN §11) on the maintainer's own Pixel 7 Pro: a test phone that may be erased, that runs a working Omarchy Mobile install from slot B today, and whose radio backup exists. The maintainer runs every step, or approves it, at the keyboard. Read-only steps come first; there is one step that writes.
+This is the first attended run of `omamobile-install install --write` (DESIGN §11) on the maintainer's own Pixel 7 Pro: a test phone that may be erased, that runs a working Omamobile install from slot B today, and whose radio backup exists. The maintainer runs every step, or approves it, at the keyboard. Read-only steps come first; there is one step that writes.
 
 No identifier goes into this file or into anything committed: no serial number, no IMEI, no `getvar all` output. The placeholders:
 
@@ -12,17 +12,17 @@ No identifier goes into this file or into anything committed: no serial number, 
 | `<RELEASE_DIR>` | a downloaded, signed release for `cheetah`, with its `images/` directory and its root image (`.img.zst`) beside it or in it |
 | `<FACTORY_ZIP>` | Google's factory image for the phone's build, as `tools/install-guided` keeps it in `~/.cache/omamobile-install/factory/` |
 | `<BOOTLOADER>` | the phone's bootloader version, as read from **both** of its slots (see "The statement about slot A's bootloader") |
-| `<NV_BACKUP_DIR>` | the radio backup made with Omarchy Mobile's `tools/nv-backup`, outside every repository |
-| `<OMARCHY_MOBILE>` | the omarchy-mobile checkout |
+| `<NV_BACKUP_DIR>` | the radio backup made with Omamobile's `tools/nv-backup`, outside every repository |
+| `<OMAMOBILE>` | the omamobile checkout |
 
 ## What this version does not do, and what that means for the run
 
-- **The release must keep places for the answers** (DESIGN §12, decided on 2026-11-13): its `manifest.json` names `root_image.placeholders`, which Omarchy Mobile's release images carry from the change that added them. The published releases before it have none, and `install --write` stops for such a release at its start (`no-place-for-answers`), before it asks a phone anything. So this run waits for the first signed release built with them. The phone the write leaves then sets up an account from the answers given in step 5 (made-up ones) at its first start.
+- **The release must keep places for the answers** (DESIGN §12, decided on 2026-11-13): its `manifest.json` names `root_image.placeholders`, which Omamobile's release images carry from the change that added them. The published releases before it have none, and `install --write` stops for such a release at its start (`no-place-for-answers`), before it asks a phone anything. So this run waits for the first signed release built with them. The phone the write leaves then sets up an account from the answers given in step 5 (made-up ones) at its first start.
 - **No SSH key is in slot B's ramdisk or in the answers.** The terminal's `install --write` asks for none (the desktop app's run gives this computer's, app/docs/STATUS.md §7). So there is **no SSH after the write**: `tools/phone-ssh`, `tools/phone-smoke` and `tools/nv-backup` cannot reach the phone the installer leaves. Everything this run learns after the write is read from the installer's own output, from fastboot `getvar`, and from the screen.
 - **Nothing after the restart:** no radio backup, none of Google's files, no check.
 - **The installer restarts the phone itself,** straight after `set_active:b`. There is no pause between the two, so there is no moment to read `getvar` between them. Step 6 catches the phone in Fastboot Mode on its way up instead.
 
-So the session does not end with a phone to use. **It ends by installing again with `tools/install-guided --start-over` from the omarchy-mobile checkout** (step 8), which is the installer that did a real install on this phone. Without `--start-over` that tool would find its record of the earlier install and write nothing.
+So the session does not end with a phone to use. **It ends by installing again with `tools/install-guided --start-over` from the omamobile checkout** (step 8), which is the installer that did a real install on this phone. Without `--start-over` that tool would find its record of the earlier install and write nothing.
 
 ## What could not be verified without a real phone, and the step that answers each
 
@@ -37,7 +37,7 @@ So the session does not end with a phone to use. **It ends by installing again w
 | **What `current-slot` reads right after `set_active:b`** | **not by this run as written.** The phone already runs from slot B (a reinstall), so `current-slot` reads `b` before and after. Step 6 records it all the same. A real answer needs a phone whose active slot is A at the write: see "Not answered by this run" |
 | What the bootloader's slot marks read after a flash of slot B and `set_active:b` (`slot-successful:b`, `slot-retry-count:b`, `slot-unbootable:b`) | step 2 (before) and step 6 (after) |
 | What the phone shows at its first start with no `firstboot.conf` | step 7 |
-| Whether `reboot` is answered before the phone drops off the bus (the tool needs the `OKAY` to say "installed") | step 5: the last screen is "Omarchy Mobile is written, and the phone is restarting", or the stop for `SlotSet` ("restart it from its Fastboot Mode screen") |
+| Whether `reboot` is answered before the phone drops off the bus (the tool needs the `OKAY` to say "installed") | step 5: the last screen is "Omamobile is written, and the phone is restarting", or the stop for `SlotSet` ("restart it from its Fastboot Mode screen") |
 
 ## Before anything
 
@@ -52,7 +52,7 @@ So the session does not end with a phone to use. **It ends by installing again w
   ```
 
   Pass: every line `ok`. Record `git rev-parse --short HEAD`.
-- `<OMARCHY_MOBILE>` is at a commit whose `tools/install-guided` installed this phone, and `<FACTORY_ZIP>` and `<NV_BACKUP_DIR>` are where that run left them.
+- `<OMAMOBILE>` is at a commit whose `tools/install-guided` installed this phone, and `<FACTORY_ZIP>` and `<NV_BACKUP_DIR>` are where that run left them.
 
 ### The statement about slot A's bootloader
 
@@ -64,15 +64,15 @@ The installer cannot check the statement. `<BOOTLOADER>` here is therefore a ver
 
 Each step: the command, what passes, when to stop, the way back, the risk.
 
-### 0. The radio backup still matches (read-only, the phone running Omarchy Mobile)
+### 0. The radio backup still matches (read-only, the phone running Omamobile)
 
 ```sh
-cd <OMARCHY_MOBILE>
+cd <OMAMOBILE>
 tools/nv-backup --check <NV_BACKUP_DIR>
 ```
 
 - **Pass:** every partition's checksum matches the backup.
-- **Stop:** any mismatch, or no backup. Do not go on to a write with a backup that does not match the phone (omarchy-mobile AGENTS.md §1): find out what changed first.
+- **Stop:** any mismatch, or no backup. Do not go on to a write with a backup that does not match the phone (omamobile AGENTS.md §1): find out what changed first.
 - **Rollback:** none needed (reads over SSH; the partitions are read-only).
 - **Risk:** none.
 
@@ -92,10 +92,10 @@ target/release/omamobile-install verify <RELEASE_DIR>
 
 ### 2. The phone in Fastboot Mode, and its state before (read-only)
 
-Bring the phone to Fastboot Mode the way a reinstall does. With Omarchy Mobile running, stop the modem first (omarchy-mobile AGENTS.md §2), then restart into the bootloader, or use the keys (Volume Down + Power, held about 20 s):
+Bring the phone to Fastboot Mode the way a reinstall does. With Omamobile running, stop the modem first (omamobile AGENTS.md §2), then restart into the bootloader, or use the keys (Volume Down + Power, held about 20 s):
 
 ```sh
-cd <OMARCHY_MOBILE>
+cd <OMAMOBILE>
 tools/phone-ssh 'systemctl stop omamobile-modem'
 bin/omamobile fastboot
 ```
@@ -114,7 +114,7 @@ target/release/omamobile-install devices | sed -E 's/serial .*/serial <SERIAL>/'
 
 - **Pass:** one phone; `product: cheetah`; `unlocked: yes`; `current-slot: b`; `version-bootloader` equals `<BOOTLOADER>`; the installer's `devices` lists one phone in fastboot mode.
 - **Stop:** more than one phone; `current-slot: a` (this is then not the reinstall this runbook describes: stop and decide again); `version-bootloader` is not `<BOOTLOADER>`; `unlocked: no`.
-- **Rollback:** none needed. To leave: `fastboot -s "$serial" reboot` starts Omarchy Mobile again.
+- **Rollback:** none needed. To leave: `fastboot -s "$serial" reboot` starts Omamobile again.
 - **Risk:** none (`getvar` reads). Write the values down, without the serial: step 6 compares against them.
 
 ### 3. The dry run against the real phone (read-only)
@@ -160,7 +160,7 @@ awk '$1 > max { max = $1 } END { print "longest wait between two outputs:", max,
 
 It runs step 3 again first, then shows **"This is what the installer will write"**: each partition with the image's size and the partition's size on this phone, `set_active:b`, `reboot`, what is erased, the notice about the bootloader statement, and that the phone sets up the account from the answers at its first start. Read it. Then type `cheetah`.
 
-- **Expect, after the codename:** "Writing to the phone"; a `download:`/`flash:` pair printed for each of `boot_b`, `init_boot_b`, `vendor_boot_b`, `vendor_kernel_boot_b`, `dtbo_b`; then a line for each piece of `userdata`, `flash:userdata (piece 1: B blocks, K KiB written on the phone, S bytes sent, answered in T s)`, up to the N of step 3 (the dry run cut the same pieces); then two lines that begin `userdata, the piece that covered the most blocks:` and `userdata, the flash the phone took longest over:`; then `set_active:b`; then `reboot`; then **"Omarchy Mobile is written, and the phone is restarting"**.
+- **Expect, after the codename:** "Writing to the phone"; a `download:`/`flash:` pair printed for each of `boot_b`, `init_boot_b`, `vendor_boot_b`, `vendor_kernel_boot_b`, `dtbo_b`; then a line for each piece of `userdata`, `flash:userdata (piece 1: B blocks, K KiB written on the phone, S bytes sent, answered in T s)`, up to the N of step 3 (the dry run cut the same pieces); then two lines that begin `userdata, the piece that covered the most blocks:` and `userdata, the flash the phone took longest over:`; then `set_active:b`; then `reboot`; then **"Omamobile is written, and the phone is restarting"**.
 - **Pass:** exit status 0 and that title; no line names another partition; no piece covers more than 65536 blocks; no flash answered anywhere near 300 s. **Record the two `userdata,` lines whole**: they answer the timing question (the most blocks one flash covered, and how long the phone took; the longest any flash took). From them, the phone's write speed: KiB written divided by seconds, to set beside the 874 KiB/s the bound assumes at least. `write.timing` is the cross-check, and covers what those lines do not (the boot images, `set_active:b`): its longest wait also includes the time the root image takes to decompress and the time spent reading the confirmation.
 - **Stop:** the confirmation lists anything but the six partitions: type nothing and press Ctrl-C (nothing was written). After the codename: any stop screen. It says how far the phone confirmed the writes ("The install stopped partway", with how many boot images, whether `userdata` was begun, whether slot B was made active). Leave the phone in Fastboot Mode, send it nothing else, copy the stop's words into the results, and go to step 8: `tools/install-guided` writes every partition again whole.
 - **Rollback:** step 8. Slot A is not written by any step here.
@@ -168,7 +168,7 @@ It runs step 3 again first, then shows **"This is what the installer will write"
 
 ### 6. The slot state after the write (read-only)
 
-As `reboot` is printed, **hold Volume Down** until "Fastboot Mode" shows. If the phone starts Omarchy Mobile instead, go to step 7 first and come back here with the keys (Volume Down + Power, about 20 s).
+As `reboot` is printed, **hold Volume Down** until "Fastboot Mode" shows. If the phone starts Omamobile instead, go to step 7 first and come back here with the keys (Volume Down + Power, about 20 s).
 
 ```sh
 for v in current-slot slot-successful:b slot-unbootable:b slot-retry-count:b \
@@ -184,13 +184,13 @@ done
 
 ### 7. What the phone shows (no command)
 
-**Keep the cable in, to a computer that is awake, from the restart on.** Slot B's initramfs has a USB safety net (omarchy-mobile `initramfs/init`, "Self-recovery for bring-up"): if no USB host has configured the phone's USB gadget 45 s after it starts, it prints why on the screen, waits 20 s more (and for the root file system to finish growing), and panics on purpose. That is about 65 s after the start; the panic restarts the phone, and each such start spends one of slot B's tries. Out of tries, the bootloader starts stock Android from slot A, which rewrites the radio partitions. A cable to a charger, or to a computer that is asleep, counts as no host. If the cable does come out, put it back and count the restart in the results.
+**Keep the cable in, to a computer that is awake, from the restart on.** Slot B's initramfs has a USB safety net (omamobile `initramfs/init`, "Self-recovery for bring-up"): if no USB host has configured the phone's USB gadget 45 s after it starts, it prints why on the screen, waits 20 s more (and for the root file system to finish growing), and panics on purpose. That is about 65 s after the start; the panic restarts the phone, and each such start spends one of slot B's tries. Out of tries, the bootloader starts stock Android from slot A, which rewrites the radio partitions. A cable to a charger, or to a computer that is asleep, counts as no host. If the cable does come out, put it back and count the restart in the results.
 
 Watch the screen for five minutes. Nothing can be sent to the phone and nothing is.
 
 - **Expect (inferred from the root image's build and the first-start unit, never seen):** the boot logo; the root file system grows; `omamobile-firstboot` runs with the answers from step 5 (a few minutes); then the phone logs in to that account and locks, and the PIN from step 5 unlocks it. The phone may show up as a USB network device on the computer; SSH is refused (no key anywhere, root locked). If the screen stays on the logo or comes up with no account, record it: that is the placeholders' first test on a phone failing, and step 8 still applies.
 - **Pass, for this run's purpose:** the phone gets past the bootloader and the kernel's logo into the system written in step 5, and does not fall back to slot A. That is the evidence that the pieces of `userdata` hold a file system.
-- **Stop:** "omamobile: no USB host, crashing in 20 s" on the screen, or the phone restarting by itself about a minute after each start: the safety net above found no USB host. Check the cable and the computer before the next start; do not let it run through slot B's tries. Stock Android's recovery or its "Try again / Factory data reset" screen: slot B did not start and the bootloader fell back. **Choose neither.** Hold Volume Down + Power about 20 s for Fastboot Mode (omarchy-mobile AGENTS.md §4) and go to step 8. A stock start writes the radio partitions: take a fresh read-only `nv-backup` after step 8 and say so in the results.
+- **Stop:** "omamobile: no USB host, crashing in 20 s" on the screen, or the phone restarting by itself about a minute after each start: the safety net above found no USB host. Check the cable and the computer before the next start; do not let it run through slot B's tries. Stock Android's recovery or its "Try again / Factory data reset" screen: slot B did not start and the bootloader fell back. **Choose neither.** Hold Volume Down + Power about 20 s for Fastboot Mode (omamobile AGENTS.md §4) and go to step 8. A stock start writes the radio partitions: take a fresh read-only `nv-backup` after step 8 and say so in the results.
 - **Record:** what was on the screen at 30 s, 2 min and 5 min, in words. A photo only if it shows no network name.
 - **Rollback:** step 8.
 - **Risk:** none (watching).
@@ -200,26 +200,26 @@ Watch the screen for five minutes. Nothing can be sent to the phone and nothing 
 Volume Down + Power, about 20 s, for Fastboot Mode. Then:
 
 ```sh
-cd <OMARCHY_MOBILE>
+cd <OMAMOBILE>
 tools/install-guided --status
 tools/install-guided --start-over --dry-run --reinstall --bootloader-slots-match <BOOTLOADER>
 tools/install-guided --start-over --reinstall --bootloader-slots-match <BOOTLOADER>
 tools/install-guided --status
 ```
 
-**`--start-over` is what makes this step do anything.** This computer holds `install-guided`'s record of the install that put Omarchy Mobile on this phone, and that record says it finished. Without `--start-over`, `install-guided` reads the record, prints "This phone was installed on …" and "To install again from the start …", and exits with status 0 **without writing anything**, for `--dry-run` as well: a recovery step that reports success and leaves the phone as step 5 left it. `--start-over` deletes that record and nothing else (the `state` file and `report.json` in `~/.local/state/omamobile-install/cheetah/`). The radio backup in `<NV_BACKUP_DIR>` and the factory image in `~/.cache/omamobile-install/factory/` stay where they are: its help says so, and the code removes only those two files. It is on both commands on purpose: a dry run records nothing, so the second one finds no record and its `--start-over` does nothing.
+**`--start-over` is what makes this step do anything.** This computer holds `install-guided`'s record of the install that put Omamobile on this phone, and that record says it finished. Without `--start-over`, `install-guided` reads the record, prints "This phone was installed on …" and "To install again from the start …", and exits with status 0 **without writing anything**, for `--dry-run` as well: a recovery step that reports success and leaves the phone as step 5 left it. `--start-over` deletes that record and nothing else (the `state` file and `report.json` in `~/.local/state/omamobile-install/cheetah/`). The radio backup in `<NV_BACKUP_DIR>` and the factory image in `~/.cache/omamobile-install/factory/` stay where they are: its help says so, and the code removes only those two files. It is on both commands on purpose: a dry run records nothing, so the second one finds no record and its `--start-over` does nothing.
 
 The reinstall takes its own radio backup into a new, dated folder (`~/omamobile-backup/cheetah-radio-backup-<date>-<time>`, or under `--backup-dir`); `<NV_BACKUP_DIR>` is not written.
 
-- **Expect:** the first `--status` shows the earlier install, every step `done`. Each of the two runs then prints "The record of the earlier install is forgotten" (the first one) and goes through its steps by number: "Step 1 of 11: Checking this computer and the download" onwards. The second asks for the codename and prints "Step 5 of 11: Writing Omarchy Mobile to the phone" with `install-phone`'s own flash output under it.
+- **Expect:** the first `--status` shows the earlier install, every step `done`. Each of the two runs then prints "The record of the earlier install is forgotten" (the first one) and goes through its steps by number: "Step 1 of 11: Checking this computer and the download" onwards. The second asks for the codename and prints "Step 5 of 11: Writing Omamobile to the phone" with `install-phone`'s own flash output under it.
 - **Pass, all of:**
   - neither run printed "This phone was installed on";
   - the second run showed the write step doing the write (the codename typed, `install-phone`'s flashes of the five `_b` images and `userdata`), then its own steps to the end (the USB connection, the first start, `nv-backup`, `phone-provision`, the restart, `phone-smoke`);
-  - the last `--status` reads `started` today, "Writing Omarchy Mobile to the phone" `done`, and every later step `done`;
+  - the last `--status` reads `started` today, "Writing Omamobile to the phone" `done`, and every later step `done`;
   - the phone is the working install it was before step 5, with the account `install-guided` just asked for (the phone step 5 left had none: an account is itself the proof that this install ran);
   - `tools/nv-backup --check <NV_BACKUP_DIR>` matches, unless step 7 met a stock start.
 - **Stop:** "This phone was installed on …" (a run without `--start-over`: nothing was written; run it again with the option). Otherwise as `docs/INSTALL-GUIDED.md` says for each of its steps.
-- **Rollback:** `fastboot --set-active=a` and stock Android, as omarchy-mobile's INSTALL.md describes.
+- **Rollback:** `fastboot --set-active=a` and stock Android, as omamobile's INSTALL.md describes.
 - **Risk:** medium (it erases `userdata` again, as every install).
 
 ## Not answered by this run
@@ -232,9 +232,9 @@ The reinstall takes its own radio backup into a new, dated folder (`~/omamobile-
 
 ## A first install that measures the other slot (the reference Pixel 7 Pro)
 
-Status: **not run.** Written offline on 2026-11-14 with the measurement (DESIGN §6, "Measuring the other slot") and Omarchy Mobile's `tools/install-phone` slot check (#639, brought up to date in the shell PR of the same day). Neither has met a phone. This run is what a device's `BOOTLOADER_SLOT_PROBE=yes` waits for: the line goes into `device/cheetah/device.conf` as its own change, once this run's results are in the cheetah NOTES, and only by the maintainer's decision.
+Status: **not run.** Written offline on 2026-11-14 with the measurement (DESIGN §6, "Measuring the other slot") and Omamobile's `tools/install-phone` slot check (#639, brought up to date in the shell PR of the same day). Neither has met a phone. This run is what a device's `BOOTLOADER_SLOT_PROBE=yes` waits for: the line goes into `device/cheetah/device.conf` as its own change, once this run's results are in the cheetah NOTES, and only by the maintainer's decision.
 
-A first install starts from stock Android on slot A. The reference phone runs Omarchy Mobile from slot B, so **stock Android is put back on slot A first** (part P0), and that is a stock start, which rewrites `efs`, `persist` and `modem_userdata`: the radio backup no longer matches afterwards, and a fresh one is taken at the first Linux start after the install (P5), before anything touches the radio.
+A first install starts from stock Android on slot A. The reference phone runs Omamobile from slot B, so **stock Android is put back on slot A first** (part P0), and that is a stock start, which rewrites `efs`, `persist` and `modem_userdata`: the radio backup no longer matches afterwards, and a fresh one is taken at the first Linux start after the install (P5), before anything touches the radio.
 
 Identifiers stay out of everything committed, as in the rest of this file. Readings are taken with `fastboot getvar all 2>&1 | grep -E '^\(bootloader\) (current-slot|unlocked|version-bootloader|version-baseband|slot-)'`, which leaves the serial number out; call it **the slot reading** below.
 
@@ -243,17 +243,17 @@ Identifiers stay out of everything committed, as in the rest of this file. Readi
 | `<FACTORY_ZIP>` | Google's factory image for the build this release lists as tested, saved by the owner from Google's page. Never one older than the build on the phone (CONTRIBUTING: Pixels enforce bootloader anti-rollback) |
 | `<NV_BACKUP_DIR>` | the radio backup from before this run |
 | `<NEW_NV_BACKUP_DIR>` | an empty new directory, outside every repository, for the backup after the stock start |
-| `<RELEASE_DIR>`, `<OMARCHY_MOBILE>` | as above |
+| `<RELEASE_DIR>`, `<OMAMOBILE>` | as above |
 
 ### P0. Stock Android on slot A (the owner's own flash)
 
 | Step | Command | Expect | Stop if | Way back | Risk |
 | --- | --- | --- | --- | --- | --- |
-| P0.1 | With Omarchy Mobile running: `tools/nv-backup --check <NV_BACKUP_DIR>` | every partition matches | anything differs: find out why first (AGENTS.md section 1) | none needed | read-only |
-| P0.2 | Announce it; then `tools/phone-ssh 'systemctl stop omamobile-modem'` and the restart into the bootloader (`reboot-to bootloader`, or Volume Down + Power held about 20 s) | Fastboot Mode; the slot reading shows `current-slot:b`, unlocked, no per-slot versions. Write the slot flags down | not Fastboot Mode | Power to start Omarchy Mobile again | low |
+| P0.1 | With Omamobile running: `tools/nv-backup --check <NV_BACKUP_DIR>` | every partition matches | anything differs: find out why first (AGENTS.md section 1) | none needed | read-only |
+| P0.2 | Announce it; then `tools/phone-ssh 'systemctl stop omamobile-modem'` and the restart into the bootloader (`reboot-to bootloader`, or Volume Down + Power held about 20 s) | Fastboot Mode; the slot reading shows `current-slot:b`, unlocked, no per-slot versions. Write the slot flags down | not Fastboot Mode | Power to start Omamobile again | low |
 | P0.3 | Open `<FACTORY_ZIP>` and read its `flash-all.sh` before anything runs: which partitions it flashes, and whether its bootloader line names a slot (`--slot=other`, `--slot=all`) | the script, read; note what it does to the bootloader of each slot | it flashes something this runbook did not expect | none needed | read-only |
-| P0.4 | `fastboot --set-active=a`, then `fastboot reboot-bootloader` | Fastboot Mode again, `current-slot:a` | the phone starts a system, or does not come back: choose nothing on any screen | Volume Down + Power about 20 s; `fastboot --set-active=b` and `fastboot reboot` start Omarchy Mobile again | medium: starts slot A's bootloader |
-| P0.5 | **The owner** runs Google's `flash-all.sh` from the unpacked `<FACTORY_ZIP>`. This is the owner's own action with Google's tools: it flashes the bootloader and radio of the current slot and wipes `userdata`. No agent runs it, and nothing of Omarchy Mobile's does | the script ends with the phone restarting into Android | the script fails partway: run it again as Google's page says, by hand | Google's Android Flash Tool | high: bootloader and radio |
+| P0.4 | `fastboot --set-active=a`, then `fastboot reboot-bootloader` | Fastboot Mode again, `current-slot:a` | the phone starts a system, or does not come back: choose nothing on any screen | Volume Down + Power about 20 s; `fastboot --set-active=b` and `fastboot reboot` start Omamobile again | medium: starts slot A's bootloader |
+| P0.5 | **The owner** runs Google's `flash-all.sh` from the unpacked `<FACTORY_ZIP>`. This is the owner's own action with Google's tools: it flashes the bootloader and radio of the current slot and wipes `userdata`. No agent runs it, and nothing of Omamobile's does | the script ends with the phone restarting into Android | the script fails partway: run it again as Google's page says, by hand | Google's Android Flash Tool | high: bootloader and radio |
 | P0.6 | Let Android start once from slot A; skip its setup; no account. Then back to Fastboot Mode (`adb reboot bootloader` with USB debugging, or the buttons) | Android starts; the slot reading: `current-slot:a`, unlocked | Android asks for a factory reset or shows recovery: choose nothing, buttons to Fastboot Mode, stop | as P0.5 | a stock start: the radio backup no longer matches (P5) |
 | P0.7 | The slot reading | `current-slot:a`; no per-slot versions; `slot-unbootable:b:yes` or `slot-successful:b:no` | slot B reads `slot-successful:b:yes` with `slot-unbootable:b:no`: the installers do not measure such a slot (it looks like an installed system). Go on with P1.2 and P1.3' only, to learn what `set_active` does to the flags, and decide before going further | none needed | read-only |
 
@@ -271,9 +271,9 @@ The questions both tools rest on, answered first with Google's `fastboot`, one c
 | P1.5 | Compare P1.3's version with P1.1's | the same | they differ: no install on this phone as it is. Never flash a bootloader by hand (CONTRIBUTING §3.1); ask in an issue | none needed | none |
 | P1.6 | `fastboot reboot`; Android starts from slot A; back to Fastboot Mode; the slot reading | Android starts; whether `slot-successful:a` reads yes again, and the retry counts, written down | Android does not start, or offers recovery: choose nothing, buttons to Fastboot Mode, stop | as P0.5 | a stock start (P5 covers it) |
 
-### P2. Omarchy Mobile's `tools/install-phone`, measuring only
+### P2. Omamobile's `tools/install-phone`, measuring only
 
-`<OMARCHY_MOBILE>` at the commit of the shell PR, in repository mode, with this release's images and root image. Add `BOOTLOADER_SLOT_PROBE=yes` to `device/cheetah/device.conf` **locally, for this run only, never committed**; `git checkout device/cheetah/device.conf` after.
+`<OMAMOBILE>` at the commit of the shell PR, in repository mode, with this release's images and root image. Add `BOOTLOADER_SLOT_PROBE=yes` to `device/cheetah/device.conf` **locally, for this run only, never committed**; `git checkout device/cheetah/device.conf` after.
 
 | Step | Command | Expect | Stop if | Way back | Risk |
 | --- | --- | --- | --- | --- | --- |
@@ -294,7 +294,7 @@ This part waits for a signed release whose `device.conf` says `BOOTLOADER_SLOT_P
 
 ### P4. The install (the maintainer's go)
 
-With the phone measured, an install puts Omarchy Mobile back on slot B: `tools/install-guided --start-over` from `<OMARCHY_MOBILE>` with the local descriptor line (it asks to measure again, then writes, then does the steps after the write), or this installer's `json --write` through the app (app/docs/STATUS.md Part B2). Not the terminal's `install --write`: it puts no SSH key on the phone, so no radio backup could follow. Expect, Stop, Way back and Risk as for those runs; the measurement's stops all come before the first write.
+With the phone measured, an install puts Omamobile back on slot B: `tools/install-guided --start-over` from `<OMAMOBILE>` with the local descriptor line (it asks to measure again, then writes, then does the steps after the write), or this installer's `json --write` through the app (app/docs/STATUS.md Part B2). Not the terminal's `install --write`: it puts no SSH key on the phone, so no radio backup could follow. Expect, Stop, Way back and Risk as for those runs; the measurement's stops all come before the first write.
 
 ### P5. The radio backup after the stock start
 
@@ -310,9 +310,9 @@ In `device/cheetah/NOTES.md` (no serial), and in the results below: the date, bo
 
 ## A first install on the running slot (the reference Pixel 7 Pro, manifest format 2)
 
-Status: **not run.** Written offline on 2026-11-16 from Omarchy Mobile's ACTIVE-SLOT-PLAN §6 (approved by the maintainer on 2026-11-16), with the installer's format-2 path (DESIGN §6, "A release on the running slot", built the same day against the pretend phone only). This is the format-2 first-run runbook: it replaces GO-LIVE's run 5 (the slot probe's P0 to P5 above stay for format-1 releases only). When every step passes, the maintainer adds `INSTALL_SLOT=active` and `INSTALL_ACTIVE_SLOTS="a"` to cheetah's descriptor and notes, and the next release is format 2.
+Status: **not run.** Written offline on 2026-11-16 from Omamobile's ACTIVE-SLOT-PLAN §6 (approved by the maintainer on 2026-11-16), with the installer's format-2 path (DESIGN §6, "A release on the running slot", built the same day against the pretend phone only). This is the format-2 first-run runbook: it replaces GO-LIVE's run 5 (the slot probe's P0 to P5 above stay for format-1 releases only). When every step passes, the maintainer adds `INSTALL_SLOT=active` and `INSTALL_ACTIVE_SLOTS="a"` to cheetah's descriptor and notes, and the next release is format 2.
 
-**What it needs:** a format-2 release built with Omarchy Mobile's changes 2 (the storage guard opens the running slot; `/etc/omamobile-ufs-rw-slot` in the initramfs), 3 (`omamobile-boot-update` with `SLOT=`) and 7 (`tools/bundle-manifest` format 2), signed for the test (the descriptor line local to that build, never committed before this run passes); this installer at the commit under test, built as in "Before anything"; Google's factory image for CP2A.260705.006 (bootloader `cloudripper-17.0-15199429`, both slots' version on this phone, cheetah NOTES 2026-11-09 and 11-12) as `<FACTORY_ZIP>`; `<NV_BACKUP_DIR>`, and an empty `<NEW_NV_BACKUP_DIR>` outside every repository.
+**What it needs:** a format-2 release built with Omamobile's changes 2 (the storage guard opens the running slot; `/etc/omamobile-ufs-rw-slot` in the initramfs), 3 (`omamobile-boot-update` with `SLOT=`) and 7 (`tools/bundle-manifest` format 2), signed for the test (the descriptor line local to that build, never committed before this run passes); this installer at the commit under test, built as in "Before anything"; Google's factory image for CP2A.260705.006 (bootloader `cloudripper-17.0-15199429`, both slots' version on this phone, cheetah NOTES 2026-11-09 and 11-12) as `<FACTORY_ZIP>`; `<NV_BACKUP_DIR>`, and an empty `<NEW_NV_BACKUP_DIR>` outside every repository.
 
 **Before:** the radio-backup check passes (`tools/nv-backup --check <NV_BACKUP_DIR>`, AGENTS.md section 1); the home folder and settings are copied off the phone; every step is the maintainer's go; **the slot reading** (as above: `fastboot getvar all 2>&1 | grep -E '^\(bootloader\) (current-slot|unlocked|version-bootloader|version-baseband|slot-)'`) is recorded before and after every fastboot step. No identifier goes into a result.
 

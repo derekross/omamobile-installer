@@ -1696,7 +1696,7 @@ fn a_whole_install_as_a_transcript() {
     );
     assert_eq!(
         installed.screen["title"],
-        "Omarchy Mobile is written, and the phone is restarting"
+        "Omamobile is written, and the phone is restarting"
     );
     assert_eq!(installed.screen["retry"], Value::Null);
 
@@ -1975,7 +1975,7 @@ fn a_phone_on_slot_b_is_asked_about_and_a_reinstall_reaches_the_write() {
     assert!(asked.screen["choices"][0]["label"]
         .as_str()
         .unwrap()
-        .contains("Omarchy Mobile"));
+        .contains("Omamobile"));
     // Every other screen has no choices
     let (other, warning) = Tool::started("ready", &[]);
     assert_eq!(warning.screen["choices"], json!([]));
@@ -2000,7 +2000,7 @@ fn a_phone_on_slot_b_is_asked_about_and_a_reinstall_reaches_the_write() {
     // Another step's message is out of turn here
     let early = tool.act(json!({"type": "decline-terms"}));
     assert!(early.error().contains("the screen asks for \"slot-b\""));
-    // Omarchy Mobile: the flow goes on to Google's terms
+    // Omamobile: the flow goes on to Google's terms
     let on = tool.act(json!({"type": "slot-b", "answer": "omarchy-mobile"}));
     assert_eq!(on.state(), "google-terms");
     let image = tool.act(json!({"type": "decline-terms"}));

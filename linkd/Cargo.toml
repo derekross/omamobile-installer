@@ -1,6 +1,6 @@
 [package]
 name = "omamobile-linkd"
-description = "The install link's daemon on the phone: the shell around the protocol crate's phone machine (Omarchy Mobile's INSTALL-LINK-PLAN, stages L2 and L3: a socket pair, and FunctionFS)"
+description = "The install link's daemon on the phone: the shell around the protocol crate's phone machine (Omamobile's INSTALL-LINK-PLAN, stages L2 and L3: a socket pair, and FunctionFS)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

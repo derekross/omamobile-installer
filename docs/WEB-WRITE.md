@@ -149,7 +149,7 @@ One script, in every build (the page that ships loads it from `app.js`; it holds
 
 **Trust is the module's, as in the command-line tool.** The script finds the release and fetches bytes; the wasm module decides what they are worth, with the same code the tool runs (`core/src/bundle.rs`, rPGP, which builds for `wasm32-unknown-unknown` and was already in the module):
 
-1. **The pointer.** `releases/<codename>/latest.json` (written by omarchy-mobile's `tools/release-upload --latest`) for the phone chosen at the top of the page. It is followed only when its `format` is 1, its codename is the one asked for, its version is a calendar version, and its `base_url` is exactly the directory beside it on the same server; a pointer anywhere else is refused before anything is fetched from there. It is only a pointer: it can name a version, and the signature decides the rest.
+1. **The pointer.** `releases/<codename>/latest.json` (written by omamobile's `tools/release-upload --latest`) for the phone chosen at the top of the page. It is followed only when its `format` is 1, its codename is the one asked for, its version is a calendar version, and its `base_url` is exactly the directory beside it on the same server; a pointer anywhere else is refused before anything is fetched from there. It is only a pointer: it can name a version, and the signature decides the rest.
 2. **The small files** (`SHA256SUMS`, `SHA256SUMS.sig`, `omamobile.gpg`, `manifest.json`, `MANIFEST`, `device.conf`, and `factory-builds.json` when there is one), at most 4 MiB each. `manifest.json`'s SHA-256 is compared with the pointer's, only to say early that the two disagree.
 3. **The module's check** (`verify_release`, and the flow's own `InstallFlow.begin`): the release key's detached signature on `SHA256SUMS`, against the primary key's fingerprint built into the module (`OMAMOBILE_KEYS`, the release key `2056…4673` and the original package key), then the whole chain of DESIGN's bundle rules. The certificate itself comes from the release (`omamobile.gpg`); one with another fingerprint is ignored, so the pin is the fingerprint, as in the tool. A release that fails is the flow's `release-not-verified` stop, and no download is offered.
 4. **The large files,** on the owner's click: each boot image, then the root image, from the version directory, each checked against the signed manifest by the module (`Release.check_file` for a boot image, whole; `Release.root_check` for the root image, a piece at a time as the bytes arrive). A file that fails is deleted.
@@ -327,12 +327,12 @@ Status: **not run.** Written offline, with no phone and no real browser. Results
 
 **Before this run:** the command-line tool's first run ([WRITE-RUNBOOK.md](WRITE-RUNBOOK.md)) has been made and its results recorded. A browser must not be the first thing that sends this code's commands to a real bootloader.
 
-The phone is the maintainer's test Pixel 7 Pro, running Omarchy Mobile from slot B. The maintainer runs every step, or approves it, at the keyboard. No identifier goes into this file or anything committed: no serial number, no `getvar all` output, no screenshot of the browser's chooser.
+The phone is the maintainer's test Pixel 7 Pro, running Omamobile from slot B. The maintainer runs every step, or approves it, at the keyboard. No identifier goes into this file or anything committed: no serial number, no `getvar all` output, no screenshot of the browser's chooser.
 
 | Placeholder | What it is |
 | --- | --- |
 | `<RELEASE_DIR>` | a signed release for `cheetah` that carries `factory-builds.json`, with its `images/` and its root image |
-| `<OMARCHY_MOBILE>` | the omarchy-mobile checkout |
+| `<OMAMOBILE>` | the omamobile checkout |
 | `<NV_BACKUP_DIR>` | the radio backup, outside every repository |
 
 ### 0. Builds and checks (no phone)
@@ -353,9 +353,9 @@ Both pages take the release from the release server (the latest for the chosen p
 - **Rollback:** none needed. The copies are in directories git ignores.
 - **Risk:** none. Nothing here opens a USB device; the tests' browser has WebUSB off.
 
-### 1. The radio backup still matches (read-only, the phone running Omarchy Mobile)
+### 1. The radio backup still matches (read-only, the phone running Omamobile)
 
-As WRITE-RUNBOOK step 0: `tools/nv-backup --check <NV_BACKUP_DIR>` in `<OMARCHY_MOBILE>`.
+As WRITE-RUNBOOK step 0: `tools/nv-backup --check <NV_BACKUP_DIR>` in `<OMAMOBILE>`.
 
 - **Pass:** every checksum matches. **Stop:** any mismatch, or no backup.
 - **Rollback:** none needed. **Risk:** none.
@@ -383,13 +383,13 @@ As WRITE-RUNBOOK step 2, word for word: stop the modem, `bin/omamobile fastboot`
 
 - **Pass:** one phone; `product: cheetah`; `unlocked: yes`; `current-slot: b`. Write the values down, without the serial number.
 - **Stop:** more than one phone; anything else than those values.
-- **Rollback:** `fastboot reboot` starts Omarchy Mobile again. **Risk:** none.
+- **Rollback:** `fastboot reboot` starts Omamobile again. **Risk:** none.
 
 Close nothing and leave no `fastboot` command running: one program at a time can claim the interface.
 
 ### 4. The page that ships looks at the phone (read-only)
 
-In the tab on 8765: "I have read this. Go on"; tick "slot B already holds Omarchy Mobile (a reinstall)", which starts the flow over, so accept the warning again; "Choose the phone"; in the browser's chooser pick the one entry and "Connect".
+In the tab on 8765: "I have read this. Go on"; tick "slot B already holds Omamobile (a reinstall)", which starts the flow over, so accept the warning again; "Choose the phone"; in the browser's chooser pick the one entry and "Connect".
 
 - **Expect:** the chooser lists exactly one device. Then the stop **"The installer can't check the phone's second bootloader copy"** (`bootloader-slots-unknown`), ending "The installer only asked the phone what it is. It has written nothing to it." and "Starting the installer again as things are will stop here again."
 - **Pass:** that stop, within a few seconds. It means: the filter matched the bootloader's interface, the browser opened and claimed it, `getvar:serialno` equalled the serial number the browser reported, and every `getvar` including `getvar:all` was answered and read.
@@ -408,11 +408,11 @@ Close the tab of step 4 first. In the tab on 8766, the same clicks.
 
 Optional, and still read-only: "Start over", accept, and while the chooser is open pull the cable; the chooser empties; "Cancel" gives "no phone was chosen" under the screen. Put the cable back and look again: the same stop as before.
 
-### 6. The phone's state after, and back to Omarchy Mobile (read-only)
+### 6. The phone's state after, and back to Omamobile (read-only)
 
 The `getvar` loop of step 3 again, then `fastboot reboot`.
 
-- **Pass:** every value as in step 3; Omarchy Mobile starts from slot B. `tools/nv-backup --check <NV_BACKUP_DIR>` matches.
+- **Pass:** every value as in step 3; Omamobile starts from slot B. `tools/nv-backup --check <NV_BACKUP_DIR>` matches.
 - **Stop:** any value changed (nothing in steps 4 and 5 can change one: find out what did before anything else is run against this phone).
 - **Rollback:** none needed. **Risk:** none.
 
@@ -420,7 +420,7 @@ The `getvar` loop of step 3 again, then `fastboot reboot`.
 
 ### What stands between step 6 and step 7
 
-A decision, which is the maintainer's and is not made here, on how a Pixel 7 Pro passes `bootloader-slots-unknown` in a browser. The ways there are: the owner's statement taken by the page (which reverses "command line only"); the other slot's bootloader measured, so that no statement is needed (Omarchy Mobile's plan, D4); or a phone that reports both slots, once the write path accepts one. With none of them, the steps below cannot be reached, and a build changed locally to reach them is not this runbook.
+A decision, which is the maintainer's and is not made here, on how a Pixel 7 Pro passes `bootloader-slots-unknown` in a browser. The ways there are: the owner's statement taken by the page (which reverses "command line only"); the other slot's bootloader measured, so that no statement is needed (Omamobile's plan, D4); or a phone that reports both slots, once the write path accepts one. With none of them, the steps below cannot be reached, and a build changed locally to reach them is not this runbook.
 
 ### 7. The dry run in the browser (read-only; not reachable today)
 
@@ -438,7 +438,7 @@ Go or no-go as WRITE-RUNBOOK step 4. In addition: the computer on mains power, i
 
 Type `cheetah`, "Confirm", read the write's screen, "Write to the phone now". Do not unplug the phone, press its keys, switch tabs or lock the screen until it restarts by itself.
 
-- **Expect:** the progress line naming each boot image, then "userdata: … blocks read, N pieces written, the last flash answered in T s", then **"Omarchy Mobile is written, and the phone is restarting"**.
+- **Expect:** the progress line naming each boot image, then "userdata: … blocks read, N pieces written, the last flash answered in T s", then **"Omamobile is written, and the phone is restarting"**.
 - **Pass:** that screen. Record the number of pieces, the longest flash and the whole time, beside the tool's numbers for the same release.
 - **Stop:** any stop screen: it says how far the phone confirmed the writes. Leave the phone in Fastboot Mode, send it nothing, copy the stop's words, and go to WRITE-RUNBOOK step 8. A page that shows nothing new for more than 300 s after its last progress line, or a tab that crashed or was closed: there is no stop to read; treat `userdata` as partly written and go to WRITE-RUNBOOK step 8.
 - **Rollback:** WRITE-RUNBOOK step 8 (`tools/install-guided --start-over …`), which writes every partition again whole. Slot A is not written by any step.
@@ -450,7 +450,7 @@ WRITE-RUNBOOK steps 6, 7 and 8, unchanged: the slot state, what the phone shows 
 
 ## 9. Results
 
-**2026-11-15, installer `c4b5c9a` (installer-next), Chromium 155.0.8059.84 Arch Linux on Omarchy (Arch Linux), the Omarchy Mobile 2026.11.15 release candidate, the reference Pixel 7 Pro (reinstalled by the app's part B2 the same evening).** The page that ships, steps 0 to 6: passed. The write preview (8766) was loaded only; steps 7 to 9 wait for the maintainer's decision.
+**2026-11-15, installer `c4b5c9a` (installer-next), Chromium 155.0.8059.84 Arch Linux on Omarchy (Arch Linux), the Omamobile 2026.11.15 release candidate, the reference Pixel 7 Pro (reinstalled by the app's part B2 the same evening).** The page that ships, steps 0 to 6: passed. The write preview (8766) was loaded only; steps 7 to 9 wait for the maintainer's decision.
 
 - 0: `web/build.sh`, `web/build.sh web-write-preview`, `tools/check-shipping --built --preview`, `web/preview-test.sh`, `web/fetch-test.sh`: every line ok.
 - 1: the radio partitions had matched the reference backup in part B2's backup that evening.
