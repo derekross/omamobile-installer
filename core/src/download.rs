@@ -88,15 +88,22 @@ pub struct FetchResponse<'a> {
     pub content_range: Option<&'a str>,
 }
 
+/// Told when a `Range` was asked for and the server answered `200` with the
+/// whole file: the bytes kept earlier are dropped and the download starts
+/// again. Front ends say this to the owner (issue #8).
+pub const RANGE_IGNORED: &str = "Google's server sent the whole file instead of only the rest that was asked for. The bytes kept earlier are dropped, and the download starts from the beginning.";
+
 /// What the front end does with an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchNext {
     /// A redirect that stays on `https://dl.google.com/`: fetch this instead.
     Fetch(FetchRequest),
     /// The body follows: feed it to [`FactoryDownload::body`]. `at`: where
-    /// its first byte belongs in the file. Zero when bytes were kept and the
-    /// server sent the whole file all the same: what was kept is dropped.
-    Body { at: u64 },
+    /// its first byte belongs in the file. `restarted`: a `Range` was asked
+    /// for and the server answered `200` with the whole file, so what was
+    /// kept is dropped and the download starts from 0; front ends tell the
+    /// owner [`RANGE_IGNORED`].
+    Body { at: u64, restarted: bool },
     /// Read no body. [`crate::flow::Flow::factory_download_done`] says why.
     End,
 }
@@ -296,11 +303,13 @@ impl FactoryDownload {
                     return Ok(self.end(Ending::Mismatch(Mismatch::AnnouncedSize { got })));
                 }
                 // The whole file, whatever was asked for: what was kept is
-                // dropped, and so is its part of the hash
+                // dropped, and so is its part of the hash. Say so when a
+                // Range was asked for (issue #8).
+                let restarted = self.kept > 0;
                 self.kept = 0;
                 self.hasher = StreamHasher::new();
                 self.phase = Phase::Body;
-                Ok(FetchNext::Body { at: 0 })
+                Ok(FetchNext::Body { at: 0, restarted })
             }
             206 if self.kept > 0 => {
                 let Some((first, last, total)) = answer.content_range.and_then(content_range)
@@ -317,7 +326,10 @@ impl FactoryDownload {
                     return Ok(self.end(unavailable(Unavailable::BadAnswer)));
                 }
                 self.phase = Phase::Body;
-                Ok(FetchNext::Body { at: self.kept })
+                Ok(FetchNext::Body {
+                    at: self.kept,
+                    restarted: false,
+                })
             }
             206 => Ok(self.end(unavailable(Unavailable::BadAnswer))),
             other => Ok(self.end(unavailable(Unavailable::Status(other)))),

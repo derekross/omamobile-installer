@@ -6,7 +6,7 @@ mod support;
 use omamobile_installer_core::build_index::is_download_url;
 use omamobile_installer_core::download::{
     FactoryDownload, FetchFailure, FetchNext, FetchRequest, FetchResponse, Mismatch, Unavailable,
-    MAX_REDIRECTS,
+    MAX_REDIRECTS, RANGE_IGNORED,
 };
 use omamobile_installer_core::flow::{
     DownloadEnd, DownloadTrouble, Flow, FlowOptions, ImageSource, OwnerFileWhy, PhoneFact, Retry,
@@ -367,7 +367,10 @@ fn the_download_asks_for_the_signed_indexs_address_and_ends_with_the_checked_fil
     assert_eq!(download.name(), bundle.factory_zip_name);
     assert_eq!(
         download.response(&ok(size)).unwrap(),
-        FetchNext::Body { at: 0 }
+        FetchNext::Body {
+            at: 0,
+            restarted: false
+        }
     );
     // Progress, as bytes of the total, piece by piece
     assert_eq!(download.progress(), (0, size));
@@ -398,7 +401,10 @@ fn the_download_asks_for_the_signed_indexs_address_and_ends_with_the_checked_fil
     };
     assert_eq!(
         download.response(&unsized_answer).unwrap(),
-        FetchNext::Body { at: 0 }
+        FetchNext::Body {
+            at: 0,
+            restarted: false
+        }
     );
     assert!(feed(&mut download, zip));
     assert_eq!(
@@ -608,7 +614,10 @@ fn a_redirect_is_followed_on_dl_google_com_only_and_checked_each_time() {
     };
     assert_eq!(
         download.response(&same_host).unwrap(),
-        FetchNext::Body { at: 0 }
+        FetchNext::Body {
+            at: 0,
+            restarted: false
+        }
     );
 
     // After the fallback the owner's own file is taken, checked as ever
@@ -713,7 +722,10 @@ fn the_size_is_the_indexs_before_the_transfer_and_during_it() {
         };
         assert_eq!(
             download.response(&answer).unwrap(),
-            FetchNext::Body { at: 0 }
+            FetchNext::Body {
+                at: 0,
+                restarted: false
+            }
         );
         assert!(feed(&mut download, zip));
         assert!(!download.body(&vec![0u8; extra]));
@@ -828,7 +840,8 @@ fn interrupted(flow: &mut Flow, zip: &[u8], have: &[u8], arrive: usize) -> Vec<u
     assert_eq!(
         download.response(&answer).unwrap(),
         FetchNext::Body {
-            at: have.len() as u64
+            at: have.len() as u64,
+            restarted: false,
         }
     );
     let end = have.len() + arrive;
@@ -898,7 +911,10 @@ fn an_interrupted_download_goes_on_from_what_was_kept_and_is_hashed_from_the_fir
     assert_eq!(download.progress(), (30_000, size));
     assert_eq!(
         download.response(&rest).unwrap(),
-        FetchNext::Body { at: 30_000 }
+        FetchNext::Body {
+            at: 30_000,
+            restarted: false
+        }
     );
     assert!(download.kept(&[]).is_err(), "the kept bytes come first");
     assert!(feed(&mut download, &zip[30_000..]));
@@ -917,7 +933,10 @@ fn an_interrupted_download_goes_on_from_what_was_kept_and_is_hashed_from_the_fir
     download.kept(&spoiled).unwrap();
     assert_eq!(
         download.response(&rest).unwrap(),
-        FetchNext::Body { at: 30_000 }
+        FetchNext::Body {
+            at: 30_000,
+            restarted: false
+        }
     );
     assert!(feed(&mut download, &zip[30_000..]));
     assert_eq!(
@@ -936,13 +955,20 @@ fn an_interrupted_download_goes_on_from_what_was_kept_and_is_hashed_from_the_fir
     assert_eq!(flow.screen().state, "factory-image");
 
     // A server that sends the whole file although the rest was asked for:
-    // what was kept is dropped, and with it its part of the hash
+    // what was kept is dropped, and with it its part of the hash; the front
+    // end is told so (issue #8)
     let mut download = flow.factory_download(30_000).unwrap();
     download.kept(&spoiled).unwrap();
     assert_eq!(
         download.response(&ok(size)).unwrap(),
-        FetchNext::Body { at: 0 }
+        FetchNext::Body {
+            at: 0,
+            restarted: true
+        }
     );
+    // The words a front end is to say
+    assert!(!RANGE_IGNORED.is_empty());
+    assert!(RANGE_IGNORED.contains("starts from the beginning"));
     assert_eq!(download.progress(), (0, size));
     assert!(feed(&mut download, zip));
     assert_eq!(
@@ -1111,7 +1137,10 @@ fn another_size_said_by_the_server_does_not_delete_what_an_earlier_try_kept() {
         };
         assert_eq!(
             download.response(&rest).unwrap(),
-            FetchNext::Body { at: 20_000 }
+            FetchNext::Body {
+                at: 20_000,
+                restarted: false
+            }
         );
         assert!(feed(&mut download, &zip[20_000..]));
         assert_eq!(
@@ -1201,7 +1230,10 @@ fn a_download_that_stalls_is_an_interrupted_one_that_keeps_its_bytes_and_can_be_
     };
     assert_eq!(
         download.response(&answer).unwrap(),
-        FetchNext::Body { at: 10_000 }
+        FetchNext::Body {
+            at: 10_000,
+            restarted: false
+        }
     );
     assert!(feed(&mut download, &zip[10_000..]));
     assert_eq!(
