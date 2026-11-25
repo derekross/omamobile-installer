@@ -20,7 +20,7 @@
 //!                             [--factory-zip FILE] [--work-dir DIR] [--fake-google 127.0.0.1:PORT]
 //!                                                no phone: the same flow against a pretend phone
 //!                                                (only in a build with the `fake-phone` feature)
-//!   omamobile-install json [--release BUNDLE_DIR] [--work-dir DIR]
+//!   omamobile-install json [--release BUNDLE_DIR] [--work-dir DIR] [--proxy http://HOST:PORT]
 //!                                                USB: the same flow as JSON lines on standard input
 //!                                                and output, for the desktop app, agents and scripts
 //!                                                (json.rs, docs/APP.md)
@@ -57,7 +57,8 @@
 //! is not used.
 //!
 //! `flow` never reaches Google: its downloads go to the stand-in server
-//! named with `--fake-google`, on this computer, or nowhere.
+//! named with `--fake-google`, on this computer, or nowhere. `--proxy` is
+//! refused there: a pretend run must not reach outside this computer.
 //!
 //! Not in the usage text, and for the maintainer only: `install` and `flow`
 //! take `--maintainer-skip-bootloader-slot-check`, which lets a dry run go on
@@ -67,7 +68,7 @@
 //! the core refuses it again in a flow that writes.
 use omamobile_installer_core::bundle::{verify_release, ReleaseFiles, VerifiedRelease};
 use omamobile_installer_core::download::{
-    FactoryDownload, FetchFailure, FetchNext, FetchRequest, FetchResponse,
+    FactoryDownload, FetchFailure, FetchNext, FetchRequest, FetchResponse, RANGE_IGNORED,
 };
 use omamobile_installer_core::fastboot::{
     PhoneId, PieceReport, Session, Transport, USB_CLASS, USB_PROTOCOL, USB_SUBCLASS,
@@ -878,9 +879,10 @@ impl Fetcher {
     }
 
     /// For a pretend run, which never reaches Google: a stand-in on this
-    /// computer answers in its place, or nothing does.
+    /// computer answers in its place, or nothing does. No proxy: a pretend
+    /// run must not reach outside this computer (issue #8).
     #[cfg(feature = "fake-phone")]
-    fn pretend(fake_google: Option<&str>, proxy: Option<ureq::Proxy>) -> Res<Self> {
+    fn pretend(fake_google: Option<&str>) -> Res<Self> {
         let Some(at) = fake_google else {
             return Ok(Fetcher::Nowhere);
         };
@@ -890,7 +892,7 @@ impl Fetcher {
         if !at.ip().is_loopback() {
             return Err("--fake-google takes an address on this computer only".into());
         }
-        Ok(Fetcher::StandIn(agent(false, proxy), at))
+        Ok(Fetcher::StandIn(agent(false, None), at))
     }
 
     /// How long a body may stay silent before the try is ended.
@@ -999,7 +1001,14 @@ impl Pieces {
             Ok(Ok(bytes)) => Piece::Bytes(bytes),
             Ok(Err(e)) => Piece::Broke(e.to_string()),
             Err(RecvTimeoutError::Timeout) => Piece::Silent,
-            Err(RecvTimeoutError::Disconnected) => Piece::End,
+            // A reader that panics (or otherwise dies) drops the sender
+            // without an empty piece: that is an internal error, not the
+            // end of the body (issue #8). Size and hash checks still catch
+            // a short file if a front end treated it as End; here we say
+            // the truth instead.
+            Err(RecvTimeoutError::Disconnected) => {
+                Piece::Broke("the download's reader ended unexpectedly".into())
+            }
         }
     }
 }
@@ -1065,7 +1074,10 @@ fn fetch(
         match next {
             FetchNext::Fetch(next) => request = next,
             FetchNext::End => return Ok(()),
-            FetchNext::Body { at } => {
+            FetchNext::Body { at, restarted } => {
+                if restarted {
+                    watch.note(RANGE_IGNORED);
+                }
                 file.set_len(at).map_err(storage)?;
                 file.seek(SeekFrom::Start(at)).map_err(storage)?;
                 let idle = fetcher.body_idle();
@@ -1591,10 +1603,9 @@ fn cmd_fake(
     options: FlowOptions,
     mut factory: FactoryImage,
     fake_google: Option<&str>,
-    proxy: Option<ureq::Proxy>,
 ) -> Res<bool> {
     use fake::{FakePhone, SERIAL};
-    factory.fetcher = Fetcher::pretend(fake_google, proxy)?;
+    factory.fetcher = Fetcher::pretend(fake_google)?;
     let phone = FakePhone::scenario(scenario).ok_or_else(|| {
         format!(
             "no pretend phone '{scenario}'; there are: {}",
@@ -1704,18 +1715,11 @@ fn pretend_link_options(p: &mut omamobile_installer_core::link::pretend::Pretend
 }
 
 #[cfg(not(feature = "fake-phone"))]
-fn cmd_fake(
-    _: &Path,
-    _: &str,
-    _: FlowOptions,
-    _: FactoryImage,
-    _: Option<&str>,
-    _: Option<ureq::Proxy>,
-) -> Res<bool> {
+fn cmd_fake(_: &Path, _: &str, _: FlowOptions, _: FactoryImage, _: Option<&str>) -> Res<bool> {
     Err("this build has no pretend phone: build with --features fake-phone".into())
 }
 
-const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] | repair DIR --serial S --write | link [--work-dir DIR] [--backup-dir DIR] | flow DIR --fake-phone STATE [--write] [--repair] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] | help";
+const USAGE: &str = "usage: omamobile-install verify DIR | sparse IMG.zst OUTDIR [MAX] | devices | install DIR --serial S (--dry-run | --write) [--reinstall] [--bootloader-slots-match VERSION] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--proxy http://HOST:PORT] | repair DIR --serial S --write | link [--work-dir DIR] [--backup-dir DIR] | flow DIR --fake-phone STATE [--write] [--repair] [--reinstall] [--factory-zip FILE] [--work-dir DIR] [--backup-dir DIR] [--fake-google 127.0.0.1:PORT] | json [--release DIR] [--work-dir DIR] [--proxy http://HOST:PORT] | help";
 
 /// What `help` says about [`SLOTS_MATCH`].
 const SLOTS_MATCH_HELP: &str = "Only for a phone whose bootloader tells the version of one of its two copies (the Pixel 7 Pro): your statement that the other copy's version was read from the phone and is VERSION. The installer stops unless VERSION is the version the phone reports for the copy in use. It cannot check your statement and never switches the phone's slots to try: if the two copies differ, the phone may not start from slot B. Every screen of such a run says that it rests on this statement. Without it, such a phone stops before anything is written. A reinstall from slot B does not need it (--reinstall).";
@@ -1891,7 +1895,15 @@ fn run() -> Res<bool> {
             options.write = write;
             return match (*command, serial, fake) {
                 ("flow", None, Some(scenario)) => {
-                    cmd_fake(dir, scenario, options, factory, fake_google, proxy)
+                    // A pretend run must not reach outside this computer
+                    // (issue #8): refuse --proxy before any network call
+                    if proxy.is_some() {
+                        return Err(
+                            "--proxy is for a real download only: a pretend run never reaches outside this computer"
+                                .into(),
+                        );
+                    }
+                    cmd_fake(dir, scenario, options, factory, fake_google)
                 }
                 ("flow", ..) => {
                     Err("flow runs against a pretend phone only: --fake-phone STATE".into())
@@ -1931,6 +1943,102 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod proxy_agent_tests {
+    use super::{agent, parse_proxy};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    /// A named `--proxy` still reaches the HTTP client on a real download
+    /// path (issue #8 removed that check from pretend runs).
+    #[test]
+    fn a_named_proxy_is_used_by_the_http_client() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let log = heard.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let (mut line, mut byte) = (Vec::new(), [0u8; 1]);
+            while !line.ends_with(b"\r\n") && line.len() < 512 {
+                match stream.read(&mut byte) {
+                    Ok(1) => line.push(byte[0]),
+                    _ => break,
+                }
+            }
+            log.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&line).trim().to_string());
+            let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+        });
+        let proxy = parse_proxy(Some(&format!("http://{at}"))).unwrap();
+        let client = agent(false, Some(proxy));
+        let _ = client.get("http://127.0.0.1:9/factory.zip").call();
+        let heard = heard.lock().unwrap().clone();
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert!(
+            heard[0].contains("127.0.0.1:9"),
+            "proxy should be asked for the origin: {heard:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pieces_tests {
+    use super::{Piece, Pieces};
+    use std::io::{self, Read};
+    use std::time::Duration;
+
+    /// One piece, then a normal end of the body.
+    struct OnceThenEof(Option<&'static [u8]>);
+    impl Read for OnceThenEof {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.take() {
+                Some(bytes) => {
+                    let n = bytes.len().min(buf.len());
+                    buf[..n].copy_from_slice(&bytes[..n]);
+                    Ok(n)
+                }
+                None => Ok(0),
+            }
+        }
+    }
+
+    struct PanicRead;
+    impl Read for PanicRead {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            panic!("the tests asked the reader to panic");
+        }
+    }
+
+    #[test]
+    fn a_finished_reader_is_the_end_of_the_body() {
+        let pieces = Pieces::of(OnceThenEof(Some(b"abc")));
+        match pieces.next(Duration::from_secs(2)) {
+            Piece::Bytes(b) => assert_eq!(b, b"abc"),
+            _ => panic!("expected the bytes"),
+        }
+        assert!(matches!(pieces.next(Duration::from_secs(2)), Piece::End));
+    }
+
+    #[test]
+    fn a_reader_that_panics_is_an_internal_error_not_the_end() {
+        let pieces = Pieces::of(PanicRead);
+        match pieces.next(Duration::from_secs(2)) {
+            Piece::Broke(why) => assert!(why.contains("ended unexpectedly"), "{why}"),
+            Piece::End => panic!("a panic must not look like the end of the body"),
+            Piece::Bytes(_) => panic!("expected Broke"),
+            Piece::Silent => panic!("expected Broke"),
         }
     }
 }

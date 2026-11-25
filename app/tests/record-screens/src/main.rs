@@ -121,7 +121,7 @@ fn main() {
     let size = b.factory_zip.len() as u64;
     assert!(matches!(
         dl.response(&ok(size)).unwrap(),
-        FetchNext::Body { at: 0 }
+        FetchNext::Body { at: 0, restarted: false }
     ));
     feed(&mut dl, &b.factory_zip[..20000]);
     f.factory_download_done(dl, Some(FetchFailure::Network("connection reset".into())))

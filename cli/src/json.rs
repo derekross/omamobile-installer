@@ -203,6 +203,14 @@ impl Args {
                     .into(),
             );
         }
+        // A pretend run must not reach outside this computer (issue #8)
+        #[cfg(feature = "fake-phone")]
+        if out.fake_phone.is_some() && out.proxy.is_some() {
+            return Err(
+                "--proxy is for a real download only: a pretend run never reaches outside this computer"
+                    .into(),
+            );
+        }
         Ok(out)
     }
 }
@@ -1780,7 +1788,7 @@ pub fn run(args: &[&str]) -> ExitCode {
     if let Some(states) = args.fake_phone.clone() {
         let (phones, fetcher) = match (
             Pretend::new(&states, args.fake_unplug.clone()),
-            Fetcher::pretend(args.fake_google.as_deref(), args.proxy.clone()),
+            Fetcher::pretend(args.fake_google.as_deref()),
         ) {
             (Ok(phones), Ok(fetcher)) => (phones, fetcher),
             (Err(e), _) | (_, Err(e)) => return fatal(&e.to_string()),
@@ -1851,6 +1859,14 @@ mod tests {
         assert!(Args::parse(&["--release", "DIR", "--write"]).unwrap().write);
         assert!(Args::parse(&["--proxy", "http://127.0.0.1:8080"]).is_ok());
         assert!(Args::parse(&["--proxy", "socks5://127.0.0.1:8080"]).is_err());
+        #[cfg(feature = "fake-phone")]
+        {
+            // A pretend run must not take --proxy (issue #8)
+            let why = Args::parse(&["--fake-phone", "ready", "--proxy", "http://127.0.0.1:8080"])
+                .expect_err("proxy with pretend phone");
+            assert!(why.contains("--proxy is for a real download only"), "{why}");
+            assert!(Args::parse(&["--fake-phone", "ready"]).is_ok());
+        }
         for refused in [
             "--flash",
             "--install",

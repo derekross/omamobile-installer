@@ -449,7 +449,8 @@ fn a_download_that_broke_off_goes_on_in_a_later_run_and_in_the_same_one() {
     assert_eq!(asked[1].range.as_deref(), Some("bytes=30000-"));
     assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
 
-    // A server that sends the whole file although the rest was asked for
+    // A server that sends the whole file although the rest was asked for:
+    // the kept bytes are dropped, and the owner is told (issue #8)
     let work = self::work("resumed-whole");
     std::fs::create_dir_all(work.join("factory")).unwrap();
     std::fs::write(
@@ -463,6 +464,12 @@ fn a_download_that_broke_off_goes_on_in_a_later_run_and_in_the_same_one() {
     let (code, out, err) = flow(&work, Some(&google), &[], &typed);
     assert_eq!(code, 0, "{out}\n{err}");
     assert_eq!(google.asked()[0].range.as_deref(), Some("bytes=7000-"));
+    assert!(
+        flat(&out).contains(
+            "Google's server sent the whole file instead of only the rest that was asked for"
+        ),
+        "{out}"
+    );
     assert_eq!(std::fs::read(work.join("factory").join(ZIP)).unwrap(), file);
 
     // At the question, the owner can hand in their own file instead
@@ -738,7 +745,7 @@ impl Listening {
 }
 
 #[test]
-fn a_proxy_named_in_the_environment_is_not_used_and_one_named_with_proxy_is() {
+fn a_proxy_named_in_the_environment_is_not_used_and_proxy_is_refused_in_a_pretend_run() {
     let file = zip();
     let dir = fixture();
     let dir = dir.to_str().unwrap();
@@ -774,8 +781,10 @@ fn a_proxy_named_in_the_environment_is_not_used_and_one_named_with_proxy_is() {
         assert!(!flat(&out).contains("through the proxy"), "{out}");
     }
 
-    // Named on the command line, by the owner: used, and said
-    let work = work("proxy-named");
+    // Named on the command line with a pretend phone: refused before any
+    // network call (issue #8). The stand-in and the listening proxy hear
+    // nothing.
+    let work = work("proxy-refused-pretend");
     let body = file.clone();
     let google = StandIn::start(move |_, _| Reply::whole(&body));
     let at = google.at.to_string();
@@ -791,23 +800,42 @@ fn a_proxy_named_in_the_environment_is_not_used_and_one_named_with_proxy_is() {
         "--proxy",
         &through,
     ];
-    // The input ends where the tool asks whether to try again
     let (code, out, err) = run_with(&args, "yes\nyes\n", &[]);
     assert_eq!(code, 1, "{out}\n{err}");
-    let heard = proxy.heard();
-    assert_eq!(heard.len(), 1, "{heard:?}");
-    // The proxy is asked for the stand-in, which is itself asked nothing
-    assert!(heard[0].contains(&at), "{heard:?}");
+    assert!(err.contains("--proxy is for a real download only"), "{err}");
+    assert_eq!(proxy.heard(), Vec::<String>::new());
     assert_eq!(google.asked().len(), 0);
-    assert!(
-        flat(&out).contains("through the proxy named with --proxy"),
-        "{out}"
-    );
+    assert!(out.is_empty(), "{out}");
     // Its address is not printed back: it may hold a password
     assert!(!out.contains(&through) && !err.contains(&through));
     assert_eq!(kept(&work), []);
 
-    // Only an HTTP proxy, with a host; refused from the arguments alone
+    // install still takes a well-formed --proxy from the arguments alone
+    // (no USB is opened: it stops for --dry-run / --write first)
+    let (code, out, err) = run_with(
+        &[
+            "install",
+            dir,
+            "--serial",
+            "SERIAL",
+            "--proxy",
+            "http://127.0.0.1:9",
+        ],
+        "",
+        &[],
+    );
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(
+        err.contains("--dry-run or --write"),
+        "install should accept --proxy and stop for the missing mode: {err}"
+    );
+    assert!(
+        !err.contains("--proxy is for a real download only"),
+        "{err}"
+    );
+
+    // Only an HTTP proxy, with a host; refused from the arguments alone on
+    // install (a pretend run refuses --proxy after the value is parsed)
     for bad in [
         "",
         "proxy.example",
@@ -816,8 +844,16 @@ fn a_proxy_named_in_the_environment_is_not_used_and_one_named_with_proxy_is() {
         "http://",
     ] {
         let (code, out, err) = run_with(
-            &["flow", dir, "--fake-phone", "ready", "--proxy", bad],
-            "yes\nyes\n",
+            &[
+                "install",
+                dir,
+                "--serial",
+                "SERIAL",
+                "--dry-run",
+                "--proxy",
+                bad,
+            ],
+            "",
             &[],
         );
         assert_eq!(code, 1, "{bad}");
