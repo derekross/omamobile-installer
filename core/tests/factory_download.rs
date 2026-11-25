@@ -967,8 +967,10 @@ fn an_interrupted_download_goes_on_from_what_was_kept_and_is_hashed_from_the_fir
         }
     );
     // The words a front end is to say
-    assert!(!RANGE_IGNORED.is_empty());
-    assert!(RANGE_IGNORED.contains("starts from the beginning"));
+    assert_eq!(
+        RANGE_IGNORED,
+        "Google's server sent the whole file instead of only the rest that was asked for. The bytes kept earlier are dropped, and the download starts from the beginning."
+    );
     assert_eq!(download.progress(), (0, size));
     assert!(feed(&mut download, zip));
     assert_eq!(
